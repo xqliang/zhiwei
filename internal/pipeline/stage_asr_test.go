@@ -46,7 +46,7 @@ func TestStagesASRAndSegment(t *testing.T) {
 	sid := ids.New()
 	if err := sessions.Create(ctx, &repo.AudioSession{
 		ID: sid, Source: "web_upload", Filename: "speech.wav",
-		StoragePath: "testdata/speech.wav", Status: "processing",
+		StoragePath: "../../testdata/speech.wav", Status: "processing",
 	}); err != nil {
 		t.Fatal(err)
 	}
