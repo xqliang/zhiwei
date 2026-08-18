@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS agent_message;
+DROP TABLE IF EXISTS daily_review;
+DROP TABLE IF EXISTS todo;
+DROP TABLE IF EXISTS memory;
+DROP TABLE IF EXISTS topic;
+DROP TABLE IF EXISTS transcript_segment;
+DROP TABLE IF EXISTS transcript;
+DROP TABLE IF EXISTS pipeline_job;
+DROP TABLE IF EXISTS audio_session;
