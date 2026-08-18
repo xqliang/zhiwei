@@ -4,8 +4,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -54,5 +52,4 @@ func TestUploadAudio(t *testing.T) {
 	if !strings.Contains(resp, `"session_id"`) || !strings.Contains(resp, `"job_id"`) {
 		t.Fatalf("resp = %s", resp)
 	}
-	_ = os.ReadDir(filepath.Dir("data"))
 }
