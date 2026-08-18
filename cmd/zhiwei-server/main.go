@@ -50,6 +50,9 @@ func main() {
 
 	r := api.NewRouter()
 	api.RegisterAudio(r, sessions, jobs, cfg.DataDir)
+	api.RegisterQuery(r, &api.QueryHandler{
+		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
+	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
 	go func() {

@@ -3,6 +3,7 @@
 package ids
 
 import (
+	"fmt"
 	"strconv"
 
 	"github.com/bwmarrin/snowflake"
@@ -31,6 +32,15 @@ func New() ID {
 
 func (i ID) Int64() int64   { return int64(i) }
 func (i ID) String() string { return strconv.FormatInt(int64(i), 10) }
+
+// ParseID 从 URL 路径参数解析 ID（仅数字）。
+func ParseID(s string) (ID, error) {
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid id: %s", s)
+	}
+	return ID(v), nil
+}
 
 // MarshalJSON 序列化为 JSON 字符串，规避前端精度丢失。
 func (i ID) MarshalJSON() ([]byte, error) {
