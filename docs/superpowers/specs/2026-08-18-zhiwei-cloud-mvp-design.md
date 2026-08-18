@@ -134,6 +134,15 @@ zhiwei-glm53/
 
 ## 4. 数据模型
 
+### 4.0 ID 策略：雪花 ID
+
+所有表主键使用 **雪花 ID（Snowflake，BIGINT）**，不使用 AUTO_INCREMENT：
+
+- 应用层生成：Go 侧用成熟开源实现（如 `bwmarrin/snowflake`），服务启动时初始化一个 node，ID 生成无锁、趋势递增，天然适合「先组装完整对象再单事务提交」的 commit 阶段
+- DDL 侧 `id BIGINT PRIMARY KEY`（无 AUTO_INCREMENT），所有外键列（session_id、topic_id、source_memory_id 等）同为 BIGINT
+- **JSON 序列化为字符串**：雪花 ID 超过 JS `Number.MAX_SAFE_INTEGER`（2^53），API 响应与前端一律按 string 处理（Go 侧自定义 MarshalJSON），避免精度丢失
+- 单体单进程部署无时钟回拨/多 node 冲突问题；未来拆微服务时按服务分配 node id 即可
+
 9 张表，全部保留 `user_id`（MVP 默认 1）。DDL 细节实现时按下列字段落地：
 
 ```text
