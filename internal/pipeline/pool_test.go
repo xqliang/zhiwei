@@ -30,6 +30,7 @@ func TestPoolRunsJobToDone(t *testing.T) {
 	if err := jobs.Create(ctx, &repo.Job{SessionID: sid, Stage: "asr", Status: "pending"}); err != nil {
 		t.Fatal(err)
 	}
+	jobID := latestJobID(t, jobs, sid)
 
 	done := make(chan ids.ID, 1)
 	handlers := map[string]Handler{
@@ -40,22 +41,42 @@ func TestPoolRunsJobToDone(t *testing.T) {
 	p.OnDone(func(_ context.Context, s ids.ID) { done <- s })
 	p.Start(ctx)
 
-	select {
-	case got := <-done:
-		if got != sid {
-			t.Fatalf("done session = %d", got)
+	// 轮询本 job 的终态（其他测试可能并发写 pending job，领取顺序不保证）
+	deadline := time.Now().Add(15 * time.Second)
+	var final repo.Job
+	for {
+		if err := jobs.DB.Get(&final,
+			`SELECT * FROM pipeline_job WHERE id = ?`, jobID.Int64()); err != nil {
+			t.Fatal(err)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("10s 内未跑到 done")
+		if final.Status == "done" || final.Status == "failed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("15s 内未完成，当前状态 %s", final.Status)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	cancel()
 
+	if final.Status != "done" {
+		t.Fatalf("job status = %s, last_error = %v", final.Status, final.LastError)
+	}
+	// onDone 至少触发过一次
+	select {
+	case <-done:
+	default:
+		t.Fatal("onDone 未触发")
+	}
+}
+
+// latestJobID 取指定 session 最新一条 job 的 ID。
+func latestJobID(t *testing.T, jobs *repo.JobRepo, sid ids.ID) ids.ID {
+	t.Helper()
 	var j repo.Job
 	if err := jobs.DB.Get(&j,
 		`SELECT * FROM pipeline_job WHERE session_id = ? ORDER BY id DESC LIMIT 1`, sid.Int64()); err != nil {
 		t.Fatal(err)
 	}
-	if j.Status != "done" {
-		t.Fatalf("job status = %s", j.Status)
-	}
+	return j.ID
 }
