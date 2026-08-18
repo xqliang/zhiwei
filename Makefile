@@ -23,7 +23,7 @@ migrate-down:
 
 # 创建集成测试库并跑迁移
 init-testdb:
-	docker exec zhiwei-mysql mysql -uroot -proot -e "CREATE DATABASE IF NOT EXISTS zhiwei_test CHARACTER SET utf8mb4;"
+	docker exec zhiwei-mysql mysql -uroot -proot -e "CREATE DATABASE IF NOT EXISTS zhiwei_test CHARACTER SET utf8mb4; GRANT ALL PRIVILEGES ON zhiwei_test.* TO 'zhiwei'@'%'; FLUSH PRIVILEGES;"
 	migrate -path migrations -database "mysql://root:root@tcp(127.0.0.1:3306)/zhiwei_test" up
 
 # 集成测试：需要 docker compose 里的 MySQL 已启动并完成迁移
