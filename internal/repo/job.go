@@ -22,16 +22,16 @@ type TraceEntry struct {
 }
 
 type Job struct {
-	ID        ids.ID          `db:"id" json:"id"`
-	UserID    int64           `db:"user_id" json:"user_id"`
-	SessionID ids.ID          `db:"session_id" json:"session_id"`
-	Stage     string          `db:"stage" json:"stage"`
-	Status    string          `db:"status" json:"status"`
-	Attempt   int             `db:"attempt" json:"attempt"`
-	LastError *string         `db:"last_error" json:"last_error,omitempty"`
-	Trace     json.RawMessage `db:"trace" json:"trace,omitempty"`
-	CreatedAt time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt time.Time       `db:"updated_at" json:"updated_at"`
+	ID        ids.ID           `db:"id" json:"id"`
+	UserID    int64            `db:"user_id" json:"user_id"`
+	SessionID ids.ID           `db:"session_id" json:"session_id"`
+	Stage     string           `db:"stage" json:"stage"`
+	Status    string           `db:"status" json:"status"`
+	Attempt   int              `db:"attempt" json:"attempt"`
+	LastError *string          `db:"last_error" json:"last_error,omitempty"`
+	Trace     *json.RawMessage `db:"trace" json:"trace,omitempty"`
+	CreatedAt time.Time        `db:"created_at" json:"created_at"`
+	UpdatedAt time.Time        `db:"updated_at" json:"updated_at"`
 }
 
 type JobRepo struct{ DB *sqlx.DB }
@@ -80,9 +80,9 @@ SELECT id FROM (
 }
 
 func (r *JobRepo) Save(ctx context.Context, j *Job) error {
-	trace := "[]"
-	if len(j.Trace) > 0 {
-		trace = string(j.Trace)
+	trace := []byte("[]")
+	if j.Trace != nil && len(*j.Trace) > 0 {
+		trace = *j.Trace
 	}
 	_, err := r.DB.ExecContext(ctx, `
 UPDATE pipeline_job SET stage = ?, status = ?, attempt = ?, last_error = ?, trace = ?
