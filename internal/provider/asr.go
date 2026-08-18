@@ -155,13 +155,16 @@ func (p *StepFunASR) Transcribe(ctx context.Context, audioPath string) ([]Transc
 // speakerPrefix 匹配行首的 [说话人1] / [说话人 2] 等前缀。
 var speakerPrefix = regexp.MustCompile(`^\s*\[说话人\s*(\d+)\s*\]\s*`)
 
+// timePrefix 匹配模型偶尔输出的 [00:12] 时间码前缀，清洗掉。
+var timePrefix = regexp.MustCompile(`^\s*\[\d{1,2}:\d{2}(?::\d{2})?\]\s*`)
+
 // ParseSpeakerTranscript 把转写文本按 [说话人N] 前缀解析成片段（纯函数，可单测）。
 // 无前缀的文本归为一段、标签为空。
 func ParseSpeakerTranscript(text string) []TranscriptPiece {
 	var pieces []TranscriptPiece
 	var cur *TranscriptPiece
 	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
+		line = timePrefix.ReplaceAllString(strings.TrimSpace(line), "")
 		if line == "" {
 			continue
 		}

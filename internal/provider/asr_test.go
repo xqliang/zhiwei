@@ -34,3 +34,11 @@ func TestParseSpeakerTranscriptEmpty(t *testing.T) {
 		t.Fatalf("want empty, got %+v", got)
 	}
 }
+
+func TestParseSpeakerTranscriptStripsTimePrefix(t *testing.T) {
+	// 模型偶尔给行首加时间码，应清洗掉
+	pieces := ParseSpeakerTranscript("[00:00] 明天记得发邮件")
+	if len(pieces) != 1 || pieces[0].Text != "明天记得发邮件" {
+		t.Fatalf("pieces = %+v", pieces)
+	}
+}

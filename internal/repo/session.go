@@ -26,6 +26,9 @@ type AudioSession struct {
 type SessionRepo struct{ DB *sqlx.DB }
 
 func (r *SessionRepo) Create(ctx context.Context, s *AudioSession) error {
+	if s.UserID == 0 {
+		s.UserID = 1
+	}
 	_, err := r.DB.NamedExecContext(ctx, `
 INSERT INTO audio_session (id, user_id, source, filename, storage_path, duration_ms, mime, status)
 VALUES (:id, :user_id, :source, :filename, :storage_path, :duration_ms, :mime, :status)`, s)

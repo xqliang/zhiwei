@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>知微</title>
+<script src="/app/vendor/vue.global.prod.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: -apple-system, "PingFang SC", sans-serif; background: #f6f7f9; color: #222; }
+  .tabs { display: flex; background: #fff; border-bottom: 1px solid #e5e7eb; padding: 0 16px; }
+  .tabs button { padding: 14px 18px; border: none; background: none; font-size: 15px; cursor: pointer; color: #6b7280; }
+  .tabs button.active { color: #111; border-bottom: 2px solid #111; font-weight: 600; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 16px; }
+  .card { background: #fff; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  .muted { color: #9ca3af; font-size: 13px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; }
+  .badge.pending, .badge.running { background: #fef3c7; color: #92400e; }
+  .badge.completed, .badge.done { background: #d1fae5; color: #065f46; }
+  .badge.failed { background: #fee2e2; color: #991b1b; }
+  .seg { padding: 8px 0; border-bottom: 1px dashed #f0f0f0; }
+  .seg:last-child { border: none; }
+  .sp { font-size: 12px; color: #fff; border-radius: 6px; padding: 1px 6px; margin-right: 8px; }
+  .sp1 { background: #6366f1; } .sp2 { background: #10b981; } .sp3 { background: #f59e0b; }
+  button.primary { background: #111; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 15px; cursor: pointer; }
+  button.primary:disabled { background: #9ca3af; }
+  #drop { border: 2px dashed #d1d5db; border-radius: 12px; padding: 36px; text-align: center; color: #6b7280; margin-bottom: 12px; }
+  #drop.rec { border-color: #ef4444; color: #ef4444; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="tabs">
+    <button :class="{active: tab==='timeline'}" @click="tab='timeline'; loadSessions()">时间线</button>
+    <button :class="{active: tab==='record'}" @click="tab='record'">录音</button>
+  </div>
+
+  <!-- 时间线 -->
+  <div class="wrap" v-if="tab==='timeline'">
+    <div v-if="!sessions.length" class="card muted">还没有记录。去「录音」页上传或录一段吧。</div>
+    <div class="card" v-for="s in sessions" :key="s.id" style="cursor:pointer" @click="openSession(s.id)">
+      <div style="display:flex; justify-content:space-between; align-items:center">
+        <div>
+          <b>{{ s.filename }}</b>
+          <div class="muted">{{ fmtTime(s.created_at) }} · {{ s.source === 'web_record' ? '录音' : '上传' }}</div>
+        </div>
+        <span class="badge" :class="s.job_status || s.status">
+          {{ statusText(s.job_status, s.job_stage) }}
+        </span>
+      </div>
+    </div>
+
+    <!-- 详情 -->
+    <div v-if="detail" class="card">
+      <div style="display:flex; justify-content:space-between">
+        <b>转写详情</b>
+        <button class="muted" style="border:none;background:none;cursor:pointer" @click="detail=null">✕ 关闭</button>
+      </div>
+      <div class="muted" style="margin:6px 0">{{ detail.session.filename }}</div>
+      <div v-if="detail.job && detail.job.status==='failed'" style="margin:8px 0">
+        <span class="badge failed">处理失败</span>
+        <span class="muted">{{ detail.job.last_error }}</span>
+        <button class="primary" style="padding:4px 12px" @click="retryJob(detail.job.id)">重跑</button>
+      </div>
+      <div v-for="(sg, i) in detail.segments" :key="i" class="seg">
+        <span class="sp" :class="spClass(sg.speaker)">{{ sg.speaker }}</span>{{ sg.text }}
+      </div>
+    </div>
+  </div>
+
+  <!-- 录音 -->
+  <div class="wrap" v-if="tab==='record'">
+    <div id="drop" :class="{rec: recording}"
+         @dragover.prevent @drop.prevent="onDrop">
+      <template v-if="!recording">拖拽音频文件到此处，或点击下方按钮录音</template>
+      <template v-else>● 录音中…（{{ recSeconds }}s）</template>
+    </div>
+    <div style="display:flex; gap:12px">
+      <button class="primary" v-if="!recording" @click="startRec">开始录音</button>
+      <button class="primary" v-else @click="stopRec">停止并上传</button>
+    </div>
+    <div v-if="uploadInfo" class="card" style="margin-top:12px">
+      <div class="muted">{{ uploadInfo.filename }}</div>
+      <span class="badge" :class="uploadInfo.status">{{ uploadInfo.text }}</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const { createApp, ref, onUnmounted } = Vue;
+
+createApp({
+  setup() {
+    const tab = ref('timeline');
+    const sessions = ref([]);
+    const detail = ref(null);
+    const recording = ref(false);
+    const recSeconds = ref(0);
+    const uploadInfo = ref(null);
+    let recorder = null, recTimer = null, pollTimer = null;
+
+    async function loadSessions() {
+      const r = await fetch('/api/sessions');
+      const d = await r.json();
+      sessions.value = d.sessions || [];
+    }
+    loadSessions();
+
+    async function openSession(id) {
+      const r = await fetch('/api/sessions/' + id);
+      detail.value = await r.json();
+    }
+
+    async function retryJob(id) {
+      await fetch('/api/jobs/' + id + '/retry', { method: 'POST' });
+      await openSession(detail.value.session.id);
+    }
+
+    function statusText(status, stage) {
+      if (status === 'done' || status === 'completed') return '已完成';
+      if (status === 'failed') return '失败';
+      if (status === 'running') return '处理中 · ' + stage;
+      return '排队中';
+    }
+    function spClass(speaker) {
+      const n = (speaker || '').replace(/\D/g, '') || '1';
+      return 'sp' + Math.min(Number(n), 3);
+    }
+    function fmtTime(iso) { return new Date(iso).toLocaleString('zh-CN'); }
+
+    // ---- 录音与上传 ----
+    async function startRec() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      const chunks = [];
+      recorder.ondataavailable = e => chunks.push(e.data);
+      recorder.onstop = () => {
+        stream.getTracks().forEach(t => t.stop());
+        upload(new File(chunks, 'record-' + Date.now() + '.webm', { type: 'audio/webm' }), 'web_record');
+      };
+      recorder.start();
+      recording.value = true; recSeconds.value = 0;
+      recTimer = setInterval(() => recSeconds.value++, 1000);
+    }
+    function stopRec() {
+      recorder.stop(); recording.value = false;
+      clearInterval(recTimer);
+    }
+    function onDrop(e) {
+      const f = e.dataTransfer.files[0];
+      if (f) upload(f, 'web_upload');
+    }
+    async function upload(file, source) {
+      const fd = new FormData();
+      fd.append('file', file); fd.append('source', source);
+      uploadInfo.value = { filename: file.name, status: 'pending', text: '上传中…' };
+      const r = await fetch('/api/audio', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!r.ok) { uploadInfo.value = { filename: file.name, status: 'failed', text: d.error || '上传失败' }; return; }
+      uploadInfo.value = { filename: file.name, status: 'running', text: '已上传，处理中…', sessionId: d.session_id };
+      pollTimer = setInterval(async () => {
+        const rr = await fetch('/api/sessions/' + d.session_id);
+        const dd = await rr.json();
+        const st = dd.job ? dd.job.status : dd.session.status;
+        if (st === 'done' || st === 'completed') {
+          clearInterval(pollTimer);
+          uploadInfo.value = { filename: file.name, status: 'done', text: '处理完成 ✓' };
+          loadSessions();
+        } else if (st === 'failed') {
+          clearInterval(pollTimer);
+          uploadInfo.value = { filename: file.name, status: 'failed', text: '处理失败，可在时间线重跑' };
+        }
+      }, 2000);
+    }
+
+    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); });
+
+    return { tab, sessions, detail, recording, recSeconds, uploadInfo,
+             loadSessions, openSession, retryJob, statusText, spClass, fmtTime,
+             startRec, stopRec, onDrop };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
