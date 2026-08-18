@@ -29,3 +29,10 @@ init-testdb:
 # 集成测试：需要 docker compose 里的 MySQL 已启动并完成迁移
 test-integration: init-testdb
 	TEST_MYSQL_DSN="zhiwei:zhiwei@tcp(127.0.0.1:3306)/zhiwei_test?parseTime=true&charset=utf8mb4&multiStatements=true" go test ./...
+
+spike-llm:
+	go run ./cmd/spike/llm
+spike-embed:
+	go run ./cmd/spike/embed
+spike-asr:
+	go run ./cmd/spike/asr testdata/speech.wav
