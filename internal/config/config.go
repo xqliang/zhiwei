@@ -40,9 +40,11 @@ func Load() (*Config, error) {
 		ARKAPIKey:  key,
 		ARKBaseURL: getenv("ZW_ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
 		ASREndpoint: getenv("ZW_ASR_ENDPOINT", "wss://ark.cn-beijing.volces.com/api/v3/asr"),
-		LLMFastModel:   getenv("ZW_LLM_FAST", "doubao-seed-1.6-flash"),
-		LLMStrongModel: getenv("ZW_LLM_STRONG", "doubao-seed-1.6"),
-		EmbedModel:     getenv("ZW_EMBED_MODEL", "doubao-embedding-large"),
+		// Ark 实测（2026-08-18）：本账号仅 doubao-seed-1-6-flash-250828 可用；
+		// 强模型与 embedding 需控制台开通后用环境变量覆盖。
+		LLMFastModel:   getenv("ZW_LLM_FAST", "doubao-seed-1-6-flash-250828"),
+		LLMStrongModel: getenv("ZW_LLM_STRONG", "doubao-seed-1-6-flash-250828"),
+		EmbedModel:     getenv("ZW_EMBED_MODEL", "doubao-embedding-large-text-250515"),
 		ASRModel:       getenv("ZW_ASR_MODEL", "doubao-seed-asr-2-0"),
 	}, nil
 }
