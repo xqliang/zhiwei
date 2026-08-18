@@ -39,7 +39,7 @@ func Load() (*Config, error) {
 	return &Config{
 		Port:       getenv("ZW_PORT", "8080"),
 		DataDir:    getenv("ZW_DATA_DIR", "./data"),
-		MySQLDSN:   getenv("ZW_MYSQL_DSN", "zhiwei:zhiwei@tcp(127.0.0.1:3306)/zhiwei?parseTime=true&charset=utf8mb4"),
+		MySQLDSN:   getenv("ZW_MYSQL_DSN", "zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei?parseTime=true&charset=utf8mb4"),
 		ARKAPIKey:  key,
 		ARKBaseURL: getenv("ZW_ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
 		StepFunAPIKey: os.Getenv("STEPFUN_API_KEY"),
