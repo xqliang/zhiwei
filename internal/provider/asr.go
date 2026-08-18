@@ -45,6 +45,9 @@ const asrInstructions = `你是逐字转写引擎。只输出音频中说话内�
 
 // Transcribe 实现 ASRProvider：建会话 → 配置 → 分片喂数学频 → 收转写文本 → 解析说话人。
 func (p *StepFunASR) Transcribe(ctx context.Context, audioPath string) ([]TranscriptPiece, error) {
+	if p.APIKey == "" {
+		return nil, fmt.Errorf("asr: STEPFUN_API_KEY 未设置（检查 .env 是否已 source）")
+	}
 	audio, err := os.ReadFile(audioPath)
 	if err != nil {
 		return nil, fmt.Errorf("读取音频: %w", err)
@@ -54,9 +57,12 @@ func (p *StepFunASR) Transcribe(ctx context.Context, audioPath string) ([]Transc
 	}
 	raw := audio[44:] // 跳过 44 字节 wav 头，拿裸 pcm
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, p.Endpoint,
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, p.Endpoint,
 		map[string][]string{"Authorization": {"Bearer " + p.APIKey}})
 	if err != nil {
+		if resp != nil {
+			return nil, fmt.Errorf("asr 连接 (http %d): %w", resp.StatusCode, err)
+		}
 		return nil, fmt.Errorf("asr 连接: %w", err)
 	}
 	defer conn.Close()

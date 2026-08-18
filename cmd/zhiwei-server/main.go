@@ -24,6 +24,9 @@ func main() {
 	if err := ids.Init(1); err != nil {
 		log.Fatal(err)
 	}
+	if cfg.StepFunAPIKey == "" {
+		log.Fatal("STEPFUN_API_KEY 未设置：ASR 不可用。请先 source .env（set -a; source .env; set +a）再启动")
+	}
 	db, err := repo.NewDB(cfg.MySQLDSN)
 	if err != nil {
 		log.Fatal(err)
