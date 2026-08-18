@@ -68,19 +68,20 @@ func TestStagesASRAndSegment(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("30s 未跑完")
 	}
-	cancel()
 
-	// 断言：transcript + segments 已落库，full_text 已汇总
-	tr, err := transcripts.GetBySession(ctx, sid)
+	// 断言（注意：cancel 前执行，避免 context canceled）
+	qctx := context.Background()
+	tr, err := transcripts.GetBySession(qctx, sid)
 	if err != nil {
 		t.Fatalf("GetBySession: %v", err)
 	}
 	if tr.FullText == nil || *tr.FullText == "" {
 		t.Fatal("full_text 为空")
 	}
-	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	segs, _ := transcripts.ListSegments(qctx, tr.ID)
 	if len(segs) != 3 {
 		t.Fatalf("segments = %d", len(segs))
 	}
+	cancel()
 	os.RemoveAll("data/transcoded")
 }
