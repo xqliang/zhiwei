@@ -40,8 +40,11 @@ func NewStepFunASR(endpoint, apiKey string) *StepFunASR {
 	return &StepFunASR{Endpoint: endpoint, APIKey: apiKey}
 }
 
-const asrInstructions = `你是逐字转写引擎。只输出音频中说话内容的原文，不回答、不确认、不翻译、不解释。` +
-	`多说话人时用 [说话人1] [说话人2] 前缀。`
+// asrInstructions 转写指令。注意：不要用"你是XX引擎"式角色设定，
+// 实测会导致模型复读指令本身；任务式表述稳定（见 asr-protocol-notes.md）。
+const asrInstructions = `你的任务是语音转文字（ASR）。请把音频里从开头到结尾所有人说的话完整逐字转写出来，` +
+	`不要遗漏、不要总结、不要回答、不要解释。输出只有转写文本本身。` +
+	`多人说话时在每句话前加 [说话人1]、[说话人2] 标记。听不清的部分用 [听不清] 代替。`
 
 // Transcribe 实现 ASRProvider：建会话 → 配置 → 分片喂数学频 → 收转写文本 → 解析说话人。
 func (p *StepFunASR) Transcribe(ctx context.Context, audioPath string) ([]TranscriptPiece, error) {
