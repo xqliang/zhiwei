@@ -36,3 +36,6 @@ spike-embed:
 	go run ./cmd/spike/embed
 spike-asr:
 	go run ./cmd/spike/asr testdata/speech.wav
+
+e2e:
+	bash scripts/e2e.sh
