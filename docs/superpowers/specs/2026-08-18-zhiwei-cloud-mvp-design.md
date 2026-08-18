@@ -17,10 +17,11 @@
 音频录入（Web 录音 / 文件上传）
   → 火山 Ark ASR（doubao-seed-asr-2-0，含说话人分离）
   → Memory 抽取（LLM 结构化抽取 + 质量闸门）
+  → Topic 归类（组织层：memory 自动关联 Topic）
   → MySQL 入库 + Embedding
   → 混合检索
   → Agent 问答（带证据引用）
-  → Todo 提取 / Daily Review
+  → Todo 提取 / Daily Review（按 Topic 汇总）
 ```
 
 用户在浏览器里录一段话或上传一个音频文件，几分钟后能在时间线看到带说话人标签的转写和提取出的记忆卡片，能向知微提问并得到带引用的回答，每天晚上自动生成当日回顾。
@@ -29,7 +30,8 @@
 
 - 硬件接入（BLE、VAD、Opus 分段）
 - Flutter App、消息推送
-- Person / Topic / Project / Risk / 声纹库 / Entity Resolution
+- Person / Project / Risk / 声纹库 / Entity Resolution
+- Topic 的 Goal/Progress 百分比、生命周期状态机、自动发现主动询问、Next Action、Topic AI Review
 - Memory Consolidation、用户纠错学习、多用户认证
 - AI 漫画、Weekly Review、Personal Insight
 
@@ -39,7 +41,7 @@
 
 | 决策点 | 结论 | 理由 |
 |---|---|---|
-| 首期范围 | 云端 MVP 闭环 + Todo + Daily Review | 架构文档第 63 节推荐的首条链路，能完整验证产品核心价值「它居然记得」 |
+| 首期范围 | 云端 MVP 闭环 + Todo + Topic（组织层） + Daily Review | 架构文档第 63 节推荐的首条链路，加 Topic 组织层使记忆可按主题聚合，能完整验证产品核心价值「它居然记得」 |
 | 技术栈 | Go 模块化单体（单二进制） | 目录即未来微服务边界；本地开发零重依赖；与架构文档 Go 目标态一致 |
 | 数据库 | MySQL 8（docker-compose） | 与架构文档目标态一致 |
 | 异步编排 | DB 任务表 + 进程内 Worker 池 | 零额外基础设施，重启可续跑，任务表即 trace 雏形；未来可平滑升级 Asynq/MQ |
@@ -86,10 +88,14 @@ Docker Compose 只拉起 MySQL 与 zhiwei-server（镜像内置 ffmpeg 用于音
              无有效文字的会话直接标记完成（低价值不进抽取）
   ③ extract  每个对话块送 doubao-seed-1.6-flash，输出 JSON 候选：
              type/title/content/epistemic_type/importance/confidence/is_todo/todo_due
+             同时输入当前已有 Topic 列表，输出每条候选的 topic 归属：
+             归属已有 topic_id，或 suggested_topic_name（新主题建议）
   ④ quality  纯规则闸门（不调模型）：
              confidence < 0.6 → 丢弃
              todo 且 confidence < 0.85 → 降级为 suggested（「要不要加入 Todo？」）
-  ⑤ commit   memory 批量入库 + 批量 embedding + todo 入库，单事务提交
+  ⑤ commit   Topic 归属落库（新建议 Topic 以 status=suggested 创建，
+             memory 自动挂到同名的已确认 Topic；用户在 Web 上确认/改名/忽略）
+             + memory 批量入库 + 批量 embedding + todo 入库，单事务提交
 ```
 
 每日 22:00 cron 触发 Daily Review 生成（也可手动触发）。
@@ -128,7 +134,7 @@ zhiwei-glm53/
 
 ## 4. 数据模型
 
-8 张表，全部保留 `user_id`（MVP 默认 1）。DDL 细节实现时按下列字段落地：
+9 张表，全部保留 `user_id`（MVP 默认 1）。DDL 细节实现时按下列字段落地：
 
 ```text
 audio_session(id, user_id, source[web_upload|web_record], filename,
@@ -147,13 +153,20 @@ transcript_segment(id, transcript_id, sequence_no, speaker_label,
 memory(id, user_id, type[event|fact|decision|idea|problem|preference],
   title, content, epistemic_type[observed|inferred|suggested],
   importance DECIMAL(5,4), confidence DECIMAL(5,4),
+  topic_id,                         -- Topic 归属（可空 = 未归类）
   session_id,                    -- provenance：来源会话
   transcript_segment_ids JSON,   -- provenance：具体说话片段
   event_at, status[active|superseded|dismissed],
   embedding BLOB, version INT DEFAULT 1,
   created_at, updated_at)
 
-todo(id, user_id, title, source_memory_id,
+topic(id, user_id, name, description,
+  status[suggested|active|dismissed],   -- suggested=AI 新建建议，active=用户确认或手动创建
+  created_by[ai|user],
+  created_at, updated_at)
+  -- 组织层：无 goal/progress/生命周期，详情页时间线 = 关联 memory
+
+todo(id, user_id, title, source_memory_id, topic_id,
   status[suggested|confirmed|done|dismissed], due_at, confidence,
   created_at, updated_at)
 
@@ -168,6 +181,7 @@ agent_message(id, user_id, role, content, citations JSON, created_at)
 - 不建独立 `memory_source` 表：provenance 简化为 `session_id + transcript_segment_ids`（MVP 一对一来源够用，多来源时再拆表）
 - 不建 `memory_version` / `user_correction`（纠错学习下一期），`version` 字段占位
 - Speaker 仅保留 ASR 标签（说话人 1/2/3），Person 实体与声纹库下一期
+- Topic 只做组织层（归类 + 列表 + 详情时间线），Goal/Progress/生命周期/自动发现询问下一期
 - embedding 与 memory 同库同表（BLOB），进程内暴力余弦检索（个人规模 <10 万条，毫秒级）
 
 ---
@@ -227,8 +241,8 @@ POST /api/agent/chat
 ### 6.3 Daily Review
 
 - 每日 22:00 cron / 手动触发
-- 输入：当日 memory + todo 变化 + 对话概况
-- 输出结构化 JSON：`headline / highlights / todos / decisions / insights / tomorrow`
+- 输入：当日 memory（含 Topic 归属）+ todo 变化 + 对话概况
+- 输出结构化 JSON：`headline / highlights / todos / decisions / insights / tomorrow`，按 Topic 汇总今日活动分布
 - 「明天建议」只引用当天 `confirmed` 未完成 todo，不凭空生成
 
 ---
@@ -241,10 +255,15 @@ GET    /api/sessions           会话列表（含处理状态）
 GET    /api/sessions/{id}      详情：转写全文 + 分段（说话人标签）+ 关联 memory/todo
 POST   /api/jobs/{id}/retry    失败任务重跑
 
-GET    /api/memories           列表（时间/类型过滤）
+GET    /api/memories           列表（时间/类型/topic_id 过滤）
 PATCH  /api/memories/{id}      修正内容（version+1）或 dismiss
-GET    /api/todos              列表
+GET    /api/todos              列表（topic_id 过滤）
 PATCH  /api/todos/{id}         confirmed / done / dismissed
+
+GET    /api/topics             Topic 列表（含各 topic 的 memory/todo 计数）
+POST   /api/topics             手动创建
+GET    /api/topics/{id}        详情：关联 memory 时间线 + todo
+PATCH  /api/topics/{id}        确认（suggested→active）/ 改名 / dismiss
 
 POST   /api/agent/chat         问答 → {answer, citations}
 GET    /api/reviews/today      今日回顾（无则触发生成）
@@ -255,12 +274,13 @@ GET    /api/health             健康检查
 
 ## 8. Web 界面
 
-Vue 3（CDN 引入）单页应用，无构建步骤。四个标签页：
+Vue 3（CDN 引入）单页应用，无构建步骤。五个标签页：
 
 1. **时间线**：会话列表 → 转写（说话人分色）→ memory 卡片 / todo 卡片
 2. **录音**：MediaRecorder 录音 + 文件拖拽上传，轮询 job 进度
-3. **问知微**：聊天界面，回答带可点击证据引用
-4. **今日**：Daily Review 展示
+3. **Topics**：Topic 列表（AI 建议的标「待确认」）→ 详情页 = 关联 memory 时间线 + todo；确认 / 改名 / 忽略
+4. **问知微**：聊天界面，回答带可点击证据引用
+5. **今日**：Daily Review 展示（按 Topic 汇总）
 
 ---
 
@@ -268,7 +288,7 @@ Vue 3（CDN 引入）单页应用，无构建步骤。四个标签页：
 
 | 层级 | 内容 | 是否进 CI |
 |---|---|---|
-| 单元测试（重点） | pipeline 状态机、quality 闸门规则、检索评分与合并、citation 校验 | 是（纯逻辑，无外部依赖） |
+| 单元测试（重点） | pipeline 状态机、quality 闸门规则、Topic 归属与同名合并、检索评分与合并、citation 校验 | 是（纯逻辑，无外部依赖） |
 | Provider mock 测试 | 接口 mock 下的编排逻辑 | 是 |
 | Ark 真实调用 Spike | Sprint 0 用真实 key 验证 ASR WebSocket 协议、LLM/Embedding 报文 | 否（`make spike` 手动执行，避免 CI 烧钱） |
 | 端到端冒烟 | 固定测试音频走完整 pipeline，断言产出 memory | 否（`make e2e`，需本地 MySQL + key） |
@@ -281,7 +301,7 @@ Vue 3（CDN 引入）单页应用，无构建步骤。四个标签页：
 
 1. **Sprint 0：Spike + 骨架**——Ark 三接口真实调用验证（尤其 ASR 协议）；Go 项目骨架、docker-compose、迁移框架跑通
 2. **Sprint 1：音频 + ASR pipeline**——上传 API、任务表 + worker 池、ASR/segment stage、时间线页（转写展示）
-3. **Sprint 2：Memory 抽取 + Todo**——extract/quality/commit stage、memory/todo API 与卡片 UI、dismiss/confirm 交互
+3. **Sprint 2：Memory 抽取 + Todo + Topic**——extract/quality/commit stage（含 Topic 归类与建议创建）、memory/todo/topic API 与卡片 UI、dismiss/confirm 交互
 4. **Sprint 3：检索 + Agent**——embedding、混合检索、agent chat、证据引用展开
 5. **Sprint 4：Daily Review + 打磨**——cron、Review 页、失败重跑 UI、e2e 冒烟
 
