@@ -63,6 +63,7 @@ make spike-asr    # StepFun realtime 转写
 | `make compose-up / down` | 启停 MySQL |
 | `make migrate-up / down` | 数据库迁移（golang-migrate） |
 | `make init-testdb` | 重建集成测试库 |
+| `make dev-start / dev-stop / dev-restart` | 后台启停调试进程（另有 `dev-status` / `dev-logs`） |
 
 ## API 一览
 

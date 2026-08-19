@@ -1,10 +1,22 @@
-.PHONY: build dev test test-integration migrate-up migrate-down compose-up compose-down init-testdb spike-llm spike-embed spike-asr e2e
+.PHONY: build dev dev-start dev-stop dev-restart dev-status dev-logs test test-integration migrate-up migrate-down compose-up compose-down init-testdb spike-llm spike-embed spike-asr e2e
 
 build:
 	go build -o bin/zhiwei-server ./cmd/zhiwei-server
 
 dev: build
 	./bin/zhiwei-server
+
+# 调试进程后台管理（scripts/dev.sh 封装）
+dev-start:
+	bash scripts/dev.sh start
+dev-stop:
+	bash scripts/dev.sh stop
+dev-restart:
+	bash scripts/dev.sh restart
+dev-status:
+	bash scripts/dev.sh status
+dev-logs:
+	bash scripts/dev.sh logs
 
 test:
 	go test ./...
