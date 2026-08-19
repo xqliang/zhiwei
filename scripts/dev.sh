@@ -101,6 +101,32 @@ cmd_start() {
   exit 1
 }
 
+cmd_stop() {
+  local pid
+  if ! pid="$(running_pid)"; then
+    # 未在运行（或 PID 文件陈旧）：清理后幂等退出，不算错误
+    rm -f "$PID_FILE"
+    echo "zhiwei-server 未在运行"
+    return 0
+  fi
+  echo "停止 zhiwei-server (PID $pid) ..."
+  kill "$pid" 2>/dev/null || true
+  # SIGTERM 后每 0.5s 轮询一次，5s 内退出则优雅完成
+  local i
+  for i in $(seq 1 10); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PID_FILE"
+      echo "已停止"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "优雅终止超时，SIGKILL 强制停止 ..."
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PID_FILE"
+  echo "已停止 (SIGKILL)"
+}
+
 cmd_logs() {
   # 日志文件可能还不存在（从未启动过），先 touch 保证 tail 不报错
   mkdir -p "$(dirname "$LOG_FILE")"
@@ -112,6 +138,9 @@ cmd_logs() {
 case "${1:-}" in
   start)
     cmd_start
+    ;;
+  stop)
+    cmd_stop
     ;;
   logs)
     cmd_logs
