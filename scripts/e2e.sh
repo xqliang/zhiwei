@@ -32,13 +32,18 @@ for i in $(seq 1 60); do
   STATUS=$(echo "$DETAIL" | python3 -c "import json,sys; d=json.load(sys.stdin); j=d.get('job'); print(j['status'] if j else d['session']['status'])")
   echo "  [$i] status=$STATUS"
   if [ "$STATUS" = "done" ] || [ "$STATUS" = "completed" ]; then
-    if echo "$DETAIL" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('segments') else 1)"; then
-      echo "PASS: pipeline 跑通，转写已生成"
-      echo "$DETAIL" | python3 -m json.tool | head -30
-      exit 0
-    else
+    if ! echo "$DETAIL" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('segments') else 1)"; then
       echo "FAIL: segments 为空"; exit 1
     fi
+    # Sprint 2：断言 memory 抽取产出（真实语音才有内容）
+    MEMS=$(curl -fsS "localhost:8080/api/memories?limit=5")
+    echo "memories: $(echo "$MEMS" | head -c 500)"
+    if ! echo "$MEMS" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('memories') else 1)"; then
+      echo "FAIL: memories 为空（真实语音不应为空）"; exit 1
+    fi
+    echo "PASS: pipeline 跑通，转写与记忆抽取产出正常"
+    echo "$DETAIL" | python3 -m json.tool | head -30
+    exit 0
   fi
   if [ "$STATUS" = "failed" ]; then
     echo "FAIL: 处理失败"; echo "$DETAIL"; exit 1

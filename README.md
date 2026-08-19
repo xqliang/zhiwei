@@ -73,6 +73,9 @@ POST /api/audio             上传音频（multipart：file + source=web_upload|
 GET  /api/sessions          会话列表（含处理状态）
 GET  /api/sessions/{id}     会话详情：转写分段（带说话人标签）
 POST /api/jobs/{id}/retry   失败任务重跑
+GET/PATCH /api/memories      记忆列表（type/topic_id 过滤）/ 修正与忽略
+GET/PATCH /api/todos         待办列表 / 状态流转（确认/完成/忽略）
+GET/POST/PATCH /api/topics   主题计数列表 / 新建 / 确认/改名/忽略
 ```
 
 ## 项目结构
