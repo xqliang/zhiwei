@@ -23,7 +23,7 @@
 **Files:**
 - Modify: `.gitignore`
 
-- [ ] **Step 1: 追加两行**
+- [x] **Step 1: 追加两行**
 
 在 `.gitignore` 末尾追加（现有内容为 `data/`、`bin/`、`*.log`、`.env`，保持不动）：
 
@@ -32,12 +32,12 @@
 logs/
 ```
 
-- [ ] **Step 2: 验证 git 不再追踪这两个目录的文件**
+- [x] **Step 2: 验证 git 不再追踪这两个目录的文件**
 
 Run: `mkdir -p .run logs && touch .run/dev.pid logs/dev.log && git status --short | grep -E '\.run|logs' ; echo "exit=$?"`
 Expected: 无匹配输出且 `exit=1`（git status 里看不到这两个文件）
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add .gitignore
@@ -51,13 +51,13 @@ git commit -m "chore: gitignore 增加 .run/ 与 logs/（dev.sh 运行时目录�
 **Files:**
 - Create: `scripts/dev.sh`
 
-- [ ] **Step 1: 创建脚本**
+- [x] **Step 1: 创建脚本**
 
 ```bash
 touch scripts/dev.sh && chmod +x scripts/dev.sh
 ```
 
-- [ ] **Step 2: 写入骨架代码**
+- [x] **Step 2: 写入骨架代码**
 
 写入 `scripts/dev.sh` 完整内容（本任务只实现 usage / 公共函数 / logs；start、stop、restart、status 在后续任务逐个追加，dispatch 也随之逐行追加）：
 
@@ -125,12 +125,12 @@ case "${1:-}" in
 esac
 ```
 
-- [ ] **Step 3: 语法检查**
+- [x] **Step 3: 语法检查**
 
 Run: `bash -n scripts/dev.sh && echo OK`
 Expected: `OK`
 
-- [ ] **Step 4: 验证 usage 与 logs**
+- [x] **Step 4: 验证 usage 与 logs**
 
 Run: `./scripts/dev.sh` 然后 `./scripts/dev.sh badcmd`（分别观察）
 Expected: 两次都打印 usage 且退出码为 1
@@ -138,7 +138,7 @@ Expected: 两次都打印 usage 且退出码为 1
 Run: `timeout 2 ./scripts/dev.sh logs`
 Expected: 打印"跟随日志 ..."（timeout 2 结束，退出码 124 是预期）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/dev.sh
@@ -152,7 +152,7 @@ git commit -m "feat: dev.sh 脚本骨架（usage/running_pid/logs）"
 **Files:**
 - Modify: `scripts/dev.sh`
 
-- [ ] **Step 1: 在 `cmd_logs` 函数定义之前插入 `cmd_start`**
+- [x] **Step 1: 在 `cmd_logs` 函数定义之前插入 `cmd_start`**
 
 注意：后台启动必须在**当前 shell** 用 `&` 结束才能拿到 `$!`（子 shell 里后台启动拿不到），所以最后 `cd "$ROOT"` 切目录后直接 `nohup ... &`：
 
@@ -217,7 +217,7 @@ cmd_start() {
 }
 ```
 
-- [ ] **Step 2: dispatch 增加 start 分支**
+- [x] **Step 2: dispatch 增加 start 分支**
 
 `case "${1:-}" in` 中 `logs)` 之前加入：
 
@@ -227,12 +227,12 @@ cmd_start() {
     ;;
 ```
 
-- [ ] **Step 3: 语法检查**
+- [x] **Step 3: 语法检查**
 
 Run: `bash -n scripts/dev.sh && echo OK`
 Expected: `OK`
 
-- [ ] **Step 4: 真实启动验证（前置：make compose-up && make migrate-up）**
+- [x] **Step 4: 真实启动验证（前置：make compose-up && make migrate-up）**
 
 Run: `./scripts/dev.sh start && curl -sf http://localhost:8080/api/health && echo`
 Expected: `编译 zhiwei-server ...` → `等待健康检查 ...` → `启动成功 (PID xxx)`；health 返回正常 JSON
@@ -240,21 +240,21 @@ Expected: `编译 zhiwei-server ...` → `等待健康检查 ...` → `启动成
 Run: `kill -0 "$(cat .run/dev.pid)" && echo alive`
 Expected: `alive`（后台进程确实存活）
 
-- [ ] **Step 5: 防重复启动验证**
+- [x] **Step 5: 防重复启动验证**
 
 Run: `./scripts/dev.sh start`
 Expected: `zhiwei-server 已在运行 (PID xxx)。如需重启请用: scripts/dev.sh restart`，退出码 0，原进程不受影响
 
-- [ ] **Step 6: 环境变量预检验证**
+- [x] **Step 6: 环境变量预检验证**
 
 Run: `mv .env .env.bak && ./scripts/dev.sh start; mv .env.bak .env`
 Expected: 报 `错误: ARK_API_KEY 未设置...`，退出码 1，没有新进程被拉起（`.run/dev.pid` 内容不变）
 
-- [ ] **Step 7: 清理现场（留给 Task 4 测试）**
+- [x] **Step 7: 清理现场（留给 Task 4 测试）**
 
 先手动 `kill "$(cat .run/dev.pid)" && rm -f .run/dev.pid`，确认 `pgrep -f zhiwei-server` 无输出。
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add scripts/dev.sh
@@ -268,7 +268,7 @@ git commit -m "feat: dev.sh start 子命令（预检/编译/后台启动/健康�
 **Files:**
 - Modify: `scripts/dev.sh`
 
-- [ ] **Step 1: 在 `cmd_start` 之后插入 `cmd_stop`**
+- [x] **Step 1: 在 `cmd_start` 之后插入 `cmd_stop`**
 
 ```bash
 cmd_stop() {
@@ -298,7 +298,7 @@ cmd_stop() {
 }
 ```
 
-- [ ] **Step 2: dispatch 增加 stop 分支**
+- [x] **Step 2: dispatch 增加 stop 分支**
 
 `case "${1:-}" in` 中加入（与 start 分支并列）：
 
@@ -308,27 +308,27 @@ cmd_stop() {
     ;;
 ```
 
-- [ ] **Step 3: 语法检查**
+- [x] **Step 3: 语法检查**
 
 Run: `bash -n scripts/dev.sh && echo OK`
 Expected: `OK`
 
-- [ ] **Step 4: 真实停止验证（前置：先 `./scripts/dev.sh start`）**
+- [x] **Step 4: 真实停止验证（前置：先 `./scripts/dev.sh start`）**
 
 Run: `./scripts/dev.sh stop && pgrep -f zhiwei-server; echo "pgrep exit=$?"`
 Expected: `停止 zhiwei-server (PID xxx) ...` → `已停止`；pgrep 无输出且 `pgrep exit=1`（进程确实没了）；`.run/dev.pid` 不存在
 
-- [ ] **Step 5: 幂等验证**
+- [x] **Step 5: 幂等验证**
 
 Run: `./scripts/dev.sh stop`
 Expected: `zhiwei-server 未在运行`，退出码 0
 
-- [ ] **Step 6: 陈旧 PID 文件验证**
+- [x] **Step 6: 陈旧 PID 文件验证**
 
 Run: `mkdir -p .run && echo 999999 > .run/dev.pid && ./scripts/dev.sh stop`
 Expected: `zhiwei-server 未在运行`（PID 999999 不存在/名字不匹配，被当作陈旧文件清理），退出码 0
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add scripts/dev.sh
@@ -342,7 +342,7 @@ git commit -m "feat: dev.sh stop 子命令（SIGTERM 优雅终止 + 超时 SIGKI
 **Files:**
 - Modify: `scripts/dev.sh`
 
-- [ ] **Step 1: 在 `cmd_stop` 之后插入两个函数**
+- [x] **Step 1: 在 `cmd_stop` 之后插入两个函数**
 
 ```bash
 cmd_restart() {
@@ -369,7 +369,7 @@ cmd_status() {
 }
 ```
 
-- [ ] **Step 2: dispatch 增加 restart / status 分支**
+- [x] **Step 2: dispatch 增加 restart / status 分支**
 
 `case "${1:-}" in` 中加入（与 stop 分支并列）：
 
@@ -382,12 +382,12 @@ cmd_status() {
     ;;
 ```
 
-- [ ] **Step 3: 语法检查**
+- [x] **Step 3: 语法检查**
 
 Run: `bash -n scripts/dev.sh && echo OK`
 Expected: `OK`
 
-- [ ] **Step 4: status 验证（未运行 → 运行中）**
+- [x] **Step 4: status 验证（未运行 → 运行中）**
 
 Run: `./scripts/dev.sh status`
 Expected: `zhiwei-server 未在运行`
@@ -395,14 +395,14 @@ Expected: `zhiwei-server 未在运行`
 Run: `./scripts/dev.sh start && ./scripts/dev.sh status`
 Expected: `运行中`，输出 PID、运行时长（etime）、端口、最近 5 行日志
 
-- [ ] **Step 5: restart 验证**
+- [x] **Step 5: restart 验证**
 
 Run: `old_pid="$(cat .run/dev.pid)" && ./scripts/dev.sh restart && new_pid="$(cat .run/dev.pid)" && echo "old=$old_pid new=$new_pid" && curl -sf http://localhost:8080/api/health`
 Expected: stop + start 流程输出；`old=xxx new=yyy` 且两个 PID 不同；健康检查正常
 
 Run: `./scripts/dev.sh stop`（收尾，不留后台进程）
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/dev.sh
@@ -417,7 +417,7 @@ git commit -m "feat: dev.sh restart/status 子命令，五命令齐备"
 - Modify: `Makefile`（`.PHONY` 行与新增 5 个 target）
 - Modify: `README.md`（常用命令表）
 
-- [ ] **Step 1: Makefile 增加 5 个 target**
+- [x] **Step 1: Makefile 增加 5 个 target**
 
 在 `dev: build` 目标之后追加：
 
@@ -441,7 +441,7 @@ dev-logs:
 .PHONY: build dev dev-start dev-stop dev-restart dev-status dev-logs test test-integration migrate-up migrate-down compose-up compose-down init-testdb spike-llm spike-embed spike-asr e2e
 ```
 
-- [ ] **Step 2: README 常用命令表追加一行**
+- [x] **Step 2: README 常用命令表追加一行**
 
 在 `| make init-testdb | 重建集成测试库 |` 之后追加：
 
@@ -449,17 +449,17 @@ dev-logs:
 | `make dev-start / dev-stop / dev-restart` | 后台启停调试进程（另有 `dev-status` / `dev-logs`） |
 ```
 
-- [ ] **Step 3: 验证 make 别名**
+- [x] **Step 3: 验证 make 别名**
 
 Run: `make dev-start && make dev-status && make dev-stop`
 Expected: start → status 显示运行中 → stop 显示已停止；`make dev-status` 再次执行显示未运行
 
-- [ ] **Step 4: 全量回归**
+- [x] **Step 4: 全量回归**
 
 Run: `make test`
 Expected: 全部 PASS（确认没有破坏任何 Go 代码路径——本任务本不该影响，跑一遍兜底）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Makefile README.md
@@ -470,9 +470,9 @@ git commit -m "feat: make dev-start/stop/restart/status/logs 集成 dev.sh"
 
 ## 验收清单（对照 spec 测试计划）
 
-- [ ] `dev.sh status`（未运行）→ 显示未运行（Task 5 Step 4）
-- [ ] `dev.sh start` → 存活、健康检查通过、PID 文件正确（Task 3 Step 4）
-- [ ] `dev.sh start`（重复）→ 拒绝（Task 3 Step 5）
-- [ ] `dev.sh restart` → PID 变化、服务恢复（Task 5 Step 5）
-- [ ] `dev.sh stop` → 进程退出、PID 文件清理；再次 stop 幂等（Task 4 Step 4/5）
-- [ ] 缺 `ARK_API_KEY` 时 start → 明确报错（Task 3 Step 6）
+- [x] `dev.sh status`（未运行）→ 显示未运行（Task 5 Step 4）
+- [x] `dev.sh start` → 存活、健康检查通过、PID 文件正确（Task 3 Step 4）
+- [x] `dev.sh start`（重复）→ 拒绝（Task 3 Step 5）
+- [x] `dev.sh restart` → PID 变化、服务恢复（Task 5 Step 5）
+- [x] `dev.sh stop` → 进程退出、PID 文件清理；再次 stop 幂等（Task 4 Step 4/5）
+- [x] 缺 `ARK_API_KEY` 时 start → 明确报错（Task 3 Step 6）
