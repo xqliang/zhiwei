@@ -32,15 +32,13 @@ func TestMemoryInsertAndQuery(t *testing.T) {
 
 	sid := ids.New()
 	m := newTestMemory(sid, topic.ID)
-	// 注意：[]Memory 按值传入，回填发生在切片元素上，用切片元素校验并取回。
-	ms := []Memory{*m}
-	if err := mr.InsertExt(ctx, db, ms); err != nil {
+	// 必须传 *Memory 指针切片，ID 才能回填到调用方的 m。
+	if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {
 		t.Fatalf("InsertExt: %v", err)
 	}
-	if ms[0].ID == 0 {
+	if m.ID == 0 {
 		t.Fatal("InsertExt 未回填 ID")
 	}
-	m = &ms[0]
 
 	// 按 session 查询（联查 topic 名称）
 	rows, err := mr.ListBySession(ctx, sid)
@@ -78,6 +76,19 @@ func TestMemoryInsertAndQuery(t *testing.T) {
 	if rows, _ = mr.List(ctx, MemoryFilter{Type: "idea", Limit: 10}); len(rows) != 0 {
 		t.Fatal("type=idea 不应命中")
 	}
+
+	// dismissed 不出现在列表；offset 超界返回空
+	dm := newTestMemory(sid, topic.ID)
+	dm.Status = "dismissed"
+	if err := mr.InsertExt(ctx, db, []*Memory{dm}); err != nil {
+		t.Fatalf("InsertExt dismissed: %v", err)
+	}
+	if rows, _ = mr.ListBySession(ctx, sid); len(rows) != 1 {
+		t.Fatalf("dismissed 应被 ListBySession 排除，got %d", len(rows))
+	}
+	if rows, _ = mr.List(ctx, MemoryFilter{Limit: 10, Offset: 9999}); len(rows) != 0 {
+		t.Fatalf("offset 越界应返回空，got %d", len(rows))
+	}
 }
 
 func TestMemoryDeleteBySession(t *testing.T) {
@@ -88,7 +99,7 @@ func TestMemoryDeleteBySession(t *testing.T) {
 	sid := ids.New()
 	m := newTestMemory(sid, 1)
 	m.TopicID = nil
-	_ = mr.InsertExt(ctx, db, []Memory{*m})
+	_ = mr.InsertExt(ctx, db, []*Memory{m})
 	if err := mr.DeleteBySessionExt(ctx, db, sid); err != nil {
 		t.Fatalf("DeleteBySessionExt: %v", err)
 	}

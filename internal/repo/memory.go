@@ -51,7 +51,8 @@ type MemoryFilter struct {
 type MemoryRepo struct{ DB *sqlx.DB }
 
 // InsertExt 批量插入（ext 传 *sqlx.Tx 即加入事务）。ID 在此生成并回填。
-func (r *MemoryRepo) InsertExt(ctx context.Context, ext ExecerContext, ms []Memory) error {
+// 必须传 *Memory 指针切片：值拷贝切片收不到回填的 ID。
+func (r *MemoryRepo) InsertExt(ctx context.Context, ext ExecerContext, ms []*Memory) error {
 	if len(ms) == 0 {
 		return nil
 	}
@@ -70,6 +71,8 @@ VALUES (:id, :user_id, :type, :title, :content, :epistemic_type,
 }
 
 // DeleteBySessionExt 删除一个 session 的全部 memory（extract 重跑幂等用）。
+// 必须与 InsertExt 等重跑写入共用同一 *sqlx.Tx，保证 delete+insert 原子
+// （extract stage 单事务提交用）。
 func (r *MemoryRepo) DeleteBySessionExt(ctx context.Context, ext ExecerContext, sessionID ids.ID) error {
 	_, err := ext.ExecContext(ctx, `DELETE FROM memory WHERE session_id = ?`, sessionID.Int64())
 	return err
