@@ -97,7 +97,7 @@ Block { SpeakerLabel, Text(段文本拼接), StartMS, EndMS, SegmentIDs[] }
 
 一个 DB 事务内依次：
 
-1. **幂等清理**：删除本 session 已有的 memory 与 todo（stage 重跑不产生重复数据）
+1. **幂等清理**：删除本 session 已有的 memory，以及 `source_memory_id` 指向这些 memory 的 todo（stage 重跑不产生重复数据；todo 表无 session_id，经 source_memory_id 间接关联）
 2. **Topic 解析**（每条候选）：
    - 带合法 `topic_id`（属于本 user 且非 dismissed）→ 直接挂
    - 带 `suggested_topic_name` → 查本 user 同名（active/suggested）topic，命中则挂（同名合并）；否则创建 `status=suggested, created_by=ai`
@@ -132,7 +132,7 @@ prompts/extraction_v1.md             # 抽取 prompt（版本化）
 
 **Todos**
 
-- `GET /api/todos` — 列表。过滤参数 `topic_id` / `status`，按 created_at 倒序
+- `GET /api/todos` — 列表。过滤参数 `topic_id` / `status`，按 created_at 倒序。响应含 `source_memory_id` 与来源 `session_id`（经 source memory 解析，前端「跳转时间线」用）
 - `PATCH /api/todos/{id}` — body `{status}`。状态机：`suggested → confirmed`、`confirmed → done`，任意非 dismissed 状态可 `dismissed`；非法流转返回 409
 
 **Topics**
@@ -209,4 +209,4 @@ prompts/extraction_v1.md             # 抽取 prompt（版本化）
 | flash 模型输出 JSON 不稳定（围栏、多余文本、枚举漂移） | 解析容错 + 逐条校验丢弃；解析彻底失败走 stage 重试；prompt 迭代不改代码 |
 | 抽取质量差（垃圾卡片/漏抽） | 闸门阈值 env 可配；prompt 版本化迭代；e2e 用固定真人语音回归 |
 | 长会话窗口切分后同话题跨窗口、topic 归属不一致 | 同名 suggested_topic_name 在 commit 时统一合并；候选去重规则兜底 |
-| 重跑幂等清理误删用户手动数据 | 清理只删 `session_id` 匹配的 memory/todo（用户手动创建的 todo 无 session 来源，不受影响） |
+| 重跑幂等清理误删用户数据 | 清理只删本 session 产出的 memory 及其派生 todo（todo 无 session 来源列，按 source_memory_id 关联），不触碰其他数据 |
