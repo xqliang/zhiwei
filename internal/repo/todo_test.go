@@ -85,6 +85,10 @@ func TestTodoInsertAndList(t *testing.T) {
 	if err := tr.UpdateStatus(ctx, td.ID, "done"); err != nil {
 		t.Fatalf("UpdateStatus: %v", err)
 	}
+	// 非法状态值被拒绝（不落库）
+	if err := tr.UpdateStatus(ctx, td.ID, "bogus"); err == nil {
+		t.Fatal("非法状态 bogus 应返回错误")
+	}
 	rows2, _ := tr.List(ctx, "done", nil)
 	var seen bool
 	for _, row := range rows2 {

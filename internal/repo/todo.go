@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -79,10 +80,24 @@ func (r *TodoRepo) Get(ctx context.Context, id ids.ID) (*Todo, error) {
 	return &td, err
 }
 
-// UpdateStatus 更新状态。调用方（service 层）应先用 CanTransition 校验流转合法性。
+// UpdateStatus 更新状态。状态值先做合法性校验（防绕过 API 层校验的垃圾值入库）；
+// 流转合法性（CanTransition）仍由调用方负责。「不存在或状态未变」返回 nil（MySQL
+// 同值 UPDATE 的 RowsAffected 为 0，无法与不存在区分，MVP 接受该语义）。
 func (r *TodoRepo) UpdateStatus(ctx context.Context, id ids.ID, status string) error {
+	if !validTodoStatus(status) {
+		return fmt.Errorf("非法 todo 状态: %q", status)
+	}
 	_, err := r.DB.ExecContext(ctx, `UPDATE todo SET status = ? WHERE id = ?`, status, id.Int64())
 	return err
+}
+
+// validTodoStatus 是 todo 状态的枚举校验。
+func validTodoStatus(s string) bool {
+	switch s {
+	case "suggested", "confirmed", "done", "dismissed":
+		return true
+	}
+	return false
 }
 
 const todoListBase = `
