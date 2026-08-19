@@ -62,7 +62,7 @@ func stageExtract(d StageDeps) Handler {
 		// ⑤ Topic 归属决策（纯逻辑）+ 单事务提交
 		refs, newNames := memory.ResolveTopics(gated, topics)
 		commitBegin := time.Now()
-		err = commitExtract(ctx, d, sessionID, gated, refs, newNames)
+		err = commitExtract(ctx, d, sessionID, s.UserID, gated, refs, newNames)
 		if err != nil {
 			return fmt.Errorf("commit: %w", err)
 		}
@@ -79,7 +79,9 @@ func stageExtract(d StageDeps) Handler {
 // commitExtract 在单事务内完成幂等清理与落库。
 // 顺序：先删派生 todo（经 source_memory_id 关联）→ 删 memory →
 // 建新建议 topic → 插 memory → 插 todo。任一步失败整体回滚。
-func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID,
+// 已知 MVP 限制：重跑会重建用户在重试窗口内已 dismiss 的行
+// （按 session 硬删，无状态过滤）。
+func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID int64,
 	gated []memory.Candidate, refs []memory.TopicRef, newNames []string) error {
 
 	tx, err := d.DB.BeginTxx(ctx, nil)
@@ -96,9 +98,18 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID,
 		return fmt.Errorf("清理旧 memory: %w", err)
 	}
 
-	// 2. 新建建议 topic（ResolveTopics 已保证与现有 active/suggested 不同名）
+	// 2. 新建建议 topic。事务内先按名查重（FindActiveByNameExt 走 tx 连接）：
+	// ResolveTopics 的查重在 LLM 调用前完成（秒级窗口），并发 extract 可能
+	// 同时建议同名 topic 而双双漏判，这里兜底改为复用。
+	// 注意：查重只能收窄窗口而非根除竞态（topic.name 无唯一约束）。
 	nameToID := make(map[string]ids.ID, len(newNames))
 	for _, name := range newNames {
+		if existing, err := d.Topics.FindActiveByNameExt(ctx, tx, userID, name); err != nil {
+			return fmt.Errorf("查重建议 topic %q: %w", name, err)
+		} else if existing != nil {
+			nameToID[name] = existing.ID
+			continue
+		}
 		tp := &repo.Topic{Name: name, Status: "suggested", CreatedBy: "ai"}
 		if err := d.Topics.CreateExt(ctx, tx, tp); err != nil {
 			return fmt.Errorf("创建建议 topic %q: %w", name, err)

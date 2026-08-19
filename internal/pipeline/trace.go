@@ -11,6 +11,8 @@ import (
 
 // appendTrace 向 job.Trace 追加一条执行记录。
 // 注意 Job.Trace 是 *json.RawMessage（可能为 nil），首次写入时创建。
+// 反序列化/序列化错误被刻意忽略：trace 是尽力而为的可观测性数据，
+// 已损坏即整段重置，绝不能因它让 handler 失败重试。
 func appendTrace(j *repo.Job, e repo.TraceEntry) {
 	var entries []repo.TraceEntry
 	if j.Trace != nil && len(*j.Trace) > 0 {

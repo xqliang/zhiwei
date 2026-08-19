@@ -115,6 +115,47 @@ func TestTopicCreateExtTx(t *testing.T) {
 	}
 }
 
+// TestTopicFindActiveByNameExt 验证 FindActiveByNameExt 的事务内查询路径：
+// 事务开启后能看到其他事务已 COMMIT 的同名行（extract commit 查重依赖此行为），
+// 同一事务内插入的行自身可见，无命中返回 nil。
+func TestTopicFindActiveByNameExt(t *testing.T) {
+	db, _ := NewDB(TestDSN(t))
+	r := &TopicRepo{DB: db}
+	ctx := context.Background()
+
+	// 另一事务提交后：新事务内应查到
+	cm := &Topic{Name: "事务查重主题", Status: "suggested", CreatedBy: "ai"}
+	tx1, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CreateExt(ctx, tx1, cm); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx1.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	tx2, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.FindActiveByNameExt(ctx, tx2, 1, "事务查重主题")
+	if err != nil || got == nil || got.ID != cm.ID {
+		t.Fatalf("事务内查重应命中: got=%v err=%v", got, err)
+	}
+	// 同一事务内插入的行自身可见（查重后复用场景）
+	if err := r.CreateExt(ctx, tx2, &Topic{Name: "本事务新主题", Status: "suggested", CreatedBy: "ai"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.FindActiveByNameExt(ctx, tx2, 1, "本事务新主题"); err != nil || got == nil {
+		t.Fatalf("本事务内行应可见: got=%v err=%v", got, err)
+	}
+	if got, err := r.FindActiveByNameExt(ctx, tx2, 1, "不存在的名字"); err != nil || got != nil {
+		t.Fatalf("无命中应返回 nil: got=%v err=%v", got, err)
+	}
+	_ = tx2.Rollback()
+}
+
 // TestTopicListWithCounts 验证带计数列表：active memory / confirmed todo 计数正确，
 // dismissed 主题不出现。memory/todo DAO 尚未实现，测试里用原生 SQL 直插。
 func TestTopicListWithCounts(t *testing.T) {

@@ -67,11 +67,18 @@ ORDER BY updated_at DESC LIMIT ?`, userID, limit)
 
 // FindActiveByName 按名称精确查找 active/suggested 主题（同名合并用）；无命中返回 nil。
 func (r *TopicRepo) FindActiveByName(ctx context.Context, userID int64, name string) (*Topic, error) {
+	return r.FindActiveByNameExt(ctx, r.DB, userID, name)
+}
+
+// FindActiveByNameExt 与 FindActiveByName 同语义，但可在事务连接上执行
+// （ext 传 *sqlx.Tx）。extract commit 事务内对建议 topic 查重用：
+// 事务开启后的 READ COMMITTED 视图能看到其他事务已提交的同名行。
+func (r *TopicRepo) FindActiveByNameExt(ctx context.Context, ext QueryRowxContext, userID int64, name string) (*Topic, error) {
 	var tp Topic
-	err := r.DB.GetContext(ctx, &tp, `
+	err := ext.QueryRowxContext(ctx, `
 SELECT * FROM topic
 WHERE user_id = ? AND name = ? AND status IN ('active','suggested')
-ORDER BY id LIMIT 1`, userID, name)
+ORDER BY id LIMIT 1`, userID, name).StructScan(&tp)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil

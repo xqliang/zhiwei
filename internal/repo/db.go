@@ -32,3 +32,12 @@ type ExecerContext interface {
 // 编译期断言：*sqlx.DB 与 *sqlx.Tx 均满足 ExecerContext。
 var _ ExecerContext = (*sqlx.DB)(nil)
 var _ ExecerContext = (*sqlx.Tx)(nil)
+
+// QueryRowxContext 是 *sqlx.DB 与 *sqlx.Tx 共同满足的单行查询接口。
+// 事务内读操作（如 FindActiveByNameExt）以此为参数，事务外调用传 r.DB。
+type QueryRowxContext interface {
+	QueryRowxContext(ctx context.Context, query string, args ...interface{}) *sqlx.Row
+}
+
+var _ QueryRowxContext = (*sqlx.DB)(nil)
+var _ QueryRowxContext = (*sqlx.Tx)(nil)
