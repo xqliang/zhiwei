@@ -18,6 +18,7 @@
   .badge.pending, .badge.running, .badge.suggested { background: #fef3c7; color: #92400e; }
   .badge.completed, .badge.done, .badge.active, .badge.confirmed { background: #d1fae5; color: #065f46; }
   .badge.failed { background: #fee2e2; color: #991b1b; }
+  .badge.dismissed { background: #f3f4f6; color: #6b7280; }
   .seg { padding: 8px 0; border-bottom: 1px dashed #f0f0f0; }
   .seg:last-child { border: none; }
   .sp { font-size: 12px; color: #fff; border-radius: 6px; padding: 1px 6px; margin-right: 8px; }
@@ -102,7 +103,7 @@
           <div class="kv">
             <div>☑️ {{ td.title }}</div>
             <span class="badge" :class="td.status">
-              {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : '已完成' }}
+              {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : td.status === 'done' ? '已完成' : '已忽略' }}
             </span>
           </div>
           <div class="muted" v-if="td.due_at">截止 {{ fmtDue(td.due_at) }} · 到「待办」页处理</div>
@@ -164,7 +165,7 @@
           <span v-if="topicDetail.topic.status==='suggested'" class="badge suggested">待确认</span>
           <div class="muted" v-if="topicDetail.topic.description">{{ topicDetail.topic.description }}</div>
         </div>
-        <button class="mini" @click="topicDetail=null">← 返回列表</button>
+        <button class="mini" @click="closeTopicDetail">← 返回列表</button>
       </div>
       <div class="card" style="margin-bottom:12px">
         <button class="mini" v-if="renaming===null" @click="startRename(topicDetail.topic)">改名</button>
@@ -189,7 +190,7 @@
         <div class="kv">
           <div>☑️ {{ td.title }}</div>
           <span class="badge" :class="td.status">
-            {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : '已完成' }}
+            {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : td.status === 'done' ? '已完成' : '已忽略' }}
           </span>
         </div>
       </div>

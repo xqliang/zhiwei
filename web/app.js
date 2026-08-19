@@ -171,6 +171,11 @@ createApp({
         await loadTopics();
       } catch (e) { showError(e); }
     }
+    // 关闭主题详情：同时清空重命名状态，避免残留的输入框污染下次打开
+    function closeTopicDetail() {
+      topicDetail.value = null;
+      renaming.value = null;
+    }
     function startRename(t) { renaming.value = { id: t.id, name: t.name }; }
     async function commitRename() {
       const rn = renaming.value;
@@ -182,12 +187,19 @@ createApp({
         if (topicDetail.value && topicDetail.value.topic.id === rn.id) {
           await openTopic(rn.id);
         }
-      } catch (e) { showError(e); }
+      } catch (e) {
+        renaming.value = rn; // 保存失败时恢复编辑状态，避免用户输入丢失
+        showError(e);
+      }
     }
     async function createTopic() {
       if (!newTopic.value.name.trim()) return;
       try {
-        await api('POST', '/api/topics', newTopic.value);
+        // 提交前对名称与描述做 trim，避免首尾空白进入库
+        await api('POST', '/api/topics', {
+          name: newTopic.value.name.trim(),
+          description: newTopic.value.description.trim(),
+        });
         newTopic.value = { name: '', description: '' };
         showNewTopic.value = false;
         await loadTopics();
@@ -235,7 +247,7 @@ createApp({
       sessions, detail, loadSessions, openSession, dismissMemory, retryJob,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
-      loadTopics, openTopic, confirmTopic, dismissTopic, startRename, commitRename, createTopic,
+      loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic,
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos,
       loadTodos, setTodoStatus, jumpToSession,
     };
