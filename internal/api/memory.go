@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -23,7 +24,8 @@ func RegisterMemory(r chi.Router, h *MemoryHandler) {
 	r.Patch("/api/memories/{id}", h.Patch)
 }
 
-// List 返回记忆列表（排除 dismissed），支持 type/topic_id/limit/offset 过滤分页。
+// List 返回记忆列表（排除 dismissed），支持 type/topic_id/since/limit/offset
+// 过滤分页。since 是事件时间下界（spec §4）：RFC3339 或 YYYY-MM-DD（当日零点）。
 func (h *MemoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	f := repo.MemoryFilter{
 		Type:   r.URL.Query().Get("type"),
@@ -38,6 +40,14 @@ func (h *MemoryHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		f.TopicID = &tid
 	}
+	if v := r.URL.Query().Get("since"); v != "" {
+		ts, err := parseSince(v)
+		if err != nil {
+			http.Error(w, "since 取值非法（RFC3339 或 YYYY-MM-DD）", http.StatusBadRequest)
+			return
+		}
+		f.Since = &ts
+	}
 	if f.Type != "" && !validMemoryType(f.Type) {
 		http.Error(w, "type 取值非法", http.StatusBadRequest)
 		return
@@ -48,6 +58,15 @@ func (h *MemoryHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"memories": rows})
+}
+
+// parseSince 解析 since 参数：优先 RFC3339（带时区），
+// 失败再试日期格式 YYYY-MM-DD（按本地时区当日零点解释）。
+func parseSince(v string) (time.Time, error) {
+	if ts, err := time.Parse(time.RFC3339, v); err == nil {
+		return ts, nil
+	}
+	return time.ParseInLocation("2006-01-02", v, time.Local)
 }
 
 // Patch 修正记忆内容或 dismiss。改 title/content 则 version+1（乐观并发用）。

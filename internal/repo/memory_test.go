@@ -107,3 +107,72 @@ func TestMemoryDeleteBySession(t *testing.T) {
 		t.Fatalf("删除后仍有 %d 条", len(rows))
 	}
 }
+
+func TestMemoryListSince(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := &MemoryRepo{DB: db}
+	ctx := context.Background()
+
+	// 两条不同 event_at 的记忆（标题加 since 前缀隔离共享测试库的脏数据）
+	sid := ids.New()
+	// 预清理：共享测试库可能残留历史运行的同名行（脏库重跑），先删掉保证计数断言稳定
+	if _, err := mr.DB.ExecContext(ctx,
+		`DELETE FROM memory WHERE title IN (?, ?)`, "since 用例-早", "since 用例-晚"); err != nil {
+		t.Fatal(err)
+	}
+	early := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		title  string
+		eventA time.Time
+	}{{"since 用例-早", early}, {"since 用例-晚", late}} {
+		m := newTestMemory(sid, 1)
+		m.Title = tc.title
+		m.EventAt = &tc.eventA
+		if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 下界夹在两条之间 → 含「晚」不含「早」。
+	// 注意共享测试库中其他 fixture 行的 event_at 可能落在下界之后，
+	// 故断言用「包含/不包含本组两条标题」而非精确计数。
+	mid := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
+	since := mid
+	rows, err := mr.List(ctx, MemoryFilter{Since: &since, Limit: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTitle(rows, "since 用例-晚") || hasTitle(rows, "since 用例-早") {
+		t.Fatalf("Since=mid 结果 = %v", titles(rows))
+	}
+	// 等于 late 本身 → 仍命中（>= 含等于）
+	since = late
+	if rows, _ = mr.List(ctx, MemoryFilter{Since: &since, Limit: 200}); !hasTitle(rows, "since 用例-晚") {
+		t.Fatalf("Since=late 应命中（>= 含等于），结果 = %v", titles(rows))
+	}
+	// 零值 Since 不过滤 → 两条都在（Limit 200 容纳共享库其他 fixture 行）
+	if rows, _ = mr.List(ctx, MemoryFilter{Limit: 200}); !hasTitle(rows, "since 用例-早") || !hasTitle(rows, "since 用例-晚") {
+		t.Fatalf("无 Since 应两条都在，结果 = %v", titles(rows))
+	}
+}
+
+func hasTitle(rows []MemoryRow, title string) bool {
+	for _, r := range rows {
+		if r.Title == title {
+			return true
+		}
+	}
+	return false
+}
+
+func titles(rows []MemoryRow) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Title
+	}
+	return out
+}

@@ -44,6 +44,7 @@ type MemoryRow struct {
 type MemoryFilter struct {
 	Type    string
 	TopicID *ids.ID
+	Since   *time.Time // 事件时间下界（含等于），spec §4 的 since 过滤
 	Limit   int
 	Offset  int
 }
@@ -100,6 +101,10 @@ func (r *MemoryRepo) List(ctx context.Context, f MemoryFilter) ([]MemoryRow, err
 	if f.TopicID != nil {
 		where["m.topic_id"] = f.TopicID.Int64()
 	}
+	if f.Since != nil {
+		// 键里带操作符：listWhere 见到含空格的键会按原样拼接（见其注释）
+		where["m.event_at >="] = *f.Since
+	}
 	return r.listWhere(ctx, where, f.Limit, f.Offset)
 }
 
@@ -111,8 +116,10 @@ func (r *MemoryRepo) ListByTopic(ctx context.Context, topicID ids.ID) ([]MemoryR
 	return r.listWhere(ctx, map[string]any{"m.topic_id": topicID.Int64()}, 200, 0)
 }
 
-// listWhere 组装 WHERE（列=值 AND 连接；map 迭代顺序不影响 AND 语义），
+// listWhere 组装 WHERE（条件 AND 连接；map 迭代顺序不影响 AND 语义），
 // 基础条件固定排除 dismissed。
+// 键约定：默认按「列 = ?」生成；键中含空格（如 "m.event_at >="）视为
+// 已带比较操作符，按「列 操作符 ?」拼接——目前仅 since 过滤用到 >=。
 func (r *MemoryRepo) listWhere(ctx context.Context, where map[string]any, limit, offset int) ([]MemoryRow, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -123,7 +130,11 @@ func (r *MemoryRepo) listWhere(ctx context.Context, where map[string]any, limit,
 	var conds []string
 	var args []any
 	for col, val := range where {
-		conds = append(conds, col+" = ?")
+		if strings.Contains(col, " ") {
+			conds = append(conds, col+" ?") // 键自带操作符（如 >=）
+		} else {
+			conds = append(conds, col+" = ?")
+		}
 		args = append(args, val)
 	}
 	cond := "m.status != 'dismissed'"

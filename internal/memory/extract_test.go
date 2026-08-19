@@ -108,6 +108,31 @@ func TestExtractorMultiWindowAndDedup(t *testing.T) {
 	if want := blocks[6].SegmentIDs[0]; cands[0].SegmentIDs[0] != want {
 		t.Fatalf("SegmentIDs[0] = %v, want %v", cands[0].SegmentIDs[0], want)
 	}
+	// 调用统计：3 次窗口调用；fakeLLM 每次返回 TotalTokens=100 → 累计 300
+	if st := ex.Stats(); st.Windows != 3 || st.Tokens != 3*100 {
+		t.Fatalf("Stats = %+v, want {Windows:3 Tokens:300}", st)
+	}
+}
+
+func TestExtractorStatsResetPerCall(t *testing.T) {
+	// Stats 反映「最近一次」Extract：第二次调用后应被重置而非累加
+	// （窗口 1 → 第一次 2 块 2 窗、第二次 1 块 1 窗，共需 3 个预置响应）
+	llm := &fakeLLM{responses: []string{
+		`{"candidates":[]}`, `{"candidates":[]}`, `{"candidates":[]}`,
+	}}
+	ex := &Extractor{LLM: llm, Model: "m", Prompt: "sys", Window: 1} // 窗口 1 → 每块一窗
+	if _, err := ex.Extract(ctx(t), mkBlocks(2), nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if st := ex.Stats(); st.Windows != 2 || st.Tokens != 200 {
+		t.Fatalf("第一次 Stats = %+v", st)
+	}
+	if _, err := ex.Extract(ctx(t), mkBlocks(1), nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if st := ex.Stats(); st.Windows != 1 || st.Tokens != 100 {
+		t.Fatalf("第二次 Stats = %+v, want 重置后 {Windows:1 Tokens:100}", st)
+	}
 }
 
 func TestExtractorInvalidBlockIndex(t *testing.T) {

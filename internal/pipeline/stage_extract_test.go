@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"zhiwei/internal/ids"
@@ -43,6 +44,7 @@ func newExtractDeps(t *testing.T, llm *fakeExtractLLM) StageDeps {
 		LLM:           llm,
 		LLMModel:      "fake-model",
 		Prompt:        "测试 system prompt",
+		PromptVersion: "extraction_v1",
 		ExtractWindow: 10,
 		Gate:          memory.GateConfig{MinConf: 0.6, TodoConf: 0.85},
 	}
@@ -162,6 +164,23 @@ func TestStageExtractCommit(t *testing.T) {
 	// trace 已记录
 	if j.Trace == nil || len(*j.Trace) == 0 {
 		t.Fatal("job.trace 未写入")
+	}
+	// extract:llm 条目应带 token 用量 / 窗口数 / prompt 版本（spec §3.3/§3.5）
+	var entries []repo.TraceEntry
+	if err := json.Unmarshal(*j.Trace, &entries); err != nil {
+		t.Fatalf("unmarshal trace: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Stage == "extract:llm" {
+			found = true
+			if e.Tokens != 500 || e.Windows != 1 || e.PromptVersion == "" {
+				t.Fatalf("extract:llm trace = %+v, want Tokens=500 Windows=1 PromptVersion 非空", e)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("trace 缺少 extract:llm 条目: %+v", entries)
 	}
 }
 

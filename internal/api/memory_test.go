@@ -97,6 +97,65 @@ func TestMemoryListAndFilter(t *testing.T) {
 	}
 }
 
+func TestMemoryListSince(t *testing.T) {
+	r, mr, _, mem := setupMemoryAPI(t)
+	ctx := context.Background()
+	// 再插一条 event_at 更早的记忆（A 是 2026-08-19 12:00 UTC）
+	early := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	if err := mr.InsertExt(ctx, mr.DB, []*repo.Memory{{Type: "event", Title: "API 用例记忆 C（早）",
+		Content: "事件 C 的完整描述内容", EpistemicType: "observed", Confidence: 0.9,
+		SessionID: ids.New(), EventAt: &early, Status: "active"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// since 夹在两者之间 → 早的 C 不出现、晚的 A 出现。
+	// （共享测试库里 TestMemoryListAndFilter 也建了一条同名 A，故不断言精确计数）
+	mid := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/memories?since="+mid, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("since: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Memories []repo.MemoryRow `json:"memories"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	hasA, hasC := false, false
+	for _, m := range resp.Memories {
+		if m.Title == mem.Title {
+			hasA = true
+		}
+		if m.Title == "API 用例记忆 C（早）" {
+			hasC = true
+		}
+	}
+	if !hasA || hasC {
+		t.Fatalf("since 过滤后 = %v, want 含 %q 且不含早的 C", titlesOf(resp.Memories), mem.Title)
+	}
+
+	// 日期-only 格式（YYYY-MM-DD，本地零点）→ 同样只返回 A
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/memories?since=2026-08-10", nil))
+	if rec2.Code != http.StatusOK || strings.Contains(rec2.Body.String(), "API 用例记忆 C（早）") {
+		t.Fatalf("since=date-only: %d %s", rec2.Code, rec2.Body.String())
+	}
+
+	// 非法 since → 400
+	rec3 := httptest.NewRecorder()
+	r.ServeHTTP(rec3, httptest.NewRequest(http.MethodGet, "/api/memories?since=notadate", nil))
+	if rec3.Code != http.StatusBadRequest {
+		t.Fatalf("非法 since 应 400, got %d", rec3.Code)
+	}
+}
+
+func titlesOf(rows []repo.MemoryRow) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Title
+	}
+	return out
+}
+
 func TestMemoryPatch(t *testing.T) {
 	r, mr, _, mem := setupMemoryAPI(t)
 	ctx := context.Background()

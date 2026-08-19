@@ -33,6 +33,7 @@ type StageDeps struct {
 	LLM           provider.LLMProvider
 	LLMModel      string            // Tier 1 flash 模型名
 	Prompt        string            // prompts/extraction_v1.md 内容（system prompt）
+	PromptVersion string            // prompt 文件名版本，如 extraction_v1（写 trace 用）
 	ExtractWindow int               // 窗口切分大小（块数），0 = 用默认
 	Gate          memory.GateConfig // 质量闸门阈值
 }

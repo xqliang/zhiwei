@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"zhiwei/internal/api"
@@ -17,6 +19,10 @@ import (
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
 )
+
+// promptPath 是抽取 prompt 的版本化文件路径；版本号 = 去掉扩展名的文件名
+// （如 extraction_v1），运行时从文件名推导并写进 job.trace。
+const promptPath = "prompts/extraction_v1.md"
 
 func main() {
 	cfg, err := config.Load()
@@ -42,10 +48,12 @@ func main() {
 	topics := &repo.TopicRepo{DB: db}
 
 	// 抽取 prompt（版本化文件，运行时读取；版本号见文件名与文件首行）
-	promptBytes, err := os.ReadFile("prompts/extraction_v1.md")
+	promptBytes, err := os.ReadFile(promptPath)
 	if err != nil {
 		log.Fatal("读取抽取 prompt 失败: ", err)
 	}
+	// prompt 版本从文件名推导（extraction_v1.md → extraction_v1），写 job.trace 用
+	promptVersion := strings.TrimSuffix(filepath.Base(promptPath), ".md")
 
 	// pipeline 装配：ASR 用 StepFun realtime（见 asr-protocol-notes.md），
 	// LLM 走 Ark OpenAI 兼容接口（Tier 1 flash）
@@ -56,6 +64,7 @@ func main() {
 		DB: db, Memories: memories, Todos: todos, Topics: topics,
 		LLM: llm, LLMModel: cfg.LLMFastModel,
 		Prompt:        string(promptBytes),
+		PromptVersion: promptVersion,
 		ExtractWindow: cfg.ExtractWindow,
 		Gate:          memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
 	})

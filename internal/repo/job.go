@@ -14,11 +14,16 @@ import (
 
 // TraceEntry 记录一个 stage 的执行信息，对应 spec 的可观测性要求。
 type TraceEntry struct {
-	Stage  string    `json:"stage"`
-	Model  string    `json:"model,omitempty"`
-	MS     int64     `json:"ms"`
-	Error  string    `json:"error,omitempty"`
-	At     time.Time `json:"at"`
+	Stage string    `json:"stage"`
+	Model string    `json:"model,omitempty"`
+	MS    int64     `json:"ms"`
+	Error string    `json:"error,omitempty"`
+	At    time.Time `json:"at"`
+
+	// spec §3.3/§3.5：trace 需记录 prompt 版本、token 用量、窗口数。
+	PromptVersion string `json:"prompt_version,omitempty"` // prompt 版本（文件名，如 extraction_v1）
+	Tokens        int    `json:"tokens,omitempty"`         // LLM token 用量（本阶段累计）
+	Windows       int    `json:"windows,omitempty"`        // 抽取窗口数（LLM 调用次数）
 }
 
 type Job struct {

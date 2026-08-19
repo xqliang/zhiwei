@@ -54,7 +54,11 @@ func stageExtract(d StageDeps) Handler {
 		if err != nil {
 			return fmt.Errorf("抽取: %w", err)
 		}
-		appendTrace(j, repo.TraceEntry{Stage: "extract:llm", Model: d.LLMModel, MS: msSince(llmBegin)})
+		appendTrace(j, repo.TraceEntry{
+			Stage: "extract:llm", Model: d.LLMModel, MS: msSince(llmBegin),
+			Tokens: ex.Stats().Tokens, Windows: ex.Stats().Windows,
+			PromptVersion: d.PromptVersion,
+		})
 
 		// ④ 质量闸门
 		gated := memory.ApplyGate(cands, d.Gate)
