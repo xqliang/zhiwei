@@ -72,7 +72,8 @@ func (r *TopicRepo) FindActiveByName(ctx context.Context, userID int64, name str
 
 // FindActiveByNameExt 与 FindActiveByName 同语义，但可在事务连接上执行
 // （ext 传 *sqlx.Tx）。extract commit 事务内对建议 topic 查重用：
-// 事务开启后的 READ COMMITTED 视图能看到其他事务已提交的同名行。
+// 事务内首个一致性读建立快照，此重查须在事务内 DELETE 之前没有普通
+// SELECT 的前提下才可靠（并发窗口已收窄而非消除，见 stage_extract 注释）。
 func (r *TopicRepo) FindActiveByNameExt(ctx context.Context, ext QueryRowxContext, userID int64, name string) (*Topic, error) {
 	var tp Topic
 	err := ext.QueryRowxContext(ctx, `

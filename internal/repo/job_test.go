@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"testing"
+	"time"
 
 	"zhiwei/internal/ids"
 )
@@ -23,11 +24,34 @@ func TestJobLifecycle(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	claimed, ok, err := jr.ClaimNext(ctx)
-	if err != nil || !ok {
-		t.Fatalf("ClaimNext: %v ok=%v", err, ok)
+	// ClaimNext 领取「最老的 pending 任务」——共享测试库被并行测试二进制
+	// （如 pipeline 包的 pool 测试）使用时，可能先抢到别人的任务。
+	// 重试领取：抢到外任务就还原为 pending（不破坏对方测试），直到领到本任务的。
+	var claimed *Job
+	deadline := time.Now().Add(10 * time.Second)
+	for claimed == nil {
+		c, ok, err := jr.ClaimNext(ctx)
+		if err != nil {
+			t.Fatalf("ClaimNext: %v", err)
+		}
+		if !ok {
+			if time.Now().After(deadline) {
+				t.Fatal("10s 内未能领取到本测试创建的任务")
+			}
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if c.ID != j.ID {
+			c.Status = "pending"
+			if err := jr.Save(ctx, c); err != nil {
+				t.Fatalf("还原外任务: %v", err)
+			}
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		claimed = c
 	}
-	if claimed.ID != j.ID || claimed.Status != "running" {
+	if claimed.Status != "running" {
 		t.Fatalf("claimed %+v", claimed)
 	}
 

@@ -20,10 +20,10 @@ func (f *fakeExtractLLM) Chat(_ context.Context, _ provider.ChatRequest) (provid
 	return provider.ChatResponse{Content: `{"candidates":[
 	  {"type":"event","title":"给 Tom 发邮件","content":"明天需要给 Tom 发邮件确认设计稿",
 	   "epistemic_type":"observed","importance":0.6,"confidence":0.9,
-	   "is_todo":true,"todo_due":null,"topic_id":null,"suggested_topic_name":"工作沟通","block_index":1},
+	   "is_todo":true,"todo_due":null,"topic_id":null,"suggested_topic_name":"工作沟通（抽取fixture）","block_index":1},
 	  {"type":"fact","title":"学习 Rust","content":"用户正在学习 Rust 计划三个月内读完一本书",
 	   "epistemic_type":"observed","importance":0.7,"confidence":0.9,
-	   "is_todo":false,"todo_due":null,"topic_id":null,"suggested_topic_name":"Rust 学习","block_index":2}
+	   "is_todo":false,"todo_due":null,"topic_id":null,"suggested_topic_name":"Rust 学习（抽取fixture）","block_index":2}
 	]}`, TotalTokens: 500}, nil
 }
 
@@ -53,8 +53,19 @@ func setupExtractFixture(t *testing.T, d *StageDeps) (sid ids.ID, rustTopic *rep
 	t.Helper()
 	ctx := context.Background()
 
-	// 预置已有 topic：第二条候选的 suggested_topic_name 与之同名 → 验证合并
-	rustTopic = &repo.Topic{Name: "Rust 学习", Status: "active", CreatedBy: "user"}
+	// 预清理：测试库可能残留历史运行的同名 active/suggested 行（脏库重跑），
+	// 它们会让按名查找命中旧行、破坏本测试的合并断言，先统一置 dismissed。
+	if _, err := d.Topics.DB.ExecContext(ctx, `
+UPDATE topic SET status='dismissed'
+WHERE user_id = 1 AND name IN (?, ?) AND status IN ('active','suggested')`,
+		"Rust 学习（抽取fixture）", "工作沟通（抽取fixture）"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 预置已有 topic：第二条候选的 suggested_topic_name 与之同名 → 验证合并。
+	// 名称加「（抽取fixture）」后缀保证全库唯一：repo 包的 TestTopicCRUD
+	// 也建「Rust 学习」，共享测试库下同名旧行会让两边断言互相污染。
+	rustTopic = &repo.Topic{Name: "Rust 学习（抽取fixture）", Status: "active", CreatedBy: "user"}
 	if err := d.Topics.Create(ctx, rustTopic); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +83,7 @@ func setupExtractFixture(t *testing.T, d *StageDeps) (sid ids.ID, rustTopic *rep
 	}
 	conf := 0.95
 	// 两段同说话人但间隔 >30s（blockGapMS 阈值）→ 强制切成两个块：
-	// 块 1 = Tom 邮件（todo 候选），块 2 = Rust 学习（fact 候选），
+	// 块 1 = Tom 邮件（todo 候选），块 2 = Rust 学习（抽取fixture）（fact 候选），
 	// 与 fake LLM 响应里的 block_index 1/2 对应。
 	if err := d.Transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
 		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1",
@@ -115,7 +126,7 @@ func TestStageExtractCommit(t *testing.T) {
 		t.Fatalf("segment_ids = %v", todoMem.TranscriptSegmentIDs)
 	}
 
-	// todo：confidence 0.9 >= 0.85 → confirmed；继承来源 memory 的 topic（工作沟通）
+	// todo：confidence 0.9 >= 0.85 → confirmed；继承来源 memory 的 topic（工作沟通（抽取fixture））
 	todos, err := d.Todos.ListBySession(ctx, sid)
 	if err != nil || len(todos) != 1 {
 		t.Fatalf("todos = %d err=%v", len(todos), err)
@@ -127,13 +138,13 @@ func TestStageExtractCommit(t *testing.T) {
 		t.Fatalf("source_memory_id = %v", todos[0].SourceMemoryID)
 	}
 
-	// topic：「工作沟通」新建为 suggested；「Rust 学习」合并到已有
-	workTopic, err := d.Topics.FindActiveByName(ctx, 1, "工作沟通")
+	// topic：「工作沟通（抽取fixture）」新建为 suggested；「Rust 学习（抽取fixture）」合并到已有
+	workTopic, err := d.Topics.FindActiveByName(ctx, 1, "工作沟通（抽取fixture）")
 	if err != nil || workTopic == nil {
-		t.Fatalf("工作沟通 topic 未创建: %v %v", workTopic, err)
+		t.Fatalf("工作沟通（抽取fixture） topic 未创建: %v %v", workTopic, err)
 	}
 	if workTopic.Status != "suggested" || workTopic.CreatedBy != "ai" {
-		t.Fatalf("工作沟通 = %+v", workTopic)
+		t.Fatalf("工作沟通（抽取fixture） = %+v", workTopic)
 	}
 	var rustMem *repo.MemoryRow
 	for i := range mems {
@@ -145,7 +156,7 @@ func TestStageExtractCommit(t *testing.T) {
 		t.Fatalf("Rust memory 未挂已有 topic: %+v", rustMem)
 	}
 	if todos[0].TopicID == nil || *todos[0].TopicID != workTopic.ID {
-		t.Fatalf("todo topic = %v, want 工作沟通", todos[0].TopicID)
+		t.Fatalf("todo topic = %v, want 工作沟通（抽取fixture）", todos[0].TopicID)
 	}
 
 	// trace 已记录

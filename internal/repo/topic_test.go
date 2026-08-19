@@ -123,6 +123,13 @@ func TestTopicFindActiveByNameExt(t *testing.T) {
 	r := &TopicRepo{DB: db}
 	ctx := context.Background()
 
+	// 预清理：脏库重跑时历史运行提交的同名行会让按名查重命中旧行（id 更小）
+	if _, err := db.ExecContext(ctx, `
+UPDATE topic SET status='dismissed'
+WHERE user_id = 1 AND name = ? AND status IN ('active','suggested')`, "事务查重主题"); err != nil {
+		t.Fatal(err)
+	}
+
 	// 另一事务提交后：新事务内应查到
 	cm := &Topic{Name: "事务查重主题", Status: "suggested", CreatedBy: "ai"}
 	tx1, err := db.BeginTxx(ctx, nil)
