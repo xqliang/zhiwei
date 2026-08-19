@@ -2,3 +2,5 @@ data/
 bin/
 *.log
 .env
+.run/
+logs/
