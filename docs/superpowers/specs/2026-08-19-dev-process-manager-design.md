@@ -25,7 +25,7 @@ scripts/dev.sh start     # 预检 → 编译 → 后台启动 → 确认健康�
 scripts/dev.sh stop      # 优雅终止（SIGTERM → 等 5s → SIGKILL）→ 清理 PID 文件
 scripts/dev.sh restart   # stop（若在运行）+ start
 scripts/dev.sh status    # 存活状态、PID、运行时长、监听端口、最后 5 行日志
-scripts/dev.sh log       # tail -f logs/dev.log
+scripts/dev.sh logs     # tail -f logs/dev.log
 ```
 
 无参数调用时打印 usage。
@@ -56,7 +56,7 @@ scripts/dev.sh log       # tail -f logs/dev.log
 
 ### Makefile 集成
 
-新增别名：`dev-start` / `dev-stop` / `dev-restart` / `dev-status` / `dev-log`。
+新增别名：`dev-start` / `dev-stop` / `dev-restart` / `dev-status` / `dev-logs`。
 
 ## 错误处理
 
