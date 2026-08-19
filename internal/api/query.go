@@ -134,6 +134,19 @@ func intQuery(r *http.Request, key string, def int) int {
 	return n
 }
 
+// intOffset 解析 offset 查询参数，非法或负数归零。
+func intOffset(r *http.Request) int {
+	v := r.URL.Query().Get("offset")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
