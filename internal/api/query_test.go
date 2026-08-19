@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -14,11 +15,16 @@ import (
 	"zhiwei/internal/repo"
 )
 
-func setupQueryAPI(t *testing.T, s *repo.SessionRepo, j *repo.JobRepo, tr *repo.TranscriptRepo) http.Handler {
+// setupQueryAPI 构造挂载了查询路由的测试 handler。
+// Sprint 2：详情需附带 memories/todos，因此注入两个新 repo。
+func setupQueryAPI(t *testing.T, s *repo.SessionRepo, j *repo.JobRepo,
+	tr *repo.TranscriptRepo, m *repo.MemoryRepo, td *repo.TodoRepo) http.Handler {
 	t.Helper()
 	_ = ids.Init(1)
 	r := chi.NewRouter()
-	RegisterQuery(r, &QueryHandler{Sessions: s, Jobs: j, Transcripts: tr})
+	RegisterQuery(r, &QueryHandler{
+		Sessions: s, Jobs: j, Transcripts: tr, Memories: m, Todos: td,
+	})
 	return r
 }
 
@@ -51,7 +57,22 @@ func TestSessionsAndDetail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := setupQueryAPI(t, sessions, jobs, transcripts)
+	// Sprint 2：插入 memory 与 todo，验证详情接口附带返回
+	memories := &repo.MemoryRepo{DB: db}
+	todos := &repo.TodoRepo{DB: db}
+	eventAt := time.Now()
+	_ = memories.InsertExt(ctx, db, []*repo.Memory{{
+		Type: "event", Title: "装配用例发邮件", Content: "明天记得给 Tom 发邮件确认设计稿",
+		EpistemicType: "observed", Confidence: 0.9, SessionID: sid,
+		EventAt: &eventAt, Status: "active",
+	}})
+	memRows, _ := memories.ListBySession(ctx, sid)
+	_ = todos.InsertExt(ctx, db, []*repo.Todo{{
+		Title: "装配用例给 Tom 发邮件", SourceMemoryID: &memRows[0].ID, Status: "confirmed",
+		Confidence: 0.9,
+	}})
+
+	handler := setupQueryAPI(t, sessions, jobs, transcripts, memories, todos)
 
 	// 列表
 	rec := httptest.NewRecorder()
@@ -75,7 +96,8 @@ func TestSessionsAndDetail(t *testing.T) {
 		t.Fatalf("detail: %d %s", rec2.Code, rec2.Body.String())
 	}
 	body := rec2.Body.String()
-	for _, want := range []string{`"segments"`, "明天记得发邮件", "说话人 1"} {
+	for _, want := range []string{`"segments"`, "明天记得发邮件", "说话人 1",
+		`"memories"`, `"todos"`, "装配用例发邮件"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("detail body 缺少 %s: %s", want, body)
 		}

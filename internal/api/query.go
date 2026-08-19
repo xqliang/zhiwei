@@ -16,6 +16,8 @@ type QueryHandler struct {
 	Sessions    *repo.SessionRepo
 	Jobs        *repo.JobRepo
 	Transcripts *repo.TranscriptRepo
+	Memories    *repo.MemoryRepo // Sprint 2：详情附带 memory 卡片
+	Todos       *repo.TodoRepo   // Sprint 2：详情附带 todo 卡片
 }
 
 // RegisterQuery 挂载查询路由。
@@ -80,6 +82,17 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 		}
 		resp["transcript"] = tr
 		resp["segments"] = views
+	}
+	// Sprint 2：详情附带 memory/todo 卡片（repo 为空则跳过，兼容旧装配）
+	if h.Memories != nil {
+		if mems, err := h.Memories.ListBySession(r.Context(), sid); err == nil {
+			resp["memories"] = mems
+		}
+	}
+	if h.Todos != nil {
+		if todos, err := h.Todos.ListBySession(r.Context(), sid); err == nil {
+			resp["todos"] = todos
+		}
 	}
 	if s.JobID != nil {
 		if j, err := h.Jobs.Get(r.Context(), *s.JobID); err == nil {
