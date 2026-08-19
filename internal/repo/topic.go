@@ -2,6 +2,8 @@ package repo
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -71,7 +73,7 @@ SELECT * FROM topic
 WHERE user_id = ? AND name = ? AND status IN ('active','suggested')
 ORDER BY id LIMIT 1`, userID, name)
 	if err != nil {
-		if err.Error() == "sql: no rows" {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err

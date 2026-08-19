@@ -6,8 +6,8 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/jmoiron/sqlx"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/jmoiron/sqlx"
 )
 
 // NewDB 建立连接池并 ping 验证。连接数按单机个人规模设置。
@@ -22,8 +22,8 @@ func NewDB(dsn string) (*sqlx.DB, error) {
 }
 
 // ExecerContext 是 *sqlx.DB 与 *sqlx.Tx 共同满足的执行接口。
-// 事务内的写方法（InsertExt / DeleteBySessionExt 等）以此为参数，
-// 事务外调用传 r.DB 即可，同一实现两用。
+// 事务内的写方法（当前消费者：TopicRepo.CreateExt；后续 memory/todo DAO
+// 的事务写入也走此接口）以此为参数，事务外调用传 r.DB 即可，同一实现两用。
 type ExecerContext interface {
 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
 	NamedExecContext(ctx context.Context, query string, arg interface{}) (sql.Result, error)
