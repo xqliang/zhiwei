@@ -3,6 +3,9 @@
 package repo
 
 import (
+	"context"
+	"database/sql"
+
 	"github.com/jmoiron/sqlx"
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -17,3 +20,15 @@ func NewDB(dsn string) (*sqlx.DB, error) {
 	db.SetMaxIdleConns(5)
 	return db, nil
 }
+
+// ExecerContext 是 *sqlx.DB 与 *sqlx.Tx 共同满足的执行接口。
+// 事务内的写方法（InsertExt / DeleteBySessionExt 等）以此为参数，
+// 事务外调用传 r.DB 即可，同一实现两用。
+type ExecerContext interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	NamedExecContext(ctx context.Context, query string, arg interface{}) (sql.Result, error)
+}
+
+// 编译期断言：*sqlx.DB 与 *sqlx.Tx 均满足 ExecerContext。
+var _ ExecerContext = (*sqlx.DB)(nil)
+var _ ExecerContext = (*sqlx.Tx)(nil)
