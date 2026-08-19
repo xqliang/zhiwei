@@ -78,6 +78,24 @@ func TestParseCandidatesBadDue(t *testing.T) {
 	}
 }
 
+func TestParseCandidatesNumericTopicID(t *testing.T) {
+	// 模型常见偏差：topic_id 输出成 JSON 数字而非字符串。
+	// 必须容错解析成功，而不是让整个 payload 反序列化失败。
+	raw := `{"candidates":[{"type":"fact","title":"t","content":"八个字以上的内容描述",
+  "epistemic_type":"observed","importance":0.5,"confidence":0.9,
+  "is_todo":false,"todo_due":null,"topic_id":123,"suggested_topic_name":null,"block_index":1}]}`
+	cands, err := ParseCandidates(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("len = %d", len(cands))
+	}
+	if cands[0].TopicID == nil || *cands[0].TopicID != 123 {
+		t.Fatalf("topic_id = %v, want 123", cands[0].TopicID)
+	}
+}
+
 func TestApplyGate(t *testing.T) {
 	high := 0.9
 	low := 0.5

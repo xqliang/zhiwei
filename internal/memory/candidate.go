@@ -39,17 +39,17 @@ var validEpistemic = map[string]bool{
 }
 
 type rawCandidate struct {
-	Type               string  `json:"type"`
-	Title              string  `json:"title"`
-	Content            string  `json:"content"`
-	EpistemicType      string  `json:"epistemic_type"`
-	Importance         float64 `json:"importance"`
-	Confidence         float64 `json:"confidence"`
-	IsTodo             bool    `json:"is_todo"`
-	TodoDue            string  `json:"todo_due"`
-	TopicID            *string `json:"topic_id"`
-	SuggestedTopicName string  `json:"suggested_topic_name"`
-	BlockIndex         int     `json:"block_index"`
+	Type               string          `json:"type"`
+	Title              string          `json:"title"`
+	Content            string          `json:"content"`
+	EpistemicType      string          `json:"epistemic_type"`
+	Importance         float64         `json:"importance"`
+	Confidence         float64         `json:"confidence"`
+	IsTodo             bool            `json:"is_todo"`
+	TodoDue            string          `json:"todo_due"`
+	TopicID            json.RawMessage `json:"topic_id"`
+	SuggestedTopicName string          `json:"suggested_topic_name"`
+	BlockIndex         int             `json:"block_index"`
 }
 
 // ParseCandidates 解析 LLM 输出为候选列表。容错：截取首个 { 到末个 }，
@@ -87,10 +87,22 @@ func ParseCandidates(raw string) ([]Candidate, error) {
 				c.TodoDue = &du
 			} // 非法时间：置空保留候选
 		}
-		if rc.TopicID != nil {
-			if id, err := ids.ParseID(*rc.TopicID); err == nil {
-				c.TopicID = &id
-			} // 非法 id：视为无归属
+		// topic_id 容错：模型可能输出字符串（规范）或数字（常见偏差）。
+		// 用 json.RawMessage 先接住，再按两种形态分别尝试解析，
+		// 避免数字形态导致整个 payload 反序列化失败、白烧一次重试。
+		if len(rc.TopicID) > 0 && string(rc.TopicID) != "null" {
+			var s string
+			if err := json.Unmarshal(rc.TopicID, &s); err == nil {
+				if id, err := ids.ParseID(s); err == nil {
+					c.TopicID = &id
+				} // 非法 id：视为无归属
+			} else {
+				var n int64
+				if err := json.Unmarshal(rc.TopicID, &n); err == nil {
+					id := ids.ID(n)
+					c.TopicID = &id
+				} // 既非字符串也非数字：视为无归属
+			}
 		}
 		cands = append(cands, c)
 	}
