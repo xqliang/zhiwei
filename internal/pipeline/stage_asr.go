@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jmoiron/sqlx"
+
 	"zhiwei/internal/ids"
+	"zhiwei/internal/memory"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
 )
@@ -21,6 +24,17 @@ type StageDeps struct {
 	Transcripts *repo.TranscriptRepo
 	ASR         provider.ASRProvider
 	DataDir     string // 转码输出目录
+
+	// ---- Sprint 2：extract stage ----
+	DB            *sqlx.DB // 开启 commit 事务用
+	Memories      *repo.MemoryRepo
+	Todos         *repo.TodoRepo
+	Topics        *repo.TopicRepo
+	LLM           provider.LLMProvider
+	LLMModel      string            // Tier 1 flash 模型名
+	Prompt        string            // prompts/extraction_v1.md 内容（system prompt）
+	ExtractWindow int               // 窗口切分大小（块数），0 = 用默认
+	Gate          memory.GateConfig // 质量闸门阈值
 }
 
 // BuildStages 返回 stage 名 -> handler 的映射，供 Pool 装配。
@@ -28,12 +42,13 @@ func BuildStages(d StageDeps) map[string]Handler {
 	return map[string]Handler{
 		"asr":     stageASR(d),
 		"segment": stageSegment(d),
+		"extract": stageExtract(d),
 	}
 }
 
 // stageASR：ffmpeg 统一转 wav16k → ASR → transcript + segments 落库。
 func stageASR(d StageDeps) Handler {
-	return func(ctx context.Context, sessionID ids.ID) error {
+	return func(ctx context.Context, _ *repo.Job, sessionID ids.ID) error {
 		s, err := d.Sessions.Get(ctx, sessionID)
 		if err != nil {
 			return fmt.Errorf("读取 session: %w", err)
@@ -69,7 +84,7 @@ func stageASR(d StageDeps) Handler {
 // stageSegment：把 segments 汇总成全文（Sprint 2 的 extract 将以
 // 「连续同说话人聚合块」为输入；本 stage 先做全文字段并完成流水线）。
 func stageSegment(d StageDeps) Handler {
-	return func(ctx context.Context, sessionID ids.ID) error {
+	return func(ctx context.Context, _ *repo.Job, sessionID ids.ID) error {
 		tr, err := d.Transcripts.GetBySession(ctx, sessionID)
 		if err != nil {
 			return fmt.Errorf("读取 transcript: %w", err)

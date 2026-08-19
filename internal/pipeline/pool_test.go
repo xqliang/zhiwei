@@ -34,8 +34,8 @@ func TestPoolRunsJobToDone(t *testing.T) {
 
 	done := make(chan ids.ID, 1)
 	handlers := map[string]Handler{
-		"asr":     func(ctx context.Context, s ids.ID) error { return nil },
-		"segment": func(ctx context.Context, s ids.ID) error { return nil },
+		"asr":     func(ctx context.Context, _ *repo.Job, _ ids.ID) error { return nil },
+		"segment": func(ctx context.Context, _ *repo.Job, _ ids.ID) error { return nil },
 	}
 	p := NewPool(jobs, Flow{Stages: []string{"asr", "segment"}}, handlers)
 	p.OnDone(func(_ context.Context, s ids.ID) { done <- s })

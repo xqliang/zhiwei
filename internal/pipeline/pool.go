@@ -10,9 +10,11 @@ import (
 	"zhiwei/internal/repo"
 )
 
-// Handler 执行一个 stage。sessionID 是流水线的处理对象。
+// Handler 执行一个 stage。job 是当前任务（可向 j.Trace 追加执行记录，
+// pool 会在 handler 返回后持久化，因此 handler 内原地改 Trace 无读写竞争）；
+// sessionID 是流水线的处理对象。
 // 返回 nil 即成功，状态机推进到下一 stage。
-type Handler func(ctx context.Context, sessionID ids.ID) error
+type Handler func(ctx context.Context, j *repo.Job, sessionID ids.ID) error
 
 // Pool 是进程内 worker 池：轮询领取 pending 任务并执行。
 type Pool struct {
@@ -72,7 +74,7 @@ func (p *Pool) claimAndRun(ctx context.Context) {
 		runErr = errNoHandler(j.Stage)
 	} else {
 		begin := time.Now()
-		runErr = safeRun(ctx, h, j.SessionID)
+		runErr = safeRun(ctx, h, j, j.SessionID)
 		log.Printf("[pool] job=%d stage=%s took=%s err=%v", j.ID, j.Stage, time.Since(begin), runErr)
 	}
 	_ = p.flow.Apply(&st, runErr)
@@ -93,11 +95,11 @@ func persist(ctx context.Context, r *repo.JobRepo, j *repo.Job, st JobState, run
 	}
 }
 
-func safeRun(ctx context.Context, h Handler, sid ids.ID) (err error) {
+func safeRun(ctx context.Context, h Handler, j *repo.Job, sid ids.ID) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("handler panic: %v", r)
 		}
 	}()
-	return h(ctx, sid)
+	return h(ctx, j, sid)
 }
