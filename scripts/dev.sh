@@ -127,6 +127,29 @@ cmd_stop() {
   echo "已停止 (SIGKILL)"
 }
 
+cmd_restart() {
+  # 未运行时 stop 幂等跳过，效果等同直接 start
+  cmd_stop
+  cmd_start
+}
+
+cmd_status() {
+  local pid
+  if pid="$(running_pid)"; then
+    echo "zhiwei-server 运行中"
+    echo "  PID:   $pid"
+    # etime= 进程已运行时长；comm= 进程名
+    ps -p "$pid" -o pid=,etime=,comm= | sed 's/^/  /'
+    echo "  端口:  ${PORT} （http://localhost:${PORT}）"
+    echo "  日志:  $LOG_FILE"
+    echo "  最近 5 行日志:"
+    tail -n 5 "$LOG_FILE" 2>/dev/null | sed 's/^/    /' || echo "    (无日志)"
+  else
+    rm -f "$PID_FILE"
+    echo "zhiwei-server 未在运行"
+  fi
+}
+
 cmd_logs() {
   # 日志文件可能还不存在（从未启动过），先 touch 保证 tail 不报错
   mkdir -p "$(dirname "$LOG_FILE")"
@@ -141,6 +164,12 @@ case "${1:-}" in
     ;;
   stop)
     cmd_stop
+    ;;
+  restart)
+    cmd_restart
+    ;;
+  status)
+    cmd_status
     ;;
   logs)
     cmd_logs
