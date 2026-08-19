@@ -15,8 +15,8 @@
   .card { background: #fff; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
   .muted { color: #9ca3af; font-size: 13px; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; }
-  .badge.pending, .badge.running { background: #fef3c7; color: #92400e; }
-  .badge.completed, .badge.done { background: #d1fae5; color: #065f46; }
+  .badge.pending, .badge.running, .badge.suggested { background: #fef3c7; color: #92400e; }
+  .badge.completed, .badge.done, .badge.active, .badge.confirmed { background: #d1fae5; color: #065f46; }
   .badge.failed { background: #fee2e2; color: #991b1b; }
   .seg { padding: 8px 0; border-bottom: 1px dashed #f0f0f0; }
   .seg:last-child { border: none; }
@@ -24,35 +24,44 @@
   .sp1 { background: #6366f1; } .sp2 { background: #10b981; } .sp3 { background: #f59e0b; }
   button.primary { background: #111; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 15px; cursor: pointer; }
   button.primary:disabled { background: #9ca3af; }
+  button.mini { background: #f3f4f6; color: #374151; border: none; border-radius: 8px; padding: 5px 12px; font-size: 13px; cursor: pointer; }
+  button.mini:hover { background: #e5e7eb; }
   #drop { border: 2px dashed #d1d5db; border-radius: 12px; padding: 36px; text-align: center; color: #6b7280; margin-bottom: 12px; }
   #drop.rec { border-color: #ef4444; color: #ef4444; }
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #111; color: #fff; padding: 10px 20px; border-radius: 10px; font-size: 14px; z-index: 99; }
+  .type-tag { display: inline-block; color: #fff; border-radius: 6px; padding: 1px 8px; font-size: 12px; margin-right: 8px; }
+  .kv { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .overdue { color: #dc2626; }
+  .todo-group-title { font-size: 14px; font-weight: 600; margin: 18px 0 8px; }
+  input.txt { border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 10px; font-size: 14px; width: 100%; }
 </style>
 </head>
 <body>
 <div id="app">
   <div class="tabs">
-    <button :class="{active: tab==='timeline'}" @click="tab='timeline'; loadSessions()">时间线</button>
-    <button :class="{active: tab==='record'}" @click="tab='record'">录音</button>
+    <button :class="{active: tab==='timeline'}" @click="switchTab('timeline')">时间线</button>
+    <button :class="{active: tab==='record'}" @click="switchTab('record')">录音</button>
+    <button :class="{active: tab==='topics'}" @click="switchTab('topics')">Topics</button>
+    <button :class="{active: tab==='todos'}" @click="switchTab('todos')">待办</button>
   </div>
+  <div v-if="toast" class="toast">{{ toast }}</div>
 
-  <!-- 时间线 -->
+  <!-- ============ 时间线 ============ -->
   <div class="wrap" v-if="tab==='timeline'">
     <div v-if="!sessions.length" class="card muted">还没有记录。去「录音」页上传或录一段吧。</div>
     <div class="card" v-for="s in sessions" :key="s.id" style="cursor:pointer" @click="openSession(s.id)">
-      <div style="display:flex; justify-content:space-between; align-items:center">
+      <div class="kv">
         <div>
           <b>{{ s.filename }}</b>
           <div class="muted">{{ fmtTime(s.created_at) }} · {{ s.source === 'web_record' ? '录音' : '上传' }}</div>
         </div>
-        <span class="badge" :class="s.job_status || s.status">
-          {{ statusText(s.job_status, s.job_stage) }}
-        </span>
+        <span class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
       </div>
     </div>
 
-    <!-- 详情 -->
+    <!-- 详情弹层 -->
     <div v-if="detail" class="card">
-      <div style="display:flex; justify-content:space-between">
+      <div class="kv">
         <b>转写详情</b>
         <button class="muted" style="border:none;background:none;cursor:pointer" @click="detail=null">✕ 关闭</button>
       </div>
@@ -65,13 +74,46 @@
       <div v-for="(sg, i) in detail.segments" :key="i" class="seg">
         <span class="sp" :class="spClass(sg.speaker)">{{ sg.speaker }}</span>{{ sg.text }}
       </div>
+
+      <!-- memory 卡片 -->
+      <template v-if="detail.memories && detail.memories.length">
+        <div class="todo-group-title">提取的记忆</div>
+        <div class="card" v-for="m in detail.memories" :key="m.id" style="margin:6px 0; position:relative">
+          <div class="kv">
+            <div>
+              <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+              <b>{{ m.title }}</b>
+            </div>
+            <button class="mini" @click="dismissMemory(m)" title="忽略此记忆">✕</button>
+          </div>
+          <div style="margin:6px 0">{{ m.content }}</div>
+          <div class="muted">
+            重要度 {{ (m.importance ?? 0).toFixed(1) }} · 置信 {{ (m.confidence ?? 0).toFixed(2) }}
+            <template v-if="m.topic_name"> · {{ m.topic_name }}</template>
+            <template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template>
+          </div>
+        </div>
+      </template>
+
+      <!-- todo 卡片（只读，操作去待办页） -->
+      <template v-if="detail.todos && detail.todos.length">
+        <div class="todo-group-title">提取的待办</div>
+        <div class="card" v-for="td in detail.todos" :key="td.id" style="margin:6px 0">
+          <div class="kv">
+            <div>☑️ {{ td.title }}</div>
+            <span class="badge" :class="td.status">
+              {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : '已完成' }}
+            </span>
+          </div>
+          <div class="muted" v-if="td.due_at">截止 {{ fmtDue(td.due_at) }} · 到「待办」页处理</div>
+        </div>
+      </template>
     </div>
   </div>
 
-  <!-- 录音 -->
+  <!-- ============ 录音 ============ -->
   <div class="wrap" v-if="tab==='record'">
-    <div id="drop" :class="{rec: recording}"
-         @dragover.prevent @drop.prevent="onDrop">
+    <div id="drop" :class="{rec: recording}" @dragover.prevent @drop.prevent="onDrop">
       <template v-if="!recording">拖拽音频文件到此处，或点击下方按钮录音</template>
       <template v-else>● 录音中…（{{ recSeconds }}s）</template>
     </div>
@@ -84,102 +126,120 @@
       <span class="badge" :class="uploadInfo.status">{{ uploadInfo.text }}</span>
     </div>
   </div>
+
+  <!-- ============ Topics ============ -->
+  <div class="wrap" v-if="tab==='topics'">
+    <!-- 列表视图 -->
+    <template v-if="!topicDetail">
+      <div class="kv" style="margin-bottom:12px">
+        <b>主题</b>
+        <button class="primary" style="padding:6px 16px; font-size:14px" @click="showNewTopic = !showNewTopic">＋ 新建</button>
+      </div>
+      <div class="card" v-if="showNewTopic">
+        <input class="txt" v-model="newTopic.name" placeholder="主题名称（必填）" style="margin-bottom:8px">
+        <input class="txt" v-model="newTopic.description" placeholder="描述（可选）" style="margin-bottom:8px">
+        <button class="primary" style="padding:6px 16px; font-size:14px" @click="createTopic">创建</button>
+      </div>
+      <div v-if="!topics.length" class="card muted">还没有主题。录音抽取后会自动归类，也可以手动新建。</div>
+      <div class="card" v-for="t in topics" :key="t.id">
+        <div class="kv">
+          <div style="cursor:pointer" @click="openTopic(t.id)">
+            <b>{{ t.name }}</b>
+            <span v-if="t.status==='suggested'" class="badge suggested">待确认</span>
+            <div class="muted">{{ t.memory_count }} 条记忆 · {{ t.open_todo_count }} 个进行中待办</div>
+          </div>
+          <div style="display:flex; gap:6px">
+            <button class="mini" v-if="t.status==='suggested'" @click="confirmTopic(t)">确认</button>
+            <button class="mini" @click="dismissTopic(t)">忽略</button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- 详情视图 -->
+    <template v-else>
+      <div class="kv" style="margin-bottom:12px">
+        <div>
+          <b>{{ topicDetail.topic.name }}</b>
+          <span v-if="topicDetail.topic.status==='suggested'" class="badge suggested">待确认</span>
+          <div class="muted" v-if="topicDetail.topic.description">{{ topicDetail.topic.description }}</div>
+        </div>
+        <button class="mini" @click="topicDetail=null">← 返回列表</button>
+      </div>
+      <div class="card" style="margin-bottom:12px">
+        <button class="mini" v-if="renaming===null" @click="startRename(topicDetail.topic)">改名</button>
+        <template v-else>
+          <input class="txt" v-model="renaming.name" style="margin-bottom:8px">
+          <button class="mini" @click="commitRename">保存</button>
+        </template>
+      </div>
+      <div class="todo-group-title">记忆时间线</div>
+      <div v-if="!topicDetail.memories.length" class="card muted">暂无记忆</div>
+      <div class="card" v-for="m in topicDetail.memories" :key="m.id">
+        <div>
+          <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+          <b>{{ m.title }}</b>
+        </div>
+        <div style="margin:6px 0">{{ m.content }}</div>
+        <div class="muted">{{ fmtTime(m.event_at) }}</div>
+      </div>
+      <div class="todo-group-title">关联待办</div>
+      <div v-if="!topicDetail.todos.length" class="card muted">暂无待办</div>
+      <div class="card" v-for="td in topicDetail.todos" :key="td.id">
+        <div class="kv">
+          <div>☑️ {{ td.title }}</div>
+          <span class="badge" :class="td.status">
+            {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : '已完成' }}
+          </span>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- ============ 待办 ============ -->
+  <div class="wrap" v-if="tab==='todos'">
+    <div class="todo-group-title">待确认（{{ suggestedTodos.length }}）</div>
+    <div v-if="!suggestedTodos.length" class="card muted">没有待确认的待办</div>
+    <div class="card" v-for="td in suggestedTodos" :key="td.id" style="background:#fffbeb">
+      <div class="kv">
+        <b>☑️ {{ td.title }}</b>
+        <div style="display:flex; gap:6px">
+          <button class="mini" @click="setTodoStatus(td, 'confirmed')">加入</button>
+          <button class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
+        </div>
+      </div>
+      <div class="muted" v-if="td.due_at" :class="{overdue: new Date(td.due_at) < new Date()}">截止 {{ fmtDue(td.due_at) }}</div>
+      <div class="muted" v-if="td.source_session_id" style="cursor:pointer"
+           @click="jumpToSession(td.source_session_id)">↗ 查看来源对话</div>
+    </div>
+
+    <div class="todo-group-title">进行中（{{ activeTodos.length }}）</div>
+    <div v-if="!activeTodos.length" class="card muted">没有进行中的待办</div>
+    <div class="card" v-for="td in activeTodos" :key="td.id">
+      <div class="kv">
+        <b>☑️ {{ td.title }}</b>
+        <div style="display:flex; gap:6px">
+          <button class="mini" @click="setTodoStatus(td, 'done')">完成</button>
+          <button class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
+        </div>
+      </div>
+      <div class="muted" v-if="td.due_at" :class="{overdue: new Date(td.due_at) < new Date()}">截止 {{ fmtDue(td.due_at) }}</div>
+    </div>
+
+    <div class="todo-group-title" style="cursor:pointer" @click="doneCollapsed = !doneCollapsed">
+      已完成（{{ doneTodos.length }}）{{ doneCollapsed ? ' ▸' : ' ▾' }}
+    </div>
+    <template v-if="!doneCollapsed">
+      <div v-if="!doneTodos.length" class="card muted">没有已完成的待办</div>
+      <div class="card" v-for="td in doneTodos" :key="td.id" style="opacity:.6">
+        <div class="kv">
+          <div>✅ <s>{{ td.title }}</s></div>
+        </div>
+      </div>
+    </template>
+  </div>
 </div>
 
-<script>
-const { createApp, ref, onUnmounted } = Vue;
-
-createApp({
-  setup() {
-    const tab = ref('timeline');
-    const sessions = ref([]);
-    const detail = ref(null);
-    const recording = ref(false);
-    const recSeconds = ref(0);
-    const uploadInfo = ref(null);
-    let recorder = null, recTimer = null, pollTimer = null;
-
-    async function loadSessions() {
-      const r = await fetch('/api/sessions');
-      const d = await r.json();
-      sessions.value = d.sessions || [];
-    }
-    loadSessions();
-
-    async function openSession(id) {
-      const r = await fetch('/api/sessions/' + id);
-      detail.value = await r.json();
-    }
-
-    async function retryJob(id) {
-      await fetch('/api/jobs/' + id + '/retry', { method: 'POST' });
-      await openSession(detail.value.session.id);
-    }
-
-    function statusText(status, stage) {
-      if (status === 'done' || status === 'completed') return '已完成';
-      if (status === 'failed') return '失败';
-      if (status === 'running') return '处理中 · ' + stage;
-      return '排队中';
-    }
-    function spClass(speaker) {
-      const n = (speaker || '').replace(/\D/g, '') || '1';
-      return 'sp' + Math.min(Number(n), 3);
-    }
-    function fmtTime(iso) { return new Date(iso).toLocaleString('zh-CN'); }
-
-    // ---- 录音与上传 ----
-    async function startRec() {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
-      const chunks = [];
-      recorder.ondataavailable = e => chunks.push(e.data);
-      recorder.onstop = () => {
-        stream.getTracks().forEach(t => t.stop());
-        upload(new File(chunks, 'record-' + Date.now() + '.webm', { type: 'audio/webm' }), 'web_record');
-      };
-      recorder.start();
-      recording.value = true; recSeconds.value = 0;
-      recTimer = setInterval(() => recSeconds.value++, 1000);
-    }
-    function stopRec() {
-      recorder.stop(); recording.value = false;
-      clearInterval(recTimer);
-    }
-    function onDrop(e) {
-      const f = e.dataTransfer.files[0];
-      if (f) upload(f, 'web_upload');
-    }
-    async function upload(file, source) {
-      const fd = new FormData();
-      fd.append('file', file); fd.append('source', source);
-      uploadInfo.value = { filename: file.name, status: 'pending', text: '上传中…' };
-      const r = await fetch('/api/audio', { method: 'POST', body: fd });
-      const d = await r.json();
-      if (!r.ok) { uploadInfo.value = { filename: file.name, status: 'failed', text: d.error || '上传失败' }; return; }
-      uploadInfo.value = { filename: file.name, status: 'running', text: '已上传，处理中…', sessionId: d.session_id };
-      pollTimer = setInterval(async () => {
-        const rr = await fetch('/api/sessions/' + d.session_id);
-        const dd = await rr.json();
-        const st = dd.job ? dd.job.status : dd.session.status;
-        if (st === 'done' || st === 'completed') {
-          clearInterval(pollTimer);
-          uploadInfo.value = { filename: file.name, status: 'done', text: '处理完成 ✓' };
-          loadSessions();
-        } else if (st === 'failed') {
-          clearInterval(pollTimer);
-          uploadInfo.value = { filename: file.name, status: 'failed', text: '处理失败，可在时间线重跑' };
-        }
-      }, 2000);
-    }
-
-    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); });
-
-    return { tab, sessions, detail, recording, recSeconds, uploadInfo,
-             loadSessions, openSession, retryJob, statusText, spClass, fmtTime,
-             startRec, stopRec, onDrop };
-  }
-}).mount('#app');
-</script>
+<script src="/app/app.js"></script>
 </body>
 </html>
