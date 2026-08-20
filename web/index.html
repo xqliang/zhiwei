@@ -252,6 +252,7 @@
           <button class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
         </div>
       </div>
+      <div class="muted">生成 {{ fmtTime(td.created_at) }}<template v-if="td.status!=='suggested'"> · 处理 {{ fmtTime(td.updated_at) }}</template></div>
       <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
         <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}<button class="mini" style="padding:0 4px;margin-left:2px" @click.stop="removeTodoTopic(td, tp.id)">✕</button></span>
       </div>
@@ -274,6 +275,7 @@
           <button class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
         </div>
       </div>
+      <div class="muted">生成 {{ fmtTime(td.created_at) }}<template v-if="td.status!=='suggested'"> · 处理 {{ fmtTime(td.updated_at) }}</template></div>
       <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
         <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}<button class="mini" style="padding:0 4px;margin-left:2px" @click.stop="removeTodoTopic(td, tp.id)">✕</button></span>
       </div>
@@ -293,6 +295,7 @@
         <div class="kv">
           <div>✅ <s>{{ td.title }}</s></div>
         </div>
+        <div class="muted">生成 {{ fmtTime(td.created_at) }}<template v-if="td.status!=='suggested'"> · 处理 {{ fmtTime(td.updated_at) }}</template></div>
         <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
           <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}</span>
         </div>
