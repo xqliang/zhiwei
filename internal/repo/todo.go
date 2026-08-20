@@ -170,6 +170,53 @@ func (r *TodoRepo) ListOpenTitlesExt(ctx context.Context, q QueryerContext, user
 	return titles, err
 }
 
+// DedupSuggested 折叠 suggested todo 的归一化标题重复：每组保留 created_at 最旧一条，
+// 其余置 dismissed。单事务。返回 dismissed 数。用于 extract 存量一次性清理
+// （cmd/dedup-todos）；新数据由 commitExtract 落库去重（T3，ListOpenTitlesExt）兜底。
+// 与 T3 互补：T3 防新增重复，本方法清存量重复。
+func (r *TodoRepo) DedupSuggested(ctx context.Context, userID int64) (int, error) {
+	type row struct {
+		ID        ids.ID    `db:"id"`
+		Title     string    `db:"title"`
+		CreatedAt time.Time `db:"created_at"`
+	}
+	var rows []row
+	if err := r.DB.SelectContext(ctx, &rows,
+		`SELECT id, title, created_at FROM todo WHERE user_id = ? AND status = 'suggested' ORDER BY created_at`, userID); err != nil {
+		return 0, err
+	}
+	keep := map[string]bool{} // norm -> 已保留最旧
+	var dismiss []ids.ID
+	for _, x := range rows {
+		k := NormalizeTitle(x.Title)
+		if k == "" {
+			continue // 空标题不参与去重
+		}
+		if !keep[k] {
+			keep[k] = true // 第一条（ORDER BY created_at 最旧）保留
+			continue
+		}
+		dismiss = append(dismiss, x.ID)
+	}
+	if len(dismiss) == 0 {
+		return 0, nil
+	}
+	tx, err := r.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, id := range dismiss {
+		if _, err := tx.ExecContext(ctx, `UPDATE todo SET status='dismissed' WHERE id=?`, id.Int64()); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(dismiss), nil
+}
+
 // attachTopics 给列表行内联 topics[]（走关联表多对多聚合，空列表安全）。
 func (r *TodoRepo) attachTopics(ctx context.Context, rows []TodoRow) error {
 	if len(rows) == 0 {

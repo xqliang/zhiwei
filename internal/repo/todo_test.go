@@ -122,6 +122,80 @@ func TestTodoInsertAndList(t *testing.T) {
 	}
 }
 
+// TestTodoDedupSuggested 验证存量 suggested todo 按归一化标题折叠：
+// 同一归一化键的组里保留 created_at 最旧一条，其余置 dismissed。
+// 用独占 user_id 9527 隔离（迁移显示 todo.user_id 无外键约束，无需 users 行），
+// 三条 todo 共享同一 memory fixture 作为 source_memory_id；
+// created_at 由显式 UPDATE 设定确定性顺序，保证「保留最旧」结果稳定。
+func TestTodoDedupSuggested(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &TodoRepo{DB: db}
+	mr := &MemoryRepo{DB: db}
+	ctx := t.Context()
+
+	// 独占 user_id：migrations 显示 todo.user_id 无外键约束（仅 KEY 索引），
+	// 用 9527 插数据并只对该 user 跑 DedupSuggested，不与其它测试（user_id=1）互相干扰。
+	const uid int64 = 9527
+	sid := ids.New()
+	mem := repoMemoryFixture(t, db, sid)
+
+	// 三条 suggested：「给Tom」与「给 Tom」归一化后同为 "给tom"（折叠目标），
+	// 「学习Rust」归一化为 "学习rust"（独立无重复）。共享同一 source_memory_id。
+	tds := []*Todo{
+		{UserID: uid, Title: "给Tom", SourceMemoryID: &mem.ID, Status: "suggested", Confidence: 0.8},
+		{UserID: uid, Title: "给 Tom", SourceMemoryID: &mem.ID, Status: "suggested", Confidence: 0.8},
+		{UserID: uid, Title: "学习Rust", SourceMemoryID: &mem.ID, Status: "suggested", Confidence: 0.8},
+	}
+	if err := tr.InsertExt(ctx, db, tds); err != nil {
+		t.Fatalf("InsertExt: %v", err)
+	}
+
+	// created_at 确定性：DB 默认 CURRENT_TIMESTAMP(3) 毫秒级，连续插入可能并排，
+	// 故显式 UPDATE 设定递增顺序——给Tom 最旧、给 Tom 次之、学习Rust 最新，
+	// 确保「保留最旧」落在「给Tom」上。
+	t0 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i, td := range tds {
+		if _, err := db.ExecContext(ctx, `UPDATE todo SET created_at=? WHERE id=?`,
+			t0.Add(time.Duration(i)*24*time.Hour), td.ID.Int64()); err != nil {
+			t.Fatalf("set created_at[%d]: %v", i, err)
+		}
+	}
+
+	// 折叠：给Tom(最旧,保留) / 给 Tom(较新,dismissed) / 学习Rust(独立,保留) → dismissed 1 条。
+	n, err := tr.DedupSuggested(ctx, uid)
+	if err != nil {
+		t.Fatalf("DedupSuggested: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("DedupSuggested dismissed %d，期望 1", n)
+	}
+
+	// 逐条断言状态：给Tom 仍 suggested、给 Tom 变 dismissed、学习Rust 仍 suggested。
+	want := map[string]string{
+		"给Tom":    "suggested",
+		"给 Tom":   "dismissed",
+		"学习Rust": "suggested",
+	}
+	for _, td := range tds {
+		got, err := tr.Get(ctx, td.ID)
+		if err != nil {
+			t.Fatalf("Get %q: %v", td.Title, err)
+		}
+		if got.Status != want[td.Title] {
+			t.Errorf("%q 状态=%s，期望 %s", td.Title, got.Status, want[td.Title])
+		}
+	}
+
+	// 清理：按 session 删 todo + memory，便于重跑（幂等）。
+	if err := tr.DeleteBySessionExt(ctx, db, sid); err != nil {
+		t.Fatalf("cleanup todos: %v", err)
+	}
+	_ = mr.DeleteBySessionExt(ctx, db, sid)
+}
+
 // repoMemoryFixture 创建一个最小 memory 行（todo 的 source_memory_id 外键数据）。
 func repoMemoryFixture(t *testing.T, db *sqlx.DB, sessionID ids.ID) *Memory {
 	t.Helper()
