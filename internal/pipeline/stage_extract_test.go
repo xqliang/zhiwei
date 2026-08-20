@@ -21,10 +21,10 @@ func (f *fakeExtractLLM) Chat(_ context.Context, _ provider.ChatRequest) (provid
 	return provider.ChatResponse{Content: `{"candidates":[
 	  {"type":"event","title":"给 Tom 发邮件","content":"明天需要给 Tom 发邮件确认设计稿",
 	   "epistemic_type":"observed","importance":0.6,"confidence":0.9,
-	   "is_todo":true,"todo_due":null,"topic_id":null,"suggested_topic_name":"工作沟通（抽取fixture）","block_index":1},
+	   "is_todo":true,"todo_due":null,"topics":[{"suggested_name":"工作沟通（抽取fixture）"}],"block_index":1},
 	  {"type":"fact","title":"学习 Rust","content":"用户正在学习 Rust 计划三个月内读完一本书",
 	   "epistemic_type":"observed","importance":0.7,"confidence":0.9,
-	   "is_todo":false,"todo_due":null,"topic_id":null,"suggested_topic_name":"Rust 学习（抽取fixture）","block_index":2}
+	   "is_todo":false,"todo_due":null,"topics":[{"suggested_name":"Rust 学习（抽取fixture）"}],"block_index":2}
 	]}`, TotalTokens: 500}, nil
 }
 
@@ -41,6 +41,8 @@ func newExtractDeps(t *testing.T, llm *fakeExtractLLM) StageDeps {
 		Memories:      &repo.MemoryRepo{DB: db},
 		Todos:         &repo.TodoRepo{DB: db},
 		Topics:        &repo.TopicRepo{DB: db},
+		MemoryTopics:  &repo.MemoryTopicRepo{DB: db},
+		TodoTopics:    &repo.TodoTopicRepo{DB: db},
 		LLM:           llm,
 		LLMModel:      "fake-model",
 		Prompt:        "测试 system prompt",
@@ -161,6 +163,25 @@ func TestStageExtractCommit(t *testing.T) {
 		t.Fatalf("todo topic = %v, want 工作沟通（抽取fixture）", todos[0].TopicID)
 	}
 
+	// 多对多关联表
+	memLinks, err := d.MemoryTopics.ListByMemoryIDs(ctx, []ids.ID{todoMem.ID, rustMem.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(memLinks[todoMem.ID]) != 1 || memLinks[todoMem.ID][0].Source != "ai" {
+		t.Fatalf("todoMem 关联 = %+v", memLinks[todoMem.ID])
+	}
+	if len(memLinks[rustMem.ID]) != 1 || memLinks[rustMem.ID][0].Source != "ai" {
+		t.Fatalf("rustMem 关联 = %+v", memLinks[rustMem.ID])
+	}
+	todoLinks, err := d.TodoTopics.ListByTodoIDs(ctx, []ids.ID{todos[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(todoLinks[todos[0].ID]) != 1 || todoLinks[todos[0].ID][0].Source != "ai" {
+		t.Fatalf("todo 关联 = %+v", todoLinks[todos[0].ID])
+	}
+
 	// trace 已记录
 	if j.Trace == nil || len(*j.Trace) == 0 {
 		t.Fatal("job.trace 未写入")
@@ -205,6 +226,30 @@ func TestStageExtractIdempotent(t *testing.T) {
 	todos, _ := d.Todos.ListBySession(ctx, sid)
 	if len(todos) != 1 {
 		t.Fatalf("重跑后 todos = %d, want 1（幂等）", len(todos))
+	}
+
+	// 重跑后关联表无重复行（每条 memory/todo 恰好 1 条 ai 关联）
+	memRows, _ := d.Memories.ListBySession(ctx, sid)
+	memIDs := make([]ids.ID, len(memRows))
+	for i, mr := range memRows {
+		memIDs[i] = mr.ID
+	}
+	ml, _ := d.MemoryTopics.ListByMemoryIDs(ctx, memIDs)
+	for _, id := range memIDs {
+		if len(ml[id]) != 1 {
+			t.Fatalf("重跑后 memory %s 关联=%d, want 1", id, len(ml[id]))
+		}
+	}
+	todoRows, _ := d.Todos.ListBySession(ctx, sid)
+	todoIDs := make([]ids.ID, len(todoRows))
+	for i, tr := range todoRows {
+		todoIDs[i] = tr.ID
+	}
+	tl, _ := d.TodoTopics.ListByTodoIDs(ctx, todoIDs)
+	for _, id := range todoIDs {
+		if len(tl[id]) != 1 {
+			t.Fatalf("重跑后 todo %s 关联=%d, want 1", id, len(tl[id]))
+		}
 	}
 }
 

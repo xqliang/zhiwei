@@ -36,7 +36,7 @@ func TestParseCandidatesTolerance(t *testing.T) {
 	raw := "好的，以下是结果：\n" + fence + "\n" +
 		`{"candidates":[{"type":"fact","title":"学 Rust","content":"用户正在学习 Rust 计划三个月读完一本书",
    "epistemic_type":"observed","importance":0.7,"confidence":0.9,
-   "is_todo":false,"todo_due":null,"topic_id":"123","suggested_topic_name":null,"block_index":2}]}` +
+   "is_todo":false,"todo_due":null,"topics":[{"topic_id":"123"}],"block_index":2}]}` +
 		"\n\x60\x60\x60\n以上。"
 	cands, err := ParseCandidates(raw)
 	if err != nil {
@@ -45,8 +45,8 @@ func TestParseCandidatesTolerance(t *testing.T) {
 	if len(cands) != 1 {
 		t.Fatalf("len = %d", len(cands))
 	}
-	if cands[0].TopicID == nil || *cands[0].TopicID != 123 {
-		t.Fatalf("topic_id = %v", cands[0].TopicID)
+	if len(cands[0].Topics) != 1 || cands[0].Topics[0].ExistingID == nil || *cands[0].Topics[0].ExistingID != 123 {
+		t.Fatalf("topics = %+v", cands[0].Topics)
 	}
 	if cands[0].BlockIndex != 2 {
 		t.Fatalf("block_index = %d", cands[0].BlockIndex)
@@ -83,7 +83,7 @@ func TestParseCandidatesNumericTopicID(t *testing.T) {
 	// 必须容错解析成功，而不是让整个 payload 反序列化失败。
 	raw := `{"candidates":[{"type":"fact","title":"t","content":"八个字以上的内容描述",
   "epistemic_type":"observed","importance":0.5,"confidence":0.9,
-  "is_todo":false,"todo_due":null,"topic_id":123,"suggested_topic_name":null,"block_index":1}]}`
+  "is_todo":false,"todo_due":null,"topics":[{"topic_id":123}],"block_index":1}]}`
 	cands, err := ParseCandidates(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -91,8 +91,36 @@ func TestParseCandidatesNumericTopicID(t *testing.T) {
 	if len(cands) != 1 {
 		t.Fatalf("len = %d", len(cands))
 	}
-	if cands[0].TopicID == nil || *cands[0].TopicID != 123 {
-		t.Fatalf("topic_id = %v, want 123", cands[0].TopicID)
+	if len(cands[0].Topics) != 1 || cands[0].Topics[0].ExistingID == nil || *cands[0].Topics[0].ExistingID != 123 {
+		t.Fatalf("topics = %+v, want 123", cands[0].Topics)
+	}
+}
+
+func TestParseCandidatesTopics(t *testing.T) {
+	raw := `{"candidates":[{
+	  "type":"event","title":"买菜","content":"明天要去买菜和猫粮",
+	  "epistemic_type":"observed","importance":0.6,"confidence":0.9,
+	  "is_todo":true,"todo_due":null,
+	  "topics":[{"topic_id":"101"},{"suggested_name":"爸妈健康"}],
+	  "block_index":1
+	}]}`
+	cs, err := ParseCandidates(raw)
+	if err != nil || len(cs) != 1 {
+		t.Fatalf("cs=%d err=%v", len(cs), err)
+	}
+	c := cs[0]
+	if len(c.Topics) != 2 {
+		t.Fatalf("topics = %d, want 2", len(c.Topics))
+	}
+	if c.Topics[0].ExistingID == nil || *c.Topics[0].ExistingID != ids.ID(101) {
+		t.Fatalf("topics[0] = %+v", c.Topics[0])
+	}
+	if c.Topics[1].NewName != "爸妈健康" {
+		t.Fatalf("topics[1] = %+v", c.Topics[1])
+	}
+	cs2, err := ParseCandidates(`{"candidates":[{"type":"fact","title":"x","content":"足够长的内容描述","epistemic_type":"observed","confidence":0.9,"is_todo":false,"todo_due":null,"block_index":1}]}`)
+	if err != nil || len(cs2[0].Topics) != 0 {
+		t.Fatalf("缺失 topics 应为空切片: %+v", cs2)
 	}
 }
 
@@ -103,7 +131,7 @@ func TestApplyGate(t *testing.T) {
 	mk := func(conf float64, typ string) Candidate {
 		return Candidate{Type: typ, Title: "t", Content: "这是一条足够长的内容描述",
 			EpistemicType: "observed", Importance: 0.5, Confidence: conf,
-			TopicID: &topicID}
+			Topics: []TopicRef{{ExistingID: &topicID}}}
 	}
 	cands := []Candidate{
 		mk(high, "event"),        // 0: 通过

@@ -22,7 +22,7 @@ import (
 
 // promptPath 是抽取 prompt 的版本化文件路径；版本号 = 去掉扩展名的文件名
 // （如 extraction_v1），运行时从文件名推导并写进 job.trace。
-const promptPath = "prompts/extraction_v1.md"
+const promptPath = "prompts/extraction_v2.md"
 
 func main() {
 	cfg, err := config.Load()
@@ -46,6 +46,8 @@ func main() {
 	memories := &repo.MemoryRepo{DB: db}
 	todos := &repo.TodoRepo{DB: db}
 	topics := &repo.TopicRepo{DB: db}
+	memoryTopics := &repo.MemoryTopicRepo{DB: db}
+	todoTopics := &repo.TodoTopicRepo{DB: db}
 
 	// 抽取 prompt（版本化文件，运行时读取；版本号见文件名与文件首行）
 	promptBytes, err := os.ReadFile(promptPath)
@@ -62,6 +64,7 @@ func main() {
 	stages := pipeline.BuildStages(pipeline.StageDeps{
 		Sessions: sessions, Transcripts: transcripts, ASR: asr, DataDir: cfg.DataDir,
 		DB: db, Memories: memories, Todos: todos, Topics: topics,
+		MemoryTopics: memoryTopics, TodoTopics: todoTopics,
 		LLM: llm, LLMModel: cfg.LLMFastModel,
 		Prompt:        string(promptBytes),
 		PromptVersion: promptVersion,

@@ -80,13 +80,13 @@ func stageExtract(d StageDeps) Handler {
 	}
 }
 
-// commitExtract 在单事务内完成幂等清理与落库。
-// 顺序：先删派生 todo（经 source_memory_id 关联）→ 删 memory →
-// 建新建议 topic → 插 memory → 插 todo。任一步失败整体回滚。
-// 已知 MVP 限制：重跑会重建用户在重试窗口内已 dismiss 的行
-// （按 session 硬删，无状态过滤）。
+// commitExtract 在单事务内完成幂等清理与落库（多对多版）。
+// 顺序：快照手动关联(source=user) → 删 todo_topic → 删 todo → 删 memory_topic → 删 memory
+// → 建建议 topic → 插 memory + memory_topic(ai) + 重链 user → 插 todo + todo_topic(ai) + 重链 user。
+// 过渡双写：仍写 legacy memory/todo.topic_id（取首个 resolved topic），保 repo 旧查询正确；
+// T5 移除双写、T6 删 topic_id 列。
 func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID int64,
-	gated []memory.Candidate, refs []memory.TopicRef, newNames []string) error {
+	gated []memory.Candidate, refs [][]memory.TopicRef, newNames []string) error {
 
 	tx, err := d.DB.BeginTxx(ctx, nil)
 	if err != nil {
@@ -94,18 +94,41 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 	}
 	defer func() { _ = tx.Rollback() }() // Commit 后 Rollback 是 no-op
 
-	// 1. 幂等清理：todo 删除依赖 memory 行仍存在（source_memory_id 子查询），必须先删
+	// 1. 快照手动关联（按自然键 K），source='user' 行稍后按 K 重链
+	memSnap := map[string][]ids.ID{}
+	todoSnap := map[string][]ids.ID{}
+	if links, err := d.MemoryTopics.SnapshotUserBySessionExt(ctx, tx, sessionID); err != nil {
+		return fmt.Errorf("快照 memory 手动关联: %w", err)
+	} else {
+		for _, l := range links {
+			k := memory.NaturalKey(l.SegmentIDs, l.Title)
+			memSnap[k] = append(memSnap[k], l.TopicID)
+		}
+	}
+	if links, err := d.TodoTopics.SnapshotUserBySessionExt(ctx, tx, sessionID); err != nil {
+		return fmt.Errorf("快照 todo 手动关联: %w", err)
+	} else {
+		for _, l := range links {
+			k := memory.NaturalKey(l.SegmentIDs, l.Title)
+			todoSnap[k] = append(todoSnap[k], l.TopicID)
+		}
+	}
+
+	// 2. 幂等清理（关联表依赖主表行存在，须先删关联再删主表）
+	if err := d.TodoTopics.DeleteBySessionExt(ctx, tx, sessionID); err != nil {
+		return fmt.Errorf("清理旧 todo_topic: %w", err)
+	}
 	if err := d.Todos.DeleteBySessionExt(ctx, tx, sessionID); err != nil {
 		return fmt.Errorf("清理旧 todo: %w", err)
+	}
+	if err := d.MemoryTopics.DeleteBySessionExt(ctx, tx, sessionID); err != nil {
+		return fmt.Errorf("清理旧 memory_topic: %w", err)
 	}
 	if err := d.Memories.DeleteBySessionExt(ctx, tx, sessionID); err != nil {
 		return fmt.Errorf("清理旧 memory: %w", err)
 	}
 
-	// 2. 新建建议 topic。事务内先按名查重（FindActiveByNameExt 走 tx 连接）：
-	// ResolveTopics 的查重在 LLM 调用前完成（秒级窗口），并发 extract 可能
-	// 同时建议同名 topic 而双双漏判，这里兜底改为复用。
-	// 注意：查重只能收窄窗口而非根除竞态（topic.name 无唯一约束）。
+	// 3. 新建建议 topic（事务内同名查重兜底，沿用 Sprint 2 §3.5）
 	nameToID := make(map[string]ids.ID, len(newNames))
 	for _, name := range newNames {
 		if existing, err := d.Topics.FindActiveByNameExt(ctx, tx, userID, name); err != nil {
@@ -121,41 +144,101 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 		nameToID[name] = tp.ID
 	}
 
-	// 3. memory 入库（指针切片，ID 回填供 todo 引用）
+	// resolveTopicID 把单条 ref 折算成最终 topic id（ExistingID 直用，NewName 查 nameToID）
+	resolveTopicID := func(ref memory.TopicRef) (ids.ID, bool) {
+		if ref.ExistingID != nil {
+			return *ref.ExistingID, true
+		}
+		if id, ok := nameToID[ref.NewName]; ok {
+			return id, true
+		}
+		return 0, false
+	}
+
+	// 4. memory + memory_topic(ai) + 重链 user + 双写 legacy topic_id
 	memories := make([]*repo.Memory, len(gated))
+	resolvedTids := make([][]ids.ID, len(gated)) // 每候选 resolved topic ids（去重有序）
 	for i, c := range gated {
+		seen := map[ids.ID]bool{}
+		for _, ref := range refs[i] {
+			if id, ok := resolveTopicID(ref); ok && !seen[id] {
+				seen[id] = true
+				resolvedTids[i] = append(resolvedTids[i], id)
+			}
+		}
 		memories[i] = &repo.Memory{
 			Type: c.Type, Title: c.Title, Content: c.Content,
 			EpistemicType: c.EpistemicType,
-			Importance:    c.Importance, Confidence: c.Confidence,
+			Importance: c.Importance, Confidence: c.Confidence,
 			SessionID: sessionID, TranscriptSegmentIDs: ids.List(c.SegmentIDs),
 			EventAt: &c.EventAt, Status: "active",
 		}
-		if ref := refs[i]; ref.ExistingID != nil {
-			memories[i].TopicID = ref.ExistingID
-		} else if ref.NewName != "" {
-			id := nameToID[ref.NewName]
-			memories[i].TopicID = &id
+		// 过渡双写：legacy topic_id 取首个 resolved topic（须在 InsertExt 前设）
+		if len(resolvedTids[i]) > 0 {
+			first := resolvedTids[i][0]
+			memories[i].TopicID = &first
 		}
 	}
 	if err := d.Memories.InsertExt(ctx, tx, memories); err != nil {
 		return fmt.Errorf("写 memory: %w", err)
 	}
+	var memTopicRows []*repo.MemoryTopicLink
+	for i, c := range gated {
+		k := memory.NaturalKey(c.SegmentIDs, c.Title)
+		seen := map[ids.ID]bool{}
+		for _, tid := range resolvedTids[i] {
+			seen[tid] = true
+			memTopicRows = append(memTopicRows, &repo.MemoryTopicLink{MemoryID: memories[i].ID, TopicID: tid, Source: "ai"})
+		}
+		for _, tid := range memSnap[k] {
+			if !seen[tid] {
+				memTopicRows = append(memTopicRows, &repo.MemoryTopicLink{MemoryID: memories[i].ID, TopicID: tid, Source: "user"})
+			}
+		}
+	}
+	if err := d.MemoryTopics.InsertExt(ctx, tx, memTopicRows); err != nil {
+		return fmt.Errorf("写 memory_topic: %w", err)
+	}
 
-	// 4. todo 入库（继承来源 memory 的 topic 归属）
+	// 5. todo + todo_topic(ai) + 重链 user + 双写 legacy topic_id
 	var todos []*repo.Todo
+	type todoPlan struct {
+		tids []ids.ID
+		key  string
+	}
+	plans := make([]todoPlan, 0)
 	for i, c := range gated {
 		if !c.IsTodo || c.TodoStatus == "" {
 			continue
 		}
-		todos = append(todos, &repo.Todo{
+		td := &repo.Todo{
 			Title: c.Title, SourceMemoryID: &memories[i].ID,
-			TopicID: memories[i].TopicID, Status: c.TodoStatus,
-			DueAt: c.TodoDue, Confidence: c.Confidence,
-		})
+			Status: c.TodoStatus, DueAt: c.TodoDue, Confidence: c.Confidence,
+		}
+		if memories[i].TopicID != nil {
+			td.TopicID = memories[i].TopicID // 双写
+		}
+		todos = append(todos, td)
+		plans = append(plans, todoPlan{tids: resolvedTids[i], key: memory.NaturalKey(c.SegmentIDs, c.Title)})
 	}
 	if err := d.Todos.InsertExt(ctx, tx, todos); err != nil {
 		return fmt.Errorf("写 todo: %w", err)
+	}
+	var todoTopicRows []*repo.TodoTopicLink
+	for j, td := range todos {
+		seen := map[ids.ID]bool{}
+		for _, tid := range plans[j].tids {
+			seen[tid] = true
+			todoTopicRows = append(todoTopicRows, &repo.TodoTopicLink{TodoID: td.ID, TopicID: tid, Source: "ai"})
+		}
+		for _, tid := range todoSnap[plans[j].key] {
+			if !seen[tid] {
+				todoTopicRows = append(todoTopicRows, &repo.TodoTopicLink{TodoID: td.ID, TopicID: tid, Source: "user"})
+			}
+		}
+	}
+	if err := d.TodoTopics.InsertExt(ctx, tx, todoTopicRows); err != nil {
+		return fmt.Errorf("写 todo_topic: %w", err)
 	}
 
 	return tx.Commit()
