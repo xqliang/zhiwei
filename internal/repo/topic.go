@@ -114,3 +114,75 @@ func (r *TopicRepo) UpdateName(ctx context.Context, id ids.ID, name string) erro
 	_, err := r.DB.ExecContext(ctx, `UPDATE topic SET name = ? WHERE id = ?`, name, id.Int64())
 	return err
 }
+
+// MergeGroup 一组合并：canonical_name 是规范名（命中已有 active/suggested 同名则复用，
+// 否则新建 active/ai topic）；member_ids 是被并入的 topic。各 member 的关联迁到 canonical
+// 后置 dismissed。用于 T7 智能合并：Consolidate（LLM 提议）+ Merge（用户确认后落库）。
+type MergeGroup struct {
+	CanonicalName string   `json:"canonical_name"`
+	MemberIDs     []ids.ID `json:"member_ids"`
+}
+
+// MergeGroups 单事务合并多组 topic：每组找/建 canonical，把各 member 的 memory_topic/
+// todo_topic 关联 INSERT IGNORE 迁到 canonical（PK 天然去重），删 member 关联行，member
+// 置 dismissed。member==canonical 跳过。userID 固定 1（单用户 MVP，与 CreateExt 一致）。
+//
+// 事务设计：全部操作在同一 tx 内完成，任一步出错整体 ROLLBACK，保证关联不丢。
+// INSERT IGNORE 迁移 → DELETE 旧关联 → UPDATE member dismissed，顺序保证即使 member
+// 与 canonical 共享某些 owner（memory/todo），迁移后旧关联删除也不影响 canonical 行。
+func (r *TopicRepo) MergeGroups(ctx context.Context, groups []MergeGroup) error {
+	tx, err := r.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, g := range groups {
+		if len(g.MemberIDs) == 0 {
+			continue
+		}
+		// 找/建 canonical：命中已有 active/suggested 同名则复用，否则新建 active/ai
+		var cid ids.ID
+		if ex, err := r.FindActiveByNameExt(ctx, tx, 1, g.CanonicalName); err != nil {
+			return err
+		} else if ex != nil {
+			cid = ex.ID
+		} else {
+			tp := &Topic{Name: g.CanonicalName, Status: "active", CreatedBy: "ai"}
+			if err := r.CreateExt(ctx, tx, tp); err != nil {
+				return err
+			}
+			cid = tp.ID
+		}
+		for _, mid := range g.MemberIDs {
+			if mid == cid {
+				continue // member==canonical 跳过
+			}
+			// 迁 memory_topic：INSERT IGNORE 把 member 的关联复制到 canonical（PK 去重）
+			if _, err := tx.ExecContext(ctx,
+				`INSERT IGNORE INTO memory_topic (memory_id, topic_id, source)
+				 SELECT memory_id, ?, source FROM memory_topic WHERE topic_id = ?`,
+				cid.Int64(), mid.Int64()); err != nil {
+				return err
+			}
+			// 删 member 的 memory_topic 关联（迁移后清理旧指针）
+			if _, err := tx.ExecContext(ctx, `DELETE FROM memory_topic WHERE topic_id = ?`, mid.Int64()); err != nil {
+				return err
+			}
+			// 迁 todo_topic：同样 INSERT IGNORE + DELETE
+			if _, err := tx.ExecContext(ctx,
+				`INSERT IGNORE INTO todo_topic (todo_id, topic_id, source)
+				 SELECT todo_id, ?, source FROM todo_topic WHERE topic_id = ?`,
+				cid.Int64(), mid.Int64()); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM todo_topic WHERE topic_id = ?`, mid.Int64()); err != nil {
+				return err
+			}
+			// member 置 dismissed（保留行，便于审计/撤销；不再出现在 active/suggested 列表）
+			if _, err := tx.ExecContext(ctx, `UPDATE topic SET status='dismissed' WHERE id = ?`, mid.Int64()); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}

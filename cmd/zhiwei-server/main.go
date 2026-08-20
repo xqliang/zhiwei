@@ -57,6 +57,12 @@ func main() {
 	// prompt 版本从文件名推导（extraction_v1.md → extraction_v1），写 job.trace 用
 	promptVersion := strings.TrimSuffix(filepath.Base(promptPath), ".md")
 
+	// topic 合并 prompt（版本化文件，Consolidate handler 用；版本号见文件名）
+	consolidateBytes, err := os.ReadFile("prompts/topic_consolidate_v1.md")
+	if err != nil {
+		log.Fatal("读取合并 prompt 失败: ", err)
+	}
+
 	// pipeline 装配：ASR 用 StepFun realtime（见 asr-protocol-notes.md），
 	// LLM 走 Ark OpenAI 兼容接口（Tier 1 flash）
 	asr := provider.NewStepFunASR(cfg.StepFunASREndpoint, cfg.StepFunAPIKey)
@@ -89,7 +95,10 @@ func main() {
 	})
 	api.RegisterMemory(r, &api.MemoryHandler{Memories: memories, Topics: topics, MemoryTopics: memoryTopics})
 	api.RegisterTodo(r, &api.TodoHandler{Todos: todos, TodoTopics: todoTopics, Topics: topics})
-	api.RegisterTopic(r, &api.TopicHandler{Topics: topics, Memories: memories, Todos: todos})
+	api.RegisterTopic(r, &api.TopicHandler{
+		Topics: topics, Memories: memories, Todos: todos,
+		LLM: llm, LLMModel: cfg.LLMFastModel, ConsolidatePrompt: string(consolidateBytes),
+	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
 	go func() {
