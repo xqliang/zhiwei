@@ -221,6 +221,34 @@ createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- Topics 相似度启发（疑似可合并提示，纯前端） ----------
+    // 归一化标题：小写 + 仅保留字母/数字（与后端 NormalizeTitle 同思路，前端独立实现）。
+    function normTitle(s) { return (s || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, ''); }
+    // 疑似可合并：与列表中任一其他 topic 归一化后「互为包含」或 Levenshtein 相似比 > 0.85，
+    // 返回疑似对象的名称（供卡片挂「疑似可合并: X」徽标）；无则 null。只标记不自动合并——
+    // 字面近重复能抓（如「SDPC俱乐部活动」与「…活动准备」），语义相近的交给手动智能合并。
+    function suspectOf(t, all) {
+      const a = normTitle(t.name);
+      if (!a) return null;
+      for (const o of all) {
+        if (o.id === t.id) continue;
+        const b = normTitle(o.name);
+        if (!b) continue;
+        if (a.includes(b) || b.includes(a)) return o.name;
+        if (a.length > 3 && b.length > 3 && similarRatio(a, b) > 0.85) return o.name;
+      }
+      return null;
+    }
+    // similarRatio：Levenshtein 编辑距离转相似比（0~1），1 表示完全相同。
+    function similarRatio(a, b) {
+      const m = a.length, n = b.length;
+      const dp = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+      for (let j = 0; j <= n; j++) dp[0][j] = j;
+      for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++)
+        dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      return 1 - dp[m][n] / Math.max(m, n);
+    }
+
     // ---------- 待办 ----------
     const todos = ref([]);
     const doneCollapsed = ref(true);
@@ -291,7 +319,7 @@ createApp({
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissMemory, retryJob,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
-      loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic,
+      loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic, suspectOf,
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos,
       loadTodos, setTodoStatus, jumpToSession,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,

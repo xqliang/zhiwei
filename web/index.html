@@ -184,6 +184,7 @@
           <div style="cursor:pointer" @click="openTopic(t.id)">
             <b>{{ t.name }}</b>
             <span v-if="t.status==='suggested'" class="badge suggested">待确认</span>
+            <span v-if="suspectOf(t, topics)" class="badge" style="background:#fef3c7;color:#92400e">疑似可合并: {{ suspectOf(t, topics) }}</span>
             <div class="muted">{{ t.memory_count }} 条记忆 · {{ t.open_todo_count }} 个进行中待办</div>
           </div>
           <div style="display:flex; gap:6px">
@@ -304,6 +305,6 @@
   </div>
 </div>
 
-<script src="/app/app.eb65b355.js"></script>
+<script src="/app/app.f7414fa5.js"></script>
 </body>
 </html>
