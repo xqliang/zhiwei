@@ -249,6 +249,45 @@ createApp({
       return 1 - dp[m][n] / Math.max(m, n);
     }
 
+    // ---------- Topics 智能合并（LLM 提议 → 用户编辑确认 → 应用） ----------
+    // mergeDraft：合并提议草稿，每组 {canonical_name, members:[{id,name,checked}]}。
+    // 用 {id,name,checked} 成员对象而非裸 id 数组，便于模板正确渲染 checkbox（修掉
+    // 计划初版里 g.member_ids[gi] 的索引错位）。
+    const mergeDraft = ref(null);
+    // startConsolidate：调后端 consolidate（LLM 按该用户主题列表给合并组提议），
+    // 落进草稿供用户编辑 canonical 名与勾选成员；不改库。
+    async function startConsolidate() {
+      try {
+        const d = await api('POST', '/api/topics/consolidate', {});
+        mergeDraft.value = (d.groups || []).map(g => ({
+          canonical_name: g.canonical_name || '',
+          members: (g.member_ids || []).map(id => {
+            const m = topics.value.find(t => t.id === id);
+            return { id, name: m ? m.name : id, checked: true };
+          }),
+        }));
+        if (!mergeDraft.value.length) toast.value = '暂无需要合并的主题';
+      } catch (e) { showError(e); }
+    }
+    // toggleMergeMember：勾选/取消某组成员（直接翻转 m.checked，Vue 深响应式自动重渲染）。
+    function toggleMergeMember(g, id) {
+      const m = g.members.find(x => x.id === id);
+      if (m) m.checked = !m.checked;
+    }
+    // applyMerge：只提交「规范名非空 + 仍勾选 ≥2 成员」的组；后端单事务把各 member 的
+    // memory_topic/todo_topic 关联 INSERT IGNORE 迁到 canonical、member 置 dismissed。
+    async function applyMerge() {
+      const groups = (mergeDraft.value || [])
+        .map(g => ({ canonical_name: g.canonical_name.trim(), member_ids: g.members.filter(m => m.checked).map(m => m.id) }))
+        .filter(g => g.canonical_name && g.member_ids.length >= 2);
+      if (!groups.length) { mergeDraft.value = null; return; }
+      try {
+        await api('POST', '/api/topics/merge', { groups });
+        mergeDraft.value = null;
+        await loadTopics();
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 待办 ----------
     const todos = ref([]);
     const doneCollapsed = ref(true);
@@ -319,7 +358,7 @@ createApp({
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissMemory, retryJob,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
-      loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic, suspectOf,
+      loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, toggleMergeMember, applyMerge,
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos,
       loadTodos, setTodoStatus, jumpToSession,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,

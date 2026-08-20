@@ -171,7 +171,24 @@
     <template v-if="!topicDetail">
       <div class="kv" style="margin-bottom:12px">
         <b>主题</b>
-        <button class="primary" style="padding:6px 16px; font-size:14px" @click="showNewTopic = !showNewTopic">＋ 新建</button>
+        <div style="display:flex; gap:6px">
+          <button class="mini" @click="startConsolidate">智能合并</button>
+          <button class="primary" style="padding:6px 16px; font-size:14px" @click="showNewTopic = !showNewTopic">＋ 新建</button>
+        </div>
+      </div>
+      <div class="card" v-if="mergeDraft">
+        <div class="todo-group-title">合并提议（编辑后确认）</div>
+        <div v-if="!mergeDraft.length" class="muted">暂无可合并组</div>
+        <div v-for="(g, gi) in mergeDraft" :key="gi" style="margin-bottom:12px; padding-bottom:10px; border-bottom:1px dashed var(--border)">
+          <input class="txt" v-model="g.canonical_name" placeholder="规范名（必填）" style="margin-bottom:6px">
+          <div v-for="m in g.members" :key="m.id" class="muted" style="margin:2px 0">
+            <label><input type="checkbox" :checked="m.checked" @change="toggleMergeMember(g, m.id)"> {{ m.name }}</label>
+          </div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:8px">
+          <button class="primary" @click="applyMerge">确认合并</button>
+          <button class="mini" @click="mergeDraft = null">取消</button>
+        </div>
       </div>
       <div class="card" v-if="showNewTopic">
         <input class="txt" v-model="newTopic.name" placeholder="主题名称（必填）" style="margin-bottom:8px">
@@ -305,6 +322,6 @@
   </div>
 </div>
 
-<script src="/app/app.f7414fa5.js"></script>
+<script src="/app/app.cfa9896b.js"></script>
 </body>
 </html>
