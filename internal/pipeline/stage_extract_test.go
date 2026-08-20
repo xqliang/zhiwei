@@ -5,6 +5,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"zhiwei/internal/ids"
@@ -28,7 +29,9 @@ func (f *fakeExtractLLM) Chat(_ context.Context, _ provider.ChatRequest) (provid
 	]}`, TotalTokens: 500}, nil
 }
 
-func newExtractDeps(t *testing.T, llm *fakeExtractLLM) StageDeps {
+// newExtractDeps 构造 extract stage 依赖。llm 参数用接口类型，
+// 以便复用同一套 fixture（fakeExtractLLM / driftExtractLLM 等）。
+func newExtractDeps(t *testing.T, llm provider.LLMProvider) StageDeps {
 	t.Helper()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
@@ -46,7 +49,9 @@ func newExtractDeps(t *testing.T, llm *fakeExtractLLM) StageDeps {
 		LLM:           llm,
 		LLMModel:      "fake-model",
 		Prompt:        "测试 system prompt",
-		PromptVersion: "extraction_v1",
+		// PromptVersion 与生产对齐（cmd/zhiwei-server/main.go 用 extraction_v2.md），
+		// 避免 trace 里记的版本与线上不一致（评审 M3）。
+		PromptVersion: "extraction_v2",
 		ExtractWindow: 10,
 		Gate:          memory.GateConfig{MinConf: 0.6, TodoConf: 0.85},
 	}
@@ -298,4 +303,194 @@ func TestStageExtractEmptyTranscript(t *testing.T) {
 	if len(mems) != 0 {
 		t.Fatalf("空会话 memories = %d", len(mems))
 	}
+}
+
+// TestStageExtractRerunPreservesUserLinks 验证 spec §6「重跑保留手动关联」headline 行为：
+// 重跑按自然键 NaturalKey(segment_ids,title) 恢复 source='user' 手动关联，
+// ai 行重建不重复；title 漂移则自然键不再命中 → user 关联不复原。
+//
+// 覆盖 TestStageExtractIdempotent 未守护的「user 行按自然键恢复」路径：
+// commitExtract 删旧前快照 source='user' 行成 map，重建后按同键 INSERT IGNORE 补回。
+// 见 stage_extract.go 的 commitExtract（快照→删→重建→重链）。
+func TestStageExtractRerunPreservesUserLinks(t *testing.T) {
+	llm := &fakeExtractLLM{}
+	d := newExtractDeps(t, llm)
+	sid, rustTopic := setupExtractFixture(t, &d)
+	ctx := context.Background()
+
+	handler := BuildStages(d)["extract"]
+	j := &repo.Job{SessionID: sid, Stage: "extract", Status: "running"}
+	if err := handler(ctx, j, sid); err != nil {
+		t.Fatalf("首次 extract: %v", err)
+	}
+
+	// 找到 todo 来源 memory（title=="给 Tom 发邮件"）与其 todo
+	mems, _ := d.Memories.ListBySession(ctx, sid)
+	todos, _ := d.Todos.ListBySession(ctx, sid)
+	var todoMem1 *repo.MemoryRow
+	for i := range mems {
+		if mems[i].Title == "给 Tom 发邮件" {
+			todoMem1 = &mems[i]
+		}
+	}
+	if todoMem1 == nil {
+		t.Fatal("未找到 todo 来源 memory（给 Tom 发邮件）")
+	}
+	if len(todos) != 1 {
+		t.Fatalf("首次后 todos = %d, want 1", len(todos))
+	}
+
+	// 手动加 user 关联：rustTopic 与该 memory 的 ai topic「工作沟通（抽取fixture）」不同，
+	// 便于在重跑后的关联里区分 ai 行与 user 行。
+	// 自然键 = NaturalKey(segment_ids, title)；todo 与其 source memory 共享
+	// segment_ids+title，故 memory 与 todo 的 user 关联用同一键恢复。
+	if err := d.MemoryTopics.AddLink(ctx, todoMem1.ID, rustTopic.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.TodoTopics.AddLink(ctx, todos[0].ID, rustTopic.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// ---- 重跑（同一 fake LLM → 同 title → 自然键匹配）----
+	if err := handler(ctx, j, sid); err != nil {
+		t.Fatalf("重跑 extract: %v", err)
+	}
+
+	// 重跑后找新的 todo 来源 memory（title 仍「给 Tom 发邮件」，但 ID 已换）
+	mems2, _ := d.Memories.ListBySession(ctx, sid)
+	todos2, _ := d.Todos.ListBySession(ctx, sid)
+	var newTodoMem *repo.MemoryRow
+	for i := range mems2 {
+		if mems2[i].Title == "给 Tom 发邮件" {
+			newTodoMem = &mems2[i]
+		}
+	}
+	if newTodoMem == nil {
+		t.Fatal("重跑后未找到新的 todo 来源 memory")
+	}
+	if len(todos2) != 1 {
+		t.Fatalf("重跑后 todos = %d, want 1（幂等）", len(todos2))
+	}
+
+	// 新 todo 来源 memory 的关联恰好 2 条：1 ai（工作沟通）+ 1 user（rustTopic）——
+	// 证明 user 行按自然键恢复、ai 行重建不重复。
+	memLinks, err := d.MemoryTopics.ListByMemoryIDs(ctx, []ids.ID{newTodoMem.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(memLinks[newTodoMem.ID]); got != 2 {
+		t.Fatalf("重跑后 memory 关联 = %d, want 2（1 ai + 1 user）", got)
+	}
+	memUserCnt, memRustHit := 0, false
+	for _, ti := range memLinks[newTodoMem.ID] {
+		if ti.Source == "user" {
+			memUserCnt++
+			if ti.ID == rustTopic.ID {
+				memRustHit = true
+			}
+		}
+	}
+	if memUserCnt != 1 || !memRustHit {
+		t.Fatalf("重跑后 memory user 关联 = %d rustHit=%v, want user=1 且命中 rustTopic", memUserCnt, memRustHit)
+	}
+
+	// todo 的关联同理 2 条（1 ai + 1 user）
+	todoLinks, err := d.TodoTopics.ListByTodoIDs(ctx, []ids.ID{todos2[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(todoLinks[todos2[0].ID]); got != 2 {
+		t.Fatalf("重跑后 todo 关联 = %d, want 2（1 ai + 1 user）", got)
+	}
+	todoUserCnt, todoRustHit := 0, false
+	for _, ti := range todoLinks[todos2[0].ID] {
+		if ti.Source == "user" {
+			todoUserCnt++
+			if ti.ID == rustTopic.ID {
+				todoRustHit = true
+			}
+		}
+	}
+	if todoUserCnt != 1 || !todoRustHit {
+		t.Fatalf("重跑后 todo user 关联 = %d rustHit=%v, want user=1 且命中 rustTopic", todoUserCnt, todoRustHit)
+	}
+
+	// ---- title 漂移不复原 ----
+	// 用独立 fake LLM（driftExtractLLM）与独立 session/fixture，避免污染上面的断言。
+	// 第 1 次返回原 title「给 Tom 发邮件」，加一条 user 关联；第 ≥2 次把 todo 候选
+	// title 改成「给 Tom 发邮件(改名)」→ 自然键不再命中旧 user 关联 → 新 memory user=0。
+	driftLLM := &driftExtractLLM{}
+	dDrift := newExtractDeps(t, driftLLM)
+	sid2, rustTopic2 := setupExtractFixture(t, &dDrift)
+	h2 := BuildStages(dDrift)["extract"]
+	j2 := &repo.Job{SessionID: sid2, Stage: "extract", Status: "running"}
+	if err := h2(ctx, j2, sid2); err != nil {
+		t.Fatalf("漂移首次 extract: %v", err)
+	}
+	// 漂移首次后的「给 Tom 发邮件」memory，手动加 user 关联到 rustTopic2
+	memsDrift, _ := dDrift.Memories.ListBySession(ctx, sid2)
+	var driftMem1 *repo.MemoryRow
+	for i := range memsDrift {
+		if memsDrift[i].Title == "给 Tom 发邮件" {
+			driftMem1 = &memsDrift[i]
+		}
+	}
+	if driftMem1 == nil {
+		t.Fatal("漂移首次后未找到「给 Tom 发邮件」memory")
+	}
+	if err := dDrift.MemoryTopics.AddLink(ctx, driftMem1.ID, rustTopic2.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 重跑 → 第 2 次 Chat 返回 title「给 Tom 发邮件(改名)」
+	if err := h2(ctx, j2, sid2); err != nil {
+		t.Fatalf("漂移重跑 extract: %v", err)
+	}
+	// 新 memory 的 title 是改名后的，user 关联应为 0（自然键不再命中，只有 ai）
+	memsDrift2, _ := dDrift.Memories.ListBySession(ctx, sid2)
+	var driftMem2 *repo.MemoryRow
+	for i := range memsDrift2 {
+		if memsDrift2[i].Title == "给 Tom 发邮件(改名)" {
+			driftMem2 = &memsDrift2[i]
+		}
+	}
+	if driftMem2 == nil {
+		t.Fatal("漂移重跑后未找到「给 Tom 发邮件(改名)」memory")
+	}
+	driftLinks, err := dDrift.MemoryTopics.ListByMemoryIDs(ctx, []ids.ID{driftMem2.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driftUserCnt := 0
+	for _, ti := range driftLinks[driftMem2.ID] {
+		if ti.Source == "user" {
+			driftUserCnt++
+		}
+	}
+	if driftUserCnt != 0 {
+		t.Fatalf("title 漂移后新 memory user 关联 = %d, want 0（自然键不再命中）", driftUserCnt)
+	}
+}
+
+// driftExtractLLM 专供 title 漂移测试：第 1 次返回原 title，第 ≥2 次把 todo 候选
+// title 改成「给 Tom 发邮件(改名)」，使自然键 NaturalKey(segment_ids,title) 不再命中
+// 旧 user 关联。独立于 fakeExtractLLM，避免污染 TestStageExtractCommit/Idempotent。
+type driftExtractLLM struct{ call int }
+
+func (d *driftExtractLLM) Chat(_ context.Context, _ provider.ChatRequest) (provider.ChatResponse, error) {
+	d.call++
+	// 第 1 次原 title；第 2 次起漂移成「(改名)」
+	title := "给 Tom 发邮件"
+	if d.call >= 2 {
+		title = "给 Tom 发邮件(改名)"
+	}
+	// 候选 1（todo）的 title 用变量注入；候选 2（Rust）固定不变。
+	resp := fmt.Sprintf(`{"candidates":[
+	  {"type":"event","title":%q,"content":"明天需要给 Tom 发邮件确认设计稿",
+	   "epistemic_type":"observed","importance":0.6,"confidence":0.9,
+	   "is_todo":true,"todo_due":null,"topics":[{"suggested_name":"工作沟通（抽取fixture）"}],"block_index":1},
+	  {"type":"fact","title":"学习 Rust","content":"用户正在学习 Rust 计划三个月内读完一本书",
+	   "epistemic_type":"observed","importance":0.7,"confidence":0.9,
+	   "is_todo":false,"todo_due":null,"topics":[{"suggested_name":"Rust 学习（抽取fixture）"}],"block_index":2}
+	]}`, title)
+	return provider.ChatResponse{Content: resp, TotalTokens: 500}, nil
 }

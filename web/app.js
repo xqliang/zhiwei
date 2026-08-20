@@ -278,6 +278,10 @@ createApp({
       if (name === 'todos') { loadTopics(); loadTodos(); }
     }
     loadSessions();
+    // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
+    // 原先只在 switchTab('topics'/'todos') 触发——首屏 timeline 下拉为空。
+    // mount 时一并拉一次，保证首屏就有可选项（评审 M1）。
+    loadTopics();
 
     onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); });
 

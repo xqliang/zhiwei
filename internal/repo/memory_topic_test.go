@@ -72,3 +72,78 @@ func TestMemoryTopicRepo(t *testing.T) {
 		t.Fatalf("RemoveLink 后 topics = %d, want 1", len(got3[m.ID]))
 	}
 }
+
+// TestMemoryTopicSnapshotUser 直接单测 SnapshotUserBySessionExt：
+// 预置 session + memory（带 transcript_segment_ids + title，自然键成分）+ topic，
+// AddLink 一条 user 关联，调快照断言返回 1 行且 TopicID/SegmentIDs/Title 正确；
+// 再加一条 ai 关联（不同 topic），断言快照仍只返回 user 行（source 过滤）。
+// 守护 commitExtract 删旧前抓 user 行成 map 这条路径（spec §6）。
+func TestMemoryTopicSnapshotUser(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	r := &MemoryTopicRepo{DB: db}
+	mr := &MemoryRepo{DB: db}
+	tp := &TopicRepo{DB: db}
+
+	sid := ids.New()
+	(&SessionRepo{DB: db}).Create(ctx, repoSessionFix(t, sid))
+
+	// memory 带 transcript_segment_ids + title（快照行的自然键成分）
+	segA, segB := ids.New(), ids.New()
+	m := &Memory{
+		Type: "fact", Title: "给 Tom 发邮件", Content: "明天需要给 Tom 发邮件确认设计稿",
+		EpistemicType: "observed", Confidence: 0.9, SessionID: sid,
+		TranscriptSegmentIDs: ids.List{segA, segB},
+	}
+	if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {
+		t.Fatal(err)
+	}
+	topic := &Topic{Name: "T快照", Status: "active", CreatedBy: "user"}
+	if err := tp.Create(ctx, topic); err != nil {
+		t.Fatal(err)
+	}
+
+	// 一条 user 关联
+	if err := r.AddLink(ctx, m.ID, topic.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := r.SnapshotUserBySessionExt(ctx, db, sid)
+	if err != nil {
+		t.Fatalf("SnapshotUserBySessionExt: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("快照行数 = %d, want 1", len(rows))
+	}
+	got := rows[0]
+	if got.TopicID != topic.ID {
+		t.Fatalf("TopicID = %s, want %s", got.TopicID, topic.ID)
+	}
+	if len(got.SegmentIDs) != 2 {
+		t.Fatalf("SegmentIDs = %v, want 2 个", got.SegmentIDs)
+	}
+	if got.Title != "给 Tom 发邮件" {
+		t.Fatalf("Title = %q, want 给 Tom 发邮件", got.Title)
+	}
+
+	// 再加一条 ai 关联（不同 topic，避免 PK 冲突被 IGNORE），快照仍只返 user（source 过滤）
+	topicAI := &Topic{Name: "T快照AI", Status: "active", CreatedBy: "ai"}
+	if err := tp.Create(ctx, topicAI); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.InsertExt(ctx, db, []*MemoryTopicLink{
+		{MemoryID: m.ID, TopicID: topicAI.ID, Source: "ai"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows2, _ := r.SnapshotUserBySessionExt(ctx, db, sid)
+	if len(rows2) != 1 {
+		t.Fatalf("加 ai 关联后快照行数 = %d, want 1（只返 user）", len(rows2))
+	}
+	if rows2[0].TopicID != topic.ID {
+		t.Fatalf("快照行 TopicID = %s, want user topic %s", rows2[0].TopicID, topic.ID)
+	}
+}
