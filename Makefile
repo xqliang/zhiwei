@@ -1,6 +1,10 @@
 .PHONY: build dev dev-start dev-stop dev-restart dev-status dev-logs test test-integration migrate-up migrate-down compose-up compose-down init-testdb spike-llm spike-embed spike-asr e2e
 
-build:
+# 给 web/app.js 生成内容 hash 文件名（缓存破除，无构建方案）。build 自动依赖。
+hash-web:
+	bash scripts/hash-web.sh
+
+build: hash-web
 	go build -o bin/zhiwei-server ./cmd/zhiwei-server
 
 dev: build

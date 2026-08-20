@@ -4,3 +4,5 @@ bin/
 .env
 .run/
 logs/
+# web/app.<hash>.js 是 make hash-web 生成的缓存破除副本（源文件 web/app.js 不匹配此模式）
+web/app.*.js

@@ -212,7 +212,7 @@
         </template>
       </div>
       <div class="todo-group-title">记忆时间线</div>
-      <div v-if="!topicDetail.memories.length" class="card empty">暂无记忆</div>
+      <div v-if="!topicDetail.memories || !topicDetail.memories.length" class="card empty">暂无记忆</div>
       <div class="card" v-for="m in topicDetail.memories" :key="m.id">
         <div>
           <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
@@ -225,7 +225,7 @@
         </div>
       </div>
       <div class="todo-group-title">关联待办</div>
-      <div v-if="!topicDetail.todos.length" class="card empty">暂无待办</div>
+      <div v-if="!topicDetail.todos || !topicDetail.todos.length" class="card empty">暂无待办</div>
       <div class="card" v-for="td in topicDetail.todos" :key="td.id">
         <div class="kv">
           <div>☑️ {{ td.title }}</div>
@@ -301,6 +301,6 @@
   </div>
 </div>
 
-<script src="/app/app.js"></script>
+<script src="/app/app.eb65b355.js"></script>
 </body>
 </html>
