@@ -41,3 +41,14 @@ type QueryRowxContext interface {
 
 var _ QueryRowxContext = (*sqlx.DB)(nil)
 var _ QueryRowxContext = (*sqlx.Tx)(nil)
+
+// QueryerContext 是 *sqlx.DB 与 *sqlx.Tx 共同满足的多行查询接口
+//（SelectContext）。事务内需要返回多行的读操作（如重跑前快照手动关联）
+// 以此为参数，事务外调用传 r.DB。
+type QueryerContext interface {
+	SelectContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
+}
+
+// 编译期断言：*sqlx.DB 与 *sqlx.Tx 均满足 QueryerContext。
+var _ QueryerContext = (*sqlx.DB)(nil)
+var _ QueryerContext = (*sqlx.Tx)(nil)
