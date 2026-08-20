@@ -71,6 +71,16 @@ WHERE user_id = 1 AND name IN (?, ?) AND status IN ('active','suggested')`,
 		t.Fatal(err)
 	}
 
+	// 预清理：dismiss 其他 session 残留的同名 open todo（给 Tom 发邮件）。
+	// T3 落库去重按归一化标题跨 session 比对，残留的 open todo 会让本 session 候选
+	// 被跳过、破坏既有断言（todo 数=1）；与上面 topic 预清理同理。
+	if _, err := d.Todos.DB.ExecContext(ctx, `
+UPDATE todo SET status='dismissed'
+WHERE user_id = 1 AND title = ? AND status IN ('suggested','confirmed')`,
+		"给 Tom 发邮件"); err != nil {
+		t.Fatal(err)
+	}
+
 	// 预置已有 topic：第二条候选的 suggested_topic_name 与之同名 → 验证合并。
 	// 名称加「（抽取fixture）」后缀保证全库唯一：repo 包的 TestTopicCRUD
 	// 也建「Rust 学习」，共享测试库下同名旧行会让两边断言互相污染。
@@ -493,4 +503,69 @@ func (d *driftExtractLLM) Chat(_ context.Context, _ provider.ChatRequest) (provi
 	   "is_todo":false,"todo_due":null,"topics":[{"suggested_name":"Rust 学习（抽取fixture）"}],"block_index":2}
 	]}`, title)
 	return provider.ChatResponse{Content: resp, TotalTokens: 500}, nil
+}
+
+// TestStageExtractDedupTodoByTitle 验证 T3：落库去重——新 suggested todo 若归一化
+// 标题命中该用户已有未关闭（suggested+confirmed）todo 则不插入。
+// commitExtract 重跑会删本 session todo 再重建，所以去重比对对象必须是不同 session
+// 的已有 open todo（此处预置 session A 的 confirmed todo）。
+// 去重只挡 todo，不挡 memory（memory 仍正常落库）。
+func TestStageExtractDedupTodoByTitle(t *testing.T) {
+	llm := &fakeExtractLLM{}
+	d := newExtractDeps(t, llm)
+	ctx := context.Background()
+
+	// session B：被抽取的会话（setupExtractFixture 内含预清理同名 open todo）
+	sidB, _ := setupExtractFixture(t, &d)
+
+	// 独立 session A：预置一条 confirmed todo「给 Tom 发邮件」。
+	// 先建 session 与 memory，再建 todo（source_memory_id 指向 session A 的 memory，
+	// 使其不被 session B 的 DeleteBySessionExt 删除）。
+	sidA := ids.New()
+	if err := d.Sessions.Create(ctx, &repo.AudioSession{
+		ID: sidA, Source: "web_upload", Filename: "a.wav",
+		StoragePath: "/tmp/a.wav", Status: "processing",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	memA := &repo.Memory{
+		Type: "event", Title: "预置 todo 来源 memory", Content: "session A 预置",
+		EpistemicType: "observed", Importance: 0.5, Confidence: 0.9,
+		SessionID: sidA, Status: "active",
+	}
+	if err := d.Memories.InsertExt(ctx, d.DB, []*repo.Memory{memA}); err != nil {
+		t.Fatal(err)
+	}
+	preTodo := &repo.Todo{
+		UserID: 1, Title: "给 Tom 发邮件", SourceMemoryID: &memA.ID,
+		Status: "confirmed", Confidence: 0.9,
+	}
+	if err := d.Todos.InsertExt(ctx, d.DB, []*repo.Todo{preTodo}); err != nil {
+		t.Fatal(err)
+	}
+	// 清理：预置 todo 跨 session 存在，会经 ListOpenTitles 影响后续测试，
+	// 测试结束恢复干净状态。
+	t.Cleanup(func() {
+		_, _ = d.Todos.DB.ExecContext(ctx, `DELETE FROM todo WHERE id = ?`, preTodo.ID.Int64())
+		_, _ = d.Memories.DB.ExecContext(ctx, `DELETE FROM memory WHERE id = ?`, memA.ID.Int64())
+	})
+
+	// 跑 extract（session B）——fake LLM 产出「给 Tom 发邮件」(todo) + 「学习 Rust」(非 todo)
+	handler := BuildStages(d)["extract"]
+	j := &repo.Job{SessionID: sidB, Stage: "extract", Status: "running"}
+	if err := handler(ctx, j, sidB); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	// 断言：session B 的 todo 数 = 0
+	//（「给 Tom 发邮件」归一后 = "给tom发邮件"，撞 session A 的 confirmed todo → 跳过）
+	todos, _ := d.Todos.ListBySession(ctx, sidB)
+	if len(todos) != 0 {
+		t.Fatalf("session B todos = %d, want 0（归一化标题命中已有未关闭 todo，跳过）", len(todos))
+	}
+	// 断言：session B 的 memory 数 = 2（去重只挡 todo，不挡 memory）
+	mems, _ := d.Memories.ListBySession(ctx, sidB)
+	if len(mems) != 2 {
+		t.Fatalf("session B memories = %d, want 2（去重不挡 memory）", len(mems))
+	}
 }

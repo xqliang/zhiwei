@@ -160,6 +160,16 @@ func (r *TodoRepo) ListBySession(ctx context.Context, sessionID ids.ID) ([]TodoR
 	return rows, nil
 }
 
+// ListOpenTitlesExt 返回未关闭（suggested+confirmed）todo 的标题，落库去重比对用。
+// 事务内调用传 tx（能看到本事务内 DeleteBySessionExt 已删的本 session todo，
+// 避免重跑时旧 todo 自去重导致幂等失败），事务外调用传 r.DB。
+func (r *TodoRepo) ListOpenTitlesExt(ctx context.Context, q QueryerContext, userID int64) ([]string, error) {
+	var titles []string
+	err := q.SelectContext(ctx, &titles,
+		`SELECT title FROM todo WHERE user_id = ? AND status IN ('suggested','confirmed')`, userID)
+	return titles, err
+}
+
 // attachTopics 给列表行内联 topics[]（走关联表多对多聚合，空列表安全）。
 func (r *TodoRepo) attachTopics(ctx context.Context, rows []TodoRow) error {
 	if len(rows) == 0 {

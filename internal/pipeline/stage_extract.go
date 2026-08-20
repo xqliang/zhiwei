@@ -194,6 +194,18 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 		return fmt.Errorf("写 memory_topic: %w", err)
 	}
 
+	// 落库去重：新 suggested todo 若归一化标题命中已有未关闭 todo（或批内已加），跳过。
+	// 必须在 tx 内读（ListOpenTitlesExt 传 tx），以看到上文 DeleteBySessionExt 已删的
+	// 本 session todo，避免重跑时旧 todo 自去重导致幂等失败。
+	openTitles, err := d.Todos.ListOpenTitlesExt(ctx, tx, userID)
+	if err != nil {
+		return fmt.Errorf("读 open todo 标题: %w", err)
+	}
+	dupSet := map[string]bool{}
+	for _, ti := range openTitles {
+		dupSet[repo.NormalizeTitle(ti)] = true
+	}
+
 	// 5. todo + todo_topic(ai) + 重链 user
 	var todos []*repo.Todo
 	type todoPlan struct {
@@ -205,6 +217,11 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 		if !c.IsTodo || c.TodoStatus == "" {
 			continue
 		}
+		nk := repo.NormalizeTitle(c.Title)
+		if dupSet[nk] {
+			continue // 命中已有未关闭 todo，跳过（memory/关联仍由上文处理）
+		}
+		dupSet[nk] = true // 批内去重
 		td := &repo.Todo{
 			Title: c.Title, SourceMemoryID: &memories[i].ID,
 			Status: c.TodoStatus, DueAt: c.TodoDue, Confidence: c.Confidence,
