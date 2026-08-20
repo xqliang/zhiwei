@@ -52,14 +52,16 @@ type MemoryFilter struct {
 
 type MemoryRepo struct{ DB *sqlx.DB }
 
-// InsertExt 批量插入（ext 传 *sqlx.Tx 即加入事务）。ID 在此生成并回填。
+// InsertExt 批量插入（ext 传 *sqlx.Tx 即加入事务）。ID 在此生成（若调用方未预置）并回填。
 // 必须传 *Memory 指针切片：值拷贝切片收不到回填的 ID。
 func (r *MemoryRepo) InsertExt(ctx context.Context, ext ExecerContext, ms []*Memory) error {
 	if len(ms) == 0 {
 		return nil
 	}
 	for i := range ms {
-		ms[i].ID = ids.New()
+		if ms[i].ID == 0 { // 尊重调用方预置 id（D1 佐证去重需在插入前知道新记忆 id）
+			ms[i].ID = ids.New()
+		}
 		if ms[i].UserID == 0 {
 			ms[i].UserID = 1
 		}
@@ -77,6 +79,31 @@ VALUES (:id, :user_id, :type, :title, :content, :epistemic_type,
 // （extract stage 单事务提交用）。
 func (r *MemoryRepo) DeleteBySessionExt(ctx context.Context, ext ExecerContext, sessionID ids.ID) error {
 	_, err := ext.ExecContext(ctx, `DELETE FROM memory WHERE session_id = ?`, sessionID.Int64())
+	return err
+}
+
+// ListActiveTitlesExt 返回该用户全部 active memory 的 id 与标题（D1 佐证去重比对用）。
+// 事务内调用传 tx（能看到本事务内 DeleteBySessionExt 已删的本 session 旧 memory，
+// 避免重跑时本 session 旧记忆自去重导致幂等失败），事务外调用传 r.DB。
+// 与 TodoRepo.ListOpenTitlesExt 同构（T3）。
+func (r *MemoryRepo) ListActiveTitlesExt(ctx context.Context, q QueryerContext, userID int64) ([]struct {
+	ID    ids.ID `db:"id"`
+	Title string `db:"title"`
+}, error) {
+	var rows []struct {
+		ID    ids.ID `db:"id"`
+		Title string `db:"title"`
+	}
+	err := q.SelectContext(ctx, &rows,
+		`SELECT id, title FROM memory WHERE user_id = ? AND status = 'active'`, userID)
+	return rows, err
+}
+
+// BumpConfidenceExt 原子上调 memory 置信度（佐证 +delta，封顶 0.99）。
+// SQL 原子算术（LEAST），不读-改-写，满足并发安全约束。ext 传 tx 即加入事务。
+func (r *MemoryRepo) BumpConfidenceExt(ctx context.Context, ext ExecerContext, id ids.ID, delta float64) error {
+	_, err := ext.ExecContext(ctx,
+		`UPDATE memory SET confidence = LEAST(confidence + ?, 0.99) WHERE id = ?`, delta, id.Int64())
 	return err
 }
 

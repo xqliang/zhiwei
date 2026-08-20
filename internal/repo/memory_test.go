@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -230,5 +231,66 @@ func TestMemoryListWithTopics(t *testing.T) {
 	}
 	if len(got.Topics) != 2 {
 		t.Fatalf("topics=%d, want 2: %+v", len(got.Topics), got.Topics)
+	}
+}
+
+func TestMemoryListActiveTitlesExt(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := &MemoryRepo{DB: db}
+	ctx := context.Background()
+	now := time.Now()
+	sid := ids.New()
+	ms := []*Memory{
+		{Type: "fact", Title: "学Rust", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: sid, EventAt: &now, Status: "active"},
+		{Type: "fact", Title: "学Go", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: sid, EventAt: &now, Status: "active"},
+		{Type: "fact", Title: "学Python", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: sid, EventAt: &now, Status: "superseded"},
+	}
+	if err := mr.InsertExt(ctx, db, ms); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := mr.ListActiveTitlesExt(ctx, db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.Title] = true
+	}
+	if !got["学Rust"] || !got["学Go"] || got["学Python"] {
+		t.Fatalf("ListActiveTitlesExt = %v, want 学Rust+学Go（不含 superseded）", got)
+	}
+}
+
+func TestMemoryBumpConfidence(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := &MemoryRepo{DB: db}
+	ctx := context.Background()
+	now := time.Now()
+	lo := &Memory{Type: "fact", Title: "佐证Bump低", Content: "x", EpistemicType: "observed", Confidence: 0.80, SessionID: ids.New(), EventAt: &now, Status: "active"}
+	hi := &Memory{Type: "fact", Title: "佐证Bump高", Content: "x", EpistemicType: "observed", Confidence: 0.97, SessionID: ids.New(), EventAt: &now, Status: "active"}
+	if err := mr.InsertExt(ctx, db, []*Memory{lo, hi}); err != nil {
+		t.Fatal(err)
+	}
+	// 0.80 + 0.05 → 0.85
+	if err := mr.BumpConfidenceExt(ctx, db, lo.ID, 0.05); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := mr.Get(ctx, lo.ID)
+	if math.Abs(got.Confidence-0.85) > 0.001 {
+		t.Fatalf("confidence = %v, want 0.85", got.Confidence)
+	}
+	// 0.97 + 0.05 → 封顶 0.99（不超）
+	if err := mr.BumpConfidenceExt(ctx, db, hi.ID, 0.05); err != nil {
+		t.Fatal(err)
+	}
+	gotHi, _ := mr.Get(ctx, hi.ID)
+	if math.Abs(gotHi.Confidence-0.99) > 0.001 {
+		t.Fatalf("confidence = %v, want 0.99（封顶）", gotHi.Confidence)
 	}
 }
