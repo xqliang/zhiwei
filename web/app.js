@@ -78,6 +78,11 @@ createApp({
         expandedId.value = id;
       } catch (e) { showError(e); }
     }
+    // 重拉已展开的会话详情但不收起：memory/todo 关联操作后用，避免 toggle 的收起-再展开抖动
+    async function reloadSession(id) {
+      try { detail.value = await api('GET', '/api/sessions/' + id); }
+      catch (e) { showError(e); }
+    }
     // 原始音频流式地址（ ServeAudio 端点）
     function audioUrl(id) { return '/api/sessions/' + id + '/audio'; }
     async function dismissMemory(m) {
@@ -229,6 +234,27 @@ createApp({
         todos.value = d.todos || [];
       } catch (e) { showError(e); }
     }
+    // ---------- 待办/记忆 ↔ topic 多对多手动关联 ----------
+    // 取条目身上的 topic 徽标数组（统一从 topics[] 读取，兼容空值）
+    function topicChips(item) { return (item && item.topics) || []; }
+    // 下拉选项：排除已忽略（dismissed）的 topic
+    const availableTopics = computed(() => topics.value.filter(t => t.status !== 'dismissed'));
+    async function addTodoTopic(t, topicId) {
+      try { await api('POST', '/api/todos/' + t.id + '/topics', { topic_id: topicId }); await loadTodos(); }
+      catch (e) { showError(e); }
+    }
+    async function removeTodoTopic(t, topicId) {
+      try { await api('DELETE', '/api/todos/' + t.id + '/topics/' + topicId); await loadTodos(); }
+      catch (e) { showError(e); }
+    }
+    async function addMemoryTopic(m, topicId) {
+      try { await api('POST', '/api/memories/' + m.id + '/topics', { topic_id: topicId }); await reloadSession(detail.value.session.id); }
+      catch (e) { showError(e); }
+    }
+    async function removeMemoryTopic(m, topicId) {
+      try { await api('DELETE', '/api/memories/' + m.id + '/topics/' + topicId); await reloadSession(detail.value.session.id); }
+      catch (e) { showError(e); }
+    }
     async function setTodoStatus(t, status) {
       try {
         await api('PATCH', '/api/todos/' + t.id, { status });
@@ -249,7 +275,7 @@ createApp({
       tab.value = name;
       if (name === 'timeline') loadSessions();
       if (name === 'topics') { topicDetail.value = null; renaming.value = null; loadTopics(); }
-      if (name === 'todos') loadTodos();
+      if (name === 'todos') { loadTopics(); loadTodos(); }
     }
     loadSessions();
 
@@ -258,12 +284,13 @@ createApp({
     return {
       tab, toast, switchTab,
       fmtTime, fmtDue, typeMeta, statusText, spClass,
-      sessions, detail, expandedId, loadSessions, toggleSession, audioUrl, dismissMemory, retryJob,
+      sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissMemory, retryJob,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
       loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic,
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos,
       loadTodos, setTodoStatus, jumpToSession,
+      topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
     };
   }
 }).mount('#app');

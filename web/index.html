@@ -120,7 +120,13 @@
             <div style="margin:6px 0">{{ m.content }}</div>
             <div class="muted">
               重要度 {{ (m.importance ?? 0).toFixed(1) }} · 置信 {{ (m.confidence ?? 0).toFixed(2) }}
-              <template v-if="m.topic_name"> · {{ m.topic_name }}</template>
+              <template v-if="topicChips(m).length">
+                · <span v-for="tp in topicChips(m)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}<span v-if="tp.source==='user'" style="opacity:.6">✎</span><button class="mini" style="padding:0 4px;margin-left:2px" @click.stop="removeMemoryTopic(m, tp.id)">✕</button></span>
+              </template>
+              <select class="mini" @change="if($event.target.value){addMemoryTopic(m,$event.target.value);$event.target.value=''}">
+                <option value="">+ 关联</option>
+                <option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option>
+              </select>
               <template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template>
             </div>
           </div>
@@ -213,7 +219,10 @@
           <b>{{ m.title }}</b>
         </div>
         <div style="margin:6px 0">{{ m.content }}</div>
-        <div class="muted">{{ fmtTime(m.event_at) }}</div>
+        <div class="muted">
+          <span v-for="tp in topicChips(m)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}</span>
+          {{ fmtTime(m.event_at) }}
+        </div>
       </div>
       <div class="todo-group-title">关联待办</div>
       <div v-if="!topicDetail.todos.length" class="card empty">暂无待办</div>
@@ -223,6 +232,9 @@
           <span class="badge" :class="td.status">
             {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : td.status === 'done' ? '已完成' : '已忽略' }}
           </span>
+        </div>
+        <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
+          <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}</span>
         </div>
       </div>
     </template>
@@ -240,6 +252,13 @@
           <button class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
         </div>
       </div>
+      <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
+        <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}<button class="mini" style="padding:0 4px;margin-left:2px" @click.stop="removeTodoTopic(td, tp.id)">✕</button></span>
+      </div>
+      <select class="mini" v-if="td.status!=='done'" @change="if($event.target.value){addTodoTopic(td,$event.target.value);$event.target.value=''}">
+        <option value="">+ 关联 Topic</option>
+        <option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option>
+      </select>
       <div class="muted" v-if="td.due_at" :class="{overdue: new Date(td.due_at) < new Date()}">截止 {{ fmtDue(td.due_at) }}</div>
       <div class="muted" v-if="td.source_session_id" style="cursor:pointer"
            @click="jumpToSession(td.source_session_id)">↗ 查看来源对话</div>
@@ -255,6 +274,13 @@
           <button class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
         </div>
       </div>
+      <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
+        <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}<button class="mini" style="padding:0 4px;margin-left:2px" @click.stop="removeTodoTopic(td, tp.id)">✕</button></span>
+      </div>
+      <select class="mini" v-if="td.status!=='done'" @change="if($event.target.value){addTodoTopic(td,$event.target.value);$event.target.value=''}">
+        <option value="">+ 关联 Topic</option>
+        <option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option>
+      </select>
       <div class="muted" v-if="td.due_at" :class="{overdue: new Date(td.due_at) < new Date()}">截止 {{ fmtDue(td.due_at) }}</div>
     </div>
 
@@ -266,6 +292,9 @@
       <div class="card" v-for="td in doneTodos" :key="td.id" style="opacity:.6">
         <div class="kv">
           <div>✅ <s>{{ td.title }}</s></div>
+        </div>
+        <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
+          <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}</span>
         </div>
       </div>
     </template>
