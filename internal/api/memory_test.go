@@ -28,6 +28,7 @@ func setupMemoryAPI(t *testing.T) (http.Handler, *repo.MemoryRepo, *repo.TopicRe
 	}
 	mr := &repo.MemoryRepo{DB: db}
 	tr := &repo.TopicRepo{DB: db}
+	mtr := &repo.MemoryTopicRepo{DB: db}
 	ctx := context.Background()
 
 	topic := &repo.Topic{Name: "API测试工作", Status: "active", CreatedBy: "user"}
@@ -36,14 +37,18 @@ func setupMemoryAPI(t *testing.T) (http.Handler, *repo.MemoryRepo, *repo.TopicRe
 	}
 	eventAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	mem := &repo.Memory{Type: "event", Title: "API 用例记忆 A", Content: "事件 A 的完整描述内容",
-		EpistemicType: "observed", Confidence: 0.9, TopicID: &topic.ID,
+		EpistemicType: "observed", Confidence: 0.9,
 		SessionID: ids.New(), EventAt: &eventAt, Status: "active"}
 	if err := mr.InsertExt(ctx, db, []*repo.Memory{mem}); err != nil {
 		t.Fatal(err)
 	}
+	// topic 归属走关联表：建 memory 后 AddLink
+	if err := mtr.AddLink(ctx, mem.ID, topic.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	r := chi.NewRouter()
-	RegisterMemory(r, &MemoryHandler{Memories: mr, Topics: tr})
+	RegisterMemory(r, &MemoryHandler{Memories: mr, Topics: tr, MemoryTopics: mtr})
 	return r, mr, tr, mem
 }
 
@@ -71,12 +76,12 @@ func TestMemoryListAndFilter(t *testing.T) {
 	if len(resp.Memories) != 1 {
 		t.Fatalf("type=event 过滤后 = %d, want 1", len(resp.Memories))
 	}
-	if resp.Memories[0].TopicName == nil || *resp.Memories[0].TopicName != "API测试工作" {
-		t.Fatalf("topic_name = %v", resp.Memories[0].TopicName)
+	if len(resp.Memories[0].Topics) != 1 || resp.Memories[0].Topics[0].Name != "API测试工作" {
+		t.Fatalf("topics = %+v, want [{API测试工作}]", resp.Memories[0].Topics)
 	}
 
-	// topic_id 过滤命中
-	topicID := resp.Memories[0].TopicID
+	// topic_id 过滤命中（走关联表子查询）
+	topicID := resp.Memories[0].Topics[0].ID
 	rec2 := httptest.NewRecorder()
 	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet,
 		"/api/memories?topic_id="+topicID.String(), nil))
@@ -154,6 +159,82 @@ func titlesOf(rows []repo.MemoryRow) []string {
 		out[i] = r.Title
 	}
 	return out
+}
+
+// TestMemoryAddRemoveTopic 验证手动加/删 memory↔topic 关联端点：
+// POST 幂等、GET 列表反映增删、DELETE 204、不存在 topic_id → 404。
+func TestMemoryAddRemoveTopic(t *testing.T) {
+	_ = ids.Init(1)
+	db, err := repo.NewDB(repo.TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	mr := &repo.MemoryRepo{DB: db}
+	topics := &repo.TopicRepo{DB: db}
+	mtr := &repo.MemoryTopicRepo{DB: db}
+
+	mem := &repo.Memory{Type: "fact", Title: "加删 topic 用例记忆", Content: "足够长的内容描述",
+		EpistemicType: "observed", Confidence: 0.9, SessionID: ids.New(), Status: "active"}
+	if err := mr.InsertExt(ctx, db, []*repo.Memory{mem}); err != nil {
+		t.Fatal(err)
+	}
+	tp := &repo.Topic{Name: "记忆加删主题", Status: "active", CreatedBy: "user"}
+	if err := topics.Create(ctx, tp); err != nil {
+		t.Fatal(err)
+	}
+
+	r := chi.NewRouter()
+	RegisterMemory(r, &MemoryHandler{Memories: mr, Topics: topics, MemoryTopics: mtr})
+
+	post := func(body string) int {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/memories/"+mem.ID.String()+"/topics",
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	body := `{"topic_id":"` + tp.ID.String() + `"}`
+
+	// POST 加关联 → 200
+	if code := post(body); code != http.StatusOK {
+		t.Fatalf("add topic: %d", code)
+	}
+	// 重复 POST → 200（幂等）
+	if code := post(body); code != http.StatusOK {
+		t.Fatalf("idempotent add: %d", code)
+	}
+	// GET 列表 → memory.topics 反映新增
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/memories", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"记忆加删主题"`) {
+		t.Fatalf("列表应含已加 topic: %d %s", rec.Code, rec.Body.String())
+	}
+	// DELETE 移除关联 → 204
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodDelete,
+		"/api/memories/"+mem.ID.String()+"/topics/"+tp.ID.String(), nil))
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("remove topic: %d", rec2.Code)
+	}
+	// GET 列表 → memory.topics 为空
+	rec3 := httptest.NewRecorder()
+	r.ServeHTTP(rec3, httptest.NewRequest(http.MethodGet, "/api/memories", nil))
+	if strings.Contains(rec3.Body.String(), `"记忆加删主题"`) {
+		t.Fatalf("移除后列表不应含 topic: %s", rec3.Body.String())
+	}
+	// POST 不存在 topic_id → 404
+	if code := post(`{"topic_id":"` + ids.New().String() + `"}`); code != http.StatusNotFound {
+		t.Fatalf("不存在 topic 应 404, got %d", code)
+	}
+	// POST 不存在 memory id → 404
+	rec4 := httptest.NewRecorder()
+	r.ServeHTTP(rec4, httptest.NewRequest(http.MethodPost, "/api/memories/"+ids.New().String()+"/topics",
+		strings.NewReader(body)))
+	if rec4.Code != http.StatusNotFound {
+		t.Fatalf("不存在 memory 应 404, got %d", rec4.Code)
+	}
 }
 
 func TestMemoryPatch(t *testing.T) {

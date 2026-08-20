@@ -11,12 +11,12 @@ import (
 )
 
 // Todo 是从对话中提取的待办。suggested 需用户确认后转 confirmed。
+// topic 归属走关联表 todo_topic（多对多），本结构不再承载单值 topic_id。
 type Todo struct {
 	ID             ids.ID     `db:"id" json:"id"`
 	UserID         int64      `db:"user_id" json:"user_id"`
 	Title          string     `db:"title" json:"title"`
 	SourceMemoryID *ids.ID    `db:"source_memory_id" json:"source_memory_id,omitempty"`
-	TopicID        *ids.ID    `db:"topic_id" json:"topic_id,omitempty"`
 	Status         string     `db:"status" json:"status"` // suggested|confirmed|done|dismissed
 	DueAt          *time.Time `db:"due_at" json:"due_at,omitempty"`
 	Confidence     float64    `db:"confidence" json:"confidence"`
@@ -24,10 +24,12 @@ type Todo struct {
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
 }
 
-// TodoRow 是带来源会话的列表视图（待办页「跳转时间线」用）。
+// TodoRow 是带来源会话与 topics 的列表视图（待办页「跳转时间线」用）。
+// Topics 由 attachTopics 在查询后填充（无 db tag，不参与 SQL 映射）。
 type TodoRow struct {
 	Todo
-	SourceSessionID *ids.ID `db:"source_session_id" json:"source_session_id,omitempty"`
+	SourceSessionID *ids.ID    `db:"source_session_id" json:"source_session_id,omitempty"`
+	Topics           []TopicInfo `json:"topics,omitempty"`
 }
 
 // CanTransition 校验 todo 状态流转。
@@ -59,8 +61,8 @@ func (r *TodoRepo) InsertExt(ctx context.Context, ext ExecerContext, todos []*To
 		}
 	}
 	_, err := ext.NamedExecContext(ctx, `
-INSERT INTO todo (id, user_id, title, source_memory_id, topic_id, status, due_at, confidence)
-VALUES (:id, :user_id, :title, :source_memory_id, :topic_id, :status, :due_at, :confidence)`, todos)
+INSERT INTO todo (id, user_id, title, source_memory_id, status, due_at, confidence)
+VALUES (:id, :user_id, :title, :source_memory_id, :status, :due_at, :confidence)`, todos)
 	return err
 }
 
@@ -105,6 +107,7 @@ SELECT t.*, m.session_id AS source_session_id
 FROM todo t LEFT JOIN memory m ON t.source_memory_id = m.id`
 
 // List 列表。status / topicID 为空不过滤；dismissed 永不出现。
+// topicID 非空时走关联表 todo_topic 子查询过滤（不走 legacy todo.topic_id）。
 func (r *TodoRepo) List(ctx context.Context, status string, topicID *ids.ID) ([]TodoRow, error) {
 	sql := todoListBase + " WHERE t.status != 'dismissed'"
 	var args []any
@@ -113,21 +116,34 @@ func (r *TodoRepo) List(ctx context.Context, status string, topicID *ids.ID) ([]
 		args = append(args, status)
 	}
 	if topicID != nil {
-		sql += " AND t.topic_id = ?"
+		sql += " AND t.id IN (SELECT todo_id FROM todo_topic WHERE topic_id = ?)"
 		args = append(args, topicID.Int64())
 	}
 	sql += " ORDER BY t.id DESC LIMIT 200"
 	var rows []TodoRow
 	err := r.DB.SelectContext(ctx, &rows, sql, args...)
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	if err := r.attachTopics(ctx, rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // ListByTopic 是 Topic 详情页的 todo 列表（含已完成，不含 dismissed）。
 func (r *TodoRepo) ListByTopic(ctx context.Context, topicID ids.ID) ([]TodoRow, error) {
 	var rows []TodoRow
 	err := r.DB.SelectContext(ctx, &rows, todoListBase+`
- WHERE t.topic_id = ? AND t.status != 'dismissed' ORDER BY t.id DESC`, topicID.Int64())
-	return rows, err
+ WHERE t.id IN (SELECT todo_id FROM todo_topic WHERE topic_id = ?)
+   AND t.status != 'dismissed' ORDER BY t.id DESC`, topicID.Int64())
+	if err != nil {
+		return nil, err
+	}
+	if err := r.attachTopics(ctx, rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // ListBySession 是时间线详情页的 todo 列表（含已完成，不含 dismissed）。
@@ -135,5 +151,30 @@ func (r *TodoRepo) ListBySession(ctx context.Context, sessionID ids.ID) ([]TodoR
 	var rows []TodoRow
 	err := r.DB.SelectContext(ctx, &rows, todoListBase+`
  WHERE m.session_id = ? AND t.status != 'dismissed' ORDER BY t.id DESC`, sessionID.Int64())
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	if err := r.attachTopics(ctx, rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// attachTopics 给列表行内联 topics[]（走关联表多对多聚合，空列表安全）。
+func (r *TodoRepo) attachTopics(ctx context.Context, rows []TodoRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	ids := make([]ids.ID, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
+	}
+	m, err := (&TodoTopicRepo{DB: r.DB}).ListByTodoIDs(ctx, ids)
+	if err != nil {
+		return err
+	}
+	for i := range rows {
+		rows[i].Topics = m[rows[i].ID]
+	}
+	return nil
 }

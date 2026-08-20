@@ -90,12 +90,15 @@ ORDER BY id LIMIT 1`, userID, name).StructScan(&tp)
 }
 
 // ListWithCounts 列出非 dismissed 主题及关联计数（Topics 页用）。
+// 计数走关联表 memory_topic/todo_topic（多对多），不再依赖 legacy topic_id。
 func (r *TopicRepo) ListWithCounts(ctx context.Context, userID int64) ([]TopicWithCount, error) {
 	var list []TopicWithCount
 	err := r.DB.SelectContext(ctx, &list, `
 SELECT t.*,
-  (SELECT COUNT(*) FROM memory m WHERE m.topic_id = t.id AND m.status = 'active') AS memory_count,
-  (SELECT COUNT(*) FROM todo td WHERE td.topic_id = t.id AND td.status = 'confirmed') AS open_todo_count
+  (SELECT COUNT(*) FROM memory_topic mt JOIN memory m ON mt.memory_id=m.id
+     WHERE mt.topic_id = t.id AND m.status='active') AS memory_count,
+  (SELECT COUNT(*) FROM todo_topic tt JOIN todo td ON tt.todo_id=td.id
+     WHERE tt.topic_id = t.id AND td.status='confirmed') AS open_todo_count
 FROM topic t
 WHERE t.user_id = ? AND t.status != 'dismissed'
 ORDER BY memory_count DESC, open_todo_count DESC, t.updated_at DESC`, userID)

@@ -87,8 +87,8 @@ func main() {
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos,
 	})
-	api.RegisterMemory(r, &api.MemoryHandler{Memories: memories, Topics: topics})
-	api.RegisterTodo(r, &api.TodoHandler{Todos: todos})
+	api.RegisterMemory(r, &api.MemoryHandler{Memories: memories, Topics: topics, MemoryTopics: memoryTopics})
+	api.RegisterTodo(r, &api.TodoHandler{Todos: todos, TodoTopics: todoTopics, Topics: topics})
 	api.RegisterTopic(r, &api.TopicHandler{Topics: topics, Memories: memories, Todos: todos})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}

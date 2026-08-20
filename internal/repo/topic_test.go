@@ -176,19 +176,28 @@ func TestTopicListWithCounts(t *testing.T) {
 	}
 	_ = r.Create(ctx, &Topic{Name: "已忽略主题", Status: "dismissed", CreatedBy: "ai"})
 
-	// 直插一条 active memory 与一条 confirmed todo（Task 4/5 前的临时手段）
+	// 建一条 active memory + 一条 confirmed todo，经关联表挂到本主题（验证计数）
 	sess := newTestSession(ids.New())
 	if err := (&SessionRepo{DB: db}).Create(ctx, sess); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO memory (id, user_id, type, title, content, session_id, topic_id, status)
-VALUES (?, 1, 'fact', 't', 'c', ?, ?, 'active')`, ids.New().Int64(), sess.ID.Int64(), tp.ID.Int64()); err != nil {
+	mr := &MemoryRepo{DB: db}
+	tdr := &TodoRepo{DB: db}
+	mtr := &MemoryTopicRepo{DB: db}
+	ttr := &TodoTopicRepo{DB: db}
+	mem := &Memory{Type: "fact", Title: "计数用例记忆", Content: "c",
+		SessionID: sess.ID, Status: "active"}
+	if err := mr.InsertExt(ctx, db, []*Memory{mem}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO todo (id, user_id, title, topic_id, status)
-VALUES (?, 1, 't', ?, 'confirmed')`, ids.New().Int64(), tp.ID.Int64()); err != nil {
+	if err := mtr.AddLink(ctx, mem.ID, tp.ID); err != nil {
+		t.Fatal(err)
+	}
+	td := &Todo{Title: "计数用例待办", Status: "confirmed", SourceMemoryID: &mem.ID}
+	if err := tdr.InsertExt(ctx, db, []*Todo{td}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ttr.AddLink(ctx, td.ID, tp.ID); err != nil {
 		t.Fatal(err)
 	}
 

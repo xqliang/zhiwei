@@ -35,22 +35,31 @@ func setupTopicAPI(t *testing.T) (http.Handler, *repo.TopicRepo, *repo.MemoryRep
 		t.Fatal(err)
 	}
 	// 一条 memory + 一条 confirmed todo 挂上去（验证计数）
+	// topic 归属走关联表：先建主表行，再 AddLink
 	eventAt := time.Now()
-	if err := mr.InsertExt(ctx, db, []*repo.Memory{{
+	mem := &repo.Memory{
 		Type: "fact", Title: "API用例记忆学Rust", Content: "用户正在学习 Rust 计划三个月读完一本书",
-		EpistemicType: "observed", Confidence: 0.9, TopicID: &tp.ID,
+		EpistemicType: "observed", Confidence: 0.9,
 		SessionID: ids.New(), EventAt: &eventAt, Status: "active",
-	}}); err != nil {
+	}
+	if err := mr.InsertExt(ctx, db, []*repo.Memory{mem}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&repo.MemoryTopicRepo{DB: db}).AddLink(ctx, mem.ID, tp.ID); err != nil {
 		t.Fatal(err)
 	}
 	memRows, err := mr.ListByTopic(ctx, tp.ID)
 	if err != nil || len(memRows) != 1 {
 		t.Fatalf("fixture memory: %v %d", err, len(memRows))
 	}
-	if err := tdr.InsertExt(ctx, db, []*repo.Todo{{
-		Title: "API用例待办读完Rust书", TopicID: &tp.ID, Status: "confirmed", Confidence: 0.9,
+	td := &repo.Todo{
+		Title: "API用例待办读完Rust书", Status: "confirmed", Confidence: 0.9,
 		SourceMemoryID: &memRows[0].ID,
-	}}); err != nil {
+	}
+	if err := tdr.InsertExt(ctx, db, []*repo.Todo{td}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&repo.TodoTopicRepo{DB: db}).AddLink(ctx, td.ID, tp.ID); err != nil {
 		t.Fatal(err)
 	}
 

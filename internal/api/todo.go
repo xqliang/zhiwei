@@ -12,13 +12,17 @@ import (
 
 // TodoHandler 处理待办查询与状态流转。
 type TodoHandler struct {
-	Todos *repo.TodoRepo
+	Todos      *repo.TodoRepo
+	TodoTopics *repo.TodoTopicRepo // 手动加/删 todo↔topic 关联
+	Topics     *repo.TopicRepo      // 校验 topic 存在
 }
 
 // RegisterTodo 挂载 todo 路由（router.go 的统一接线在后续任务完成）。
 func RegisterTodo(r chi.Router, h *TodoHandler) {
 	r.Get("/api/todos", h.List)
 	r.Patch("/api/todos/{id}", h.Patch)
+	r.Post("/api/todos/{id}/topics", h.AddTopic)
+	r.Delete("/api/todos/{id}/topics/{topic_id}", h.RemoveTopic)
 }
 
 // List 返回待办列表（排除 dismissed），支持 status/topic_id 过滤。
@@ -87,4 +91,59 @@ func validTodoStatus(s string) bool {
 		return true
 	}
 	return false
+}
+
+// AddTopic 手动给 todo 加 topic 关联（source='user'，INSERT IGNORE 幂等）。
+// 校验顺序：参数合法性（400）→ todo 存在（404）→ topic 存在且非 dismissed（404）。
+func (h *TodoHandler) AddTopic(w http.ResponseWriter, r *http.Request) {
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		TopicID string `json:"topic_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TopicID == "" {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	tid, err := ids.ParseID(req.TopicID)
+	if err != nil {
+		http.Error(w, "topic_id 非法", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.Todos.Get(r.Context(), id); err != nil {
+		http.Error(w, "todo 不存在", http.StatusNotFound)
+		return
+	}
+	tp, err := h.Topics.Get(r.Context(), tid)
+	if err != nil || tp.Status == "dismissed" {
+		http.Error(w, "topic 不存在", http.StatusNotFound)
+		return
+	}
+	if err := h.TodoTopics.AddLink(r.Context(), id, tid); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// RemoveTopic 移除 todo↔topic 关联。幂等：关联不存在也不报错（DELETE 返回 204）。
+func (h *TodoHandler) RemoveTopic(w http.ResponseWriter, r *http.Request) {
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	tid, err := ids.ParseID(chi.URLParam(r, "topic_id"))
+	if err != nil {
+		http.Error(w, "invalid topic_id", http.StatusBadRequest)
+		return
+	}
+	if err := h.TodoTopics.RemoveLink(r.Context(), id, tid); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

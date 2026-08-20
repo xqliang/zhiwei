@@ -11,6 +11,10 @@ import (
 )
 
 // NewDB 建立连接池并 ping 验证。连接数按单机个人规模设置。
+// 启用 unsafe 模式：sqlx 扫描时忽略结果集中无对应 struct 字段的列
+// （memory/todo 表仍保留 legacy topic_id 列，T6 才删；本任务已删 Go 字段，
+// 需 unsafe 让 SELECT m.* 不报 missing destination）。
+// 注意 sqlx v1.4 的 Unsafe() 返回新对象，必须用其返回值。
 func NewDB(dsn string) (*sqlx.DB, error) {
 	db, err := sqlx.Connect("mysql", dsn)
 	if err != nil {
@@ -18,7 +22,7 @@ func NewDB(dsn string) (*sqlx.DB, error) {
 	}
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
-	return db, nil
+	return db.Unsafe(), nil
 }
 
 // ExecerContext 是 *sqlx.DB 与 *sqlx.Tx 共同满足的执行接口。

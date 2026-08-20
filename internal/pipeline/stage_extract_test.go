@@ -156,11 +156,27 @@ func TestStageExtractCommit(t *testing.T) {
 			rustMem = &mems[i]
 		}
 	}
-	if rustMem == nil || rustMem.TopicID == nil || *rustMem.TopicID != rustTopic.ID {
-		t.Fatalf("Rust memory 未挂已有 topic: %+v", rustMem)
+	if rustMem == nil {
+		t.Fatal("未找到 Rust memory")
 	}
-	if todos[0].TopicID == nil || *todos[0].TopicID != workTopic.ID {
-		t.Fatalf("todo topic = %v, want 工作沟通（抽取fixture）", todos[0].TopicID)
+	// topic 归属走关联表：rustMem.Topics 应含已有 rustTopic
+	foundRustTopic := false
+	for _, ti := range rustMem.Topics {
+		if ti.ID == rustTopic.ID {
+			foundRustTopic = true
+		}
+	}
+	if !foundRustTopic {
+		t.Fatalf("Rust memory 未挂已有 topic: %+v", rustMem.Topics)
+	}
+	foundWorkTopic := false
+	for _, ti := range todos[0].Topics {
+		if ti.ID == workTopic.ID {
+			foundWorkTopic = true
+		}
+	}
+	if !foundWorkTopic {
+		t.Fatalf("todo topic = %+v, want 工作沟通（抽取fixture）", todos[0].Topics)
 	}
 
 	// 多对多关联表

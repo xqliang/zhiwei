@@ -14,14 +14,17 @@ import (
 
 // MemoryHandler 处理 memory 查询与修正。
 type MemoryHandler struct {
-	Memories *repo.MemoryRepo
-	Topics   *repo.TopicRepo
+	Memories      *repo.MemoryRepo
+	Topics        *repo.TopicRepo       // 校验 topic 存在
+	MemoryTopics  *repo.MemoryTopicRepo // 手动加/删 memory↔topic 关联
 }
 
 // RegisterMemory 挂载 memory 路由。
 func RegisterMemory(r chi.Router, h *MemoryHandler) {
 	r.Get("/api/memories", h.List)
 	r.Patch("/api/memories/{id}", h.Patch)
+	r.Post("/api/memories/{id}/topics", h.AddTopic)
+	r.Delete("/api/memories/{id}/topics/{topic_id}", h.RemoveTopic)
 }
 
 // List 返回记忆列表（排除 dismissed），支持 type/topic_id/since/limit/offset
@@ -124,4 +127,59 @@ func validMemoryType(t string) bool {
 		return true
 	}
 	return false
+}
+
+// AddTopic 手动给 memory 加 topic 关联（source='user'，INSERT IGNORE 幂等）。
+// 校验顺序：参数合法性（400）→ memory 存在（404）→ topic 存在且非 dismissed（404）。
+func (h *MemoryHandler) AddTopic(w http.ResponseWriter, r *http.Request) {
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		TopicID string `json:"topic_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TopicID == "" {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	tid, err := ids.ParseID(req.TopicID)
+	if err != nil {
+		http.Error(w, "topic_id 非法", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.Memories.Get(r.Context(), id); err != nil {
+		http.Error(w, "memory 不存在", http.StatusNotFound)
+		return
+	}
+	tp, err := h.Topics.Get(r.Context(), tid)
+	if err != nil || tp.Status == "dismissed" {
+		http.Error(w, "topic 不存在", http.StatusNotFound)
+		return
+	}
+	if err := h.MemoryTopics.AddLink(r.Context(), id, tid); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// RemoveTopic 移除 memory↔topic 关联。幂等：关联不存在也不报错（DELETE 返回 204）。
+func (h *MemoryHandler) RemoveTopic(w http.ResponseWriter, r *http.Request) {
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	tid, err := ids.ParseID(chi.URLParam(r, "topic_id"))
+	if err != nil {
+		http.Error(w, "invalid topic_id", http.StatusBadRequest)
+		return
+	}
+	if err := h.MemoryTopics.RemoveLink(r.Context(), id, tid); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

@@ -25,6 +25,8 @@ func setupTodoAPI(t *testing.T) (http.Handler, *repo.TodoRepo, *repo.Todo) {
 	}
 	tr := &repo.TodoRepo{DB: db}
 	mr := &repo.MemoryRepo{DB: db}
+	topics := &repo.TopicRepo{DB: db}
+	todoTopics := &repo.TodoTopicRepo{DB: db}
 	ctx := context.Background()
 
 	mem := &repo.Memory{Type: "event", Title: "API 用例待办来源", Content: "明天需要给 Tom 发邮件确认设计稿",
@@ -40,7 +42,7 @@ func setupTodoAPI(t *testing.T) (http.Handler, *repo.TodoRepo, *repo.Todo) {
 	}
 
 	r := chi.NewRouter()
-	RegisterTodo(r, &TodoHandler{Todos: tr})
+	RegisterTodo(r, &TodoHandler{Todos: tr, TodoTopics: todoTopics, Topics: topics})
 	return r, tr, td
 }
 
@@ -103,5 +105,88 @@ func TestTodoPatchTransitions(t *testing.T) {
 	// 非法 status → 400（校验顺序须在流转检查之前）
 	if code := patch(`{"status":"bogus"}`); code != http.StatusBadRequest {
 		t.Fatalf("非法 status 应 400, got %d", code)
+	}
+}
+
+// TestTodoAddRemoveTopic 验证手动加/删 todo↔topic 关联端点：
+// POST 幂等（重复 200）、GET 列表反映增删、DELETE 204、不存在 topic_id → 404。
+func TestTodoAddRemoveTopic(t *testing.T) {
+	_ = ids.Init(1)
+	db, err := repo.NewDB(repo.TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	mr := &repo.MemoryRepo{DB: db}
+	tr := &repo.TodoRepo{DB: db}
+	topics := &repo.TopicRepo{DB: db}
+	todoTopics := &repo.TodoTopicRepo{DB: db}
+
+	// 建来源 memory + todo + topic
+	mem := &repo.Memory{Type: "event", Title: "加删 topic 来源", Content: "描述内容描述",
+		EpistemicType: "observed", Confidence: 0.9, SessionID: ids.New(), Status: "active"}
+	if err := mr.InsertExt(ctx, db, []*repo.Memory{mem}); err != nil {
+		t.Fatal(err)
+	}
+	td := &repo.Todo{Title: "加删 topic 用例待办", SourceMemoryID: &mem.ID,
+		Status: "suggested", Confidence: 0.8}
+	if err := tr.InsertExt(ctx, db, []*repo.Todo{td}); err != nil {
+		t.Fatal(err)
+	}
+	tp := &repo.Topic{Name: "加删 topic 主题", Status: "active", CreatedBy: "user"}
+	if err := topics.Create(ctx, tp); err != nil {
+		t.Fatal(err)
+	}
+
+	r := chi.NewRouter()
+	RegisterTodo(r, &TodoHandler{Todos: tr, TodoTopics: todoTopics, Topics: topics})
+
+	post := func(body string) int {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/todos/"+td.ID.String()+"/topics",
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	body := `{"topic_id":"` + tp.ID.String() + `"}`
+
+	// POST 加关联 → 200
+	if code := post(body); code != http.StatusOK {
+		t.Fatalf("add topic: %d", code)
+	}
+	// 重复 POST → 200（幂等：INSERT IGNORE）
+	if code := post(body); code != http.StatusOK {
+		t.Fatalf("idempotent add: %d", code)
+	}
+	// GET 列表 → todo.topics 反映新增
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/todos", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"加删 topic 主题"`) {
+		t.Fatalf("列表应含已加 topic: %d %s", rec.Code, rec.Body.String())
+	}
+	// DELETE 移除关联 → 204
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodDelete,
+		"/api/todos/"+td.ID.String()+"/topics/"+tp.ID.String(), nil))
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("remove topic: %d", rec2.Code)
+	}
+	// GET 列表 → todo.topics 为空
+	rec3 := httptest.NewRecorder()
+	r.ServeHTTP(rec3, httptest.NewRequest(http.MethodGet, "/api/todos", nil))
+	if strings.Contains(rec3.Body.String(), `"加删 topic 主题"`) {
+		t.Fatalf("移除后列表不应含 topic: %s", rec3.Body.String())
+	}
+	// POST 不存在 topic_id → 404
+	if code := post(`{"topic_id":"` + ids.New().String() + `"}`); code != http.StatusNotFound {
+		t.Fatalf("不存在 topic 应 404, got %d", code)
+	}
+	// POST 不存在 todo id → 404
+	rec4 := httptest.NewRecorder()
+	r.ServeHTTP(rec4, httptest.NewRequest(http.MethodPost, "/api/todos/"+ids.New().String()+"/topics",
+		strings.NewReader(body)))
+	if rec4.Code != http.StatusNotFound {
+		t.Fatalf("不存在 todo 应 404, got %d", rec4.Code)
 	}
 }

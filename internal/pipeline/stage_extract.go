@@ -83,8 +83,7 @@ func stageExtract(d StageDeps) Handler {
 // commitExtract 在单事务内完成幂等清理与落库（多对多版）。
 // 顺序：快照手动关联(source=user) → 删 todo_topic → 删 todo → 删 memory_topic → 删 memory
 // → 建建议 topic → 插 memory + memory_topic(ai) + 重链 user → 插 todo + todo_topic(ai) + 重链 user。
-// 过渡双写：仍写 legacy memory/todo.topic_id（取首个 resolved topic），保 repo 旧查询正确；
-// T5 移除双写、T6 删 topic_id 列。
+// topic 归属仅写关联表 memory_topic/todo_topic，legacy topic_id 列已无人写（T6 删列）。
 func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID int64,
 	gated []memory.Candidate, refs [][]memory.TopicRef, newNames []string) error {
 
@@ -155,7 +154,7 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 		return 0, false
 	}
 
-	// 4. memory + memory_topic(ai) + 重链 user + 双写 legacy topic_id
+	// 4. memory + memory_topic(ai) + 重链 user
 	memories := make([]*repo.Memory, len(gated))
 	resolvedTids := make([][]ids.ID, len(gated)) // 每候选 resolved topic ids（去重有序）
 	for i, c := range gated {
@@ -172,11 +171,6 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 			Importance: c.Importance, Confidence: c.Confidence,
 			SessionID: sessionID, TranscriptSegmentIDs: ids.List(c.SegmentIDs),
 			EventAt: &c.EventAt, Status: "active",
-		}
-		// 过渡双写：legacy topic_id 取首个 resolved topic（须在 InsertExt 前设）
-		if len(resolvedTids[i]) > 0 {
-			first := resolvedTids[i][0]
-			memories[i].TopicID = &first
 		}
 	}
 	if err := d.Memories.InsertExt(ctx, tx, memories); err != nil {
@@ -200,7 +194,7 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 		return fmt.Errorf("写 memory_topic: %w", err)
 	}
 
-	// 5. todo + todo_topic(ai) + 重链 user + 双写 legacy topic_id
+	// 5. todo + todo_topic(ai) + 重链 user
 	var todos []*repo.Todo
 	type todoPlan struct {
 		tids []ids.ID
@@ -214,9 +208,6 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 		td := &repo.Todo{
 			Title: c.Title, SourceMemoryID: &memories[i].ID,
 			Status: c.TodoStatus, DueAt: c.TodoDue, Confidence: c.Confidence,
-		}
-		if memories[i].TopicID != nil {
-			td.TopicID = memories[i].TopicID // 双写
 		}
 		todos = append(todos, td)
 		plans = append(plans, todoPlan{tids: resolvedTids[i], key: memory.NaturalKey(c.SegmentIDs, c.Title)})

@@ -8,12 +8,12 @@ import (
 	"zhiwei/internal/ids"
 )
 
-func newTestMemory(sessionID, topicID ids.ID) *Memory {
+func newTestMemory(sessionID ids.ID) *Memory {
 	eventAt := time.Now()
 	return &Memory{
 		Type: "event", Title: "给 Tom 发邮件", Content: "明天需要给 Tom 发邮件确认设计稿",
 		EpistemicType: "observed", Importance: 0.6, Confidence: 0.9,
-		TopicID: &topicID, SessionID: sessionID, TranscriptSegmentIDs: ids.List{1, 2},
+		SessionID: sessionID, TranscriptSegmentIDs: ids.List{1, 2},
 		EventAt: &eventAt, Status: "active",
 	}
 }
@@ -29,9 +29,10 @@ func TestMemoryInsertAndQuery(t *testing.T) {
 
 	topic := &Topic{Name: "工作", Status: "active", CreatedBy: "user"}
 	_ = tr.Create(ctx, topic)
+	mtr := &MemoryTopicRepo{DB: db}
 
 	sid := ids.New()
-	m := newTestMemory(sid, topic.ID)
+	m := newTestMemory(sid)
 	// 必须传 *Memory 指针切片，ID 才能回填到调用方的 m。
 	if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {
 		t.Fatalf("InsertExt: %v", err)
@@ -39,14 +40,18 @@ func TestMemoryInsertAndQuery(t *testing.T) {
 	if m.ID == 0 {
 		t.Fatal("InsertExt 未回填 ID")
 	}
+	// topic 归属走关联表：建 memory 后 AddLink，List 内联 topics[] 反映
+	if err := mtr.AddLink(ctx, m.ID, topic.ID); err != nil {
+		t.Fatalf("AddLink: %v", err)
+	}
 
-	// 按 session 查询（联查 topic 名称）
+	// 按 session 查询（内联 topics[]）
 	rows, err := mr.ListBySession(ctx, sid)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("ListBySession: %v len=%d", err, len(rows))
 	}
-	if rows[0].TopicName == nil || *rows[0].TopicName != "工作" {
-		t.Fatalf("topic_name = %v", rows[0].TopicName)
+	if len(rows[0].Topics) != 1 || rows[0].Topics[0].Name != "工作" {
+		t.Fatalf("topics = %+v, want [{工作}]", rows[0].Topics)
 	}
 	if len(rows[0].TranscriptSegmentIDs) != 2 {
 		t.Fatalf("segment_ids = %v", rows[0].TranscriptSegmentIDs)
@@ -78,7 +83,7 @@ func TestMemoryInsertAndQuery(t *testing.T) {
 	}
 
 	// dismissed 不出现在列表；offset 超界返回空
-	dm := newTestMemory(sid, topic.ID)
+	dm := newTestMemory(sid)
 	dm.Status = "dismissed"
 	if err := mr.InsertExt(ctx, db, []*Memory{dm}); err != nil {
 		t.Fatalf("InsertExt dismissed: %v", err)
@@ -97,8 +102,7 @@ func TestMemoryDeleteBySession(t *testing.T) {
 	ctx := context.Background()
 
 	sid := ids.New()
-	m := newTestMemory(sid, 1)
-	m.TopicID = nil
+	m := newTestMemory(sid)
 	_ = mr.InsertExt(ctx, db, []*Memory{m})
 	if err := mr.DeleteBySessionExt(ctx, db, sid); err != nil {
 		t.Fatalf("DeleteBySessionExt: %v", err)
@@ -129,7 +133,7 @@ func TestMemoryListSince(t *testing.T) {
 		title  string
 		eventA time.Time
 	}{{"since 用例-早", early}, {"since 用例-晚", late}} {
-		m := newTestMemory(sid, 1)
+		m := newTestMemory(sid)
 		m.Title = tc.title
 		m.EventAt = &tc.eventA
 		if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {
@@ -175,4 +179,56 @@ func titles(rows []MemoryRow) []string {
 		out[i] = r.Title
 	}
 	return out
+}
+
+// TestMemoryListWithTopics 验证 List 返回的行内联 topics[]（关联表多对多）。
+// 建 1 条 memory 关联 2 个 topic → List 后 rows[0].Topics 长度=2。
+func TestMemoryListWithTopics(t *testing.T) {
+	db, _ := NewDB(TestDSN(t))
+	ctx := context.Background()
+	mr := &MemoryRepo{DB: db}
+	mtr := &MemoryTopicRepo{DB: db}
+	tr := &TopicRepo{DB: db}
+
+	// 预清理：脏库重跑时同名行会让断言不稳定
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM memory WHERE title = ?`, "多主题记忆用例"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Memory{Type: "fact", Title: "多主题记忆用例", Content: "足够长的内容描述",
+		EpistemicType: "observed", Confidence: 0.9, SessionID: ids.New(), Status: "active"}
+	if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {
+		t.Fatal(err)
+	}
+	t1 := &Topic{Name: "多主题-一", Status: "active", CreatedBy: "user"}
+	t2 := &Topic{Name: "多主题-二", Status: "active", CreatedBy: "user"}
+	if err := tr.Create(ctx, t1); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Create(ctx, t2); err != nil {
+		t.Fatal(err)
+	}
+	if err := mtr.AddLink(ctx, m.ID, t1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := mtr.AddLink(ctx, m.ID, t2.ID); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := mr.List(ctx, MemoryFilter{Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *MemoryRow
+	for i := range rows {
+		if rows[i].ID == m.ID {
+			got = &rows[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("未找到刚插入的 memory")
+	}
+	if len(got.Topics) != 2 {
+		t.Fatalf("topics=%d, want 2: %+v", len(got.Topics), got.Topics)
+	}
 }
