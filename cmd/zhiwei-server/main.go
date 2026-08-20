@@ -22,7 +22,7 @@ import (
 
 // promptPath 是抽取 prompt 的版本化文件路径；版本号 = 去掉扩展名的文件名
 // （如 extraction_v1），运行时从文件名推导并写进 job.trace。
-const promptPath = "prompts/extraction_v2.md"
+const promptPath = "prompts/extraction_v3.md"
 
 func main() {
 	cfg, err := config.Load()
