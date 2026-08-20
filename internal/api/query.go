@@ -24,6 +24,7 @@ type QueryHandler struct {
 func RegisterQuery(r chi.Router, h *QueryHandler) {
 	r.Get("/api/sessions", h.ListSessions)
 	r.Get("/api/sessions/{id}", h.GetSession)
+	r.Get("/api/sessions/{id}/audio", h.ServeAudio)
 	r.Post("/api/jobs/{id}/retry", h.RetryJob)
 }
 
@@ -125,6 +126,26 @@ func (h *QueryHandler) RetryJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"job": j})
+}
+
+// ServeAudio 流式返回会话的原始音频文件（时间线播放用）。
+// StoragePath 是服务端落盘路径，不通过 JSON 外泄；此处用 http.ServeFile
+// 按扩展名推断 Content-Type，支持 Range 请求（拖动进度条）。
+func (h *QueryHandler) ServeAudio(w http.ResponseWriter, r *http.Request) {
+	sid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	s, err := h.Sessions.Get(r.Context(), sid)
+	if err != nil {
+		http.Error(w, "session 不存在", http.StatusNotFound)
+		return
+	}
+	if s.Mime != "" {
+		w.Header().Set("Content-Type", s.Mime)
+	}
+	http.ServeFile(w, r, s.StoragePath)
 }
 
 // speakerLabelName "1" -> "说话人 1"；空标签 -> "未知说话人"。

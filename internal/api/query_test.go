@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +31,7 @@ func setupQueryAPI(t *testing.T, s *repo.SessionRepo, j *repo.JobRepo,
 }
 
 func TestSessionsAndDetail(t *testing.T) {
+	_ = ids.Init(1) // 幂等初始化，避免依赖其它测试先跑
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -101,5 +104,57 @@ func TestSessionsAndDetail(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("detail body 缺少 %s: %s", want, body)
 		}
+	}
+}
+
+// ServeAudio 流式返回原始音频文件，支持点击播放
+func TestServeAudio(t *testing.T) {
+	db, err := repo.NewDB(repo.TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	jobs := &repo.JobRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	memories := &repo.MemoryRepo{DB: db}
+	todos := &repo.TodoRepo{DB: db}
+
+	// 临时音频文件（4 字节 WAV 头足以验证流式返回，无需可播放内容）
+	dir := t.TempDir()
+	audioPath := filepath.Join(dir, "clip.wav")
+	if err := os.WriteFile(audioPath, []byte("RIFFxxxxWAVEfmt "), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "clip.wav",
+		StoragePath: audioPath, Mime: "audio/wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := setupQueryAPI(t, sessions, jobs, transcripts, memories, todos)
+
+	// 正常返回音频内容
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+		"/api/sessions/"+sid.String()+"/audio", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("audio: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatal("音频响应体为空")
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "audio/wav" {
+		t.Fatalf("Content-Type = %s, want audio/wav", ct)
+	}
+
+	// 不存在的 session → 404
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet,
+		"/api/sessions/"+ids.New().String()+"/audio", nil))
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("不存在应 404, got %d", rec2.Code)
 	}
 }

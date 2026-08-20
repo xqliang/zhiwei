@@ -58,6 +58,7 @@ createApp({
     // ---------- 时间线 ----------
     const sessions = ref([]);
     const detail = ref(null);
+    const expandedId = ref(null); // 当前就地展开的 session id
 
     async function loadSessions() {
       try {
@@ -65,11 +66,20 @@ createApp({
         sessions.value = d.sessions || [];
       } catch (e) { showError(e); }
     }
-    async function openSession(id) {
+    // 点击会话卡片：已展开则收起；否则拉取详情就地展开（内联在当前卡片下方）
+    async function toggleSession(id) {
+      if (expandedId.value === id) {
+        expandedId.value = null;
+        detail.value = null;
+        return;
+      }
       try {
         detail.value = await api('GET', '/api/sessions/' + id);
+        expandedId.value = id;
       } catch (e) { showError(e); }
     }
+    // 原始音频流式地址（ ServeAudio 端点）
+    function audioUrl(id) { return '/api/sessions/' + id + '/audio'; }
     async function dismissMemory(m) {
       try {
         await api('PATCH', '/api/memories/' + m.id, { status: 'dismissed' });
@@ -79,7 +89,7 @@ createApp({
     async function retryJob(id) {
       try {
         await api('POST', '/api/jobs/' + id + '/retry');
-        await openSession(detail.value.session.id);
+        await toggleSession(detail.value.session.id);
       } catch (e) { showError(e); }
     }
 
@@ -227,7 +237,11 @@ createApp({
     }
     async function jumpToSession(sessionId) {
       switchTab('timeline');
-      await openSession(sessionId);
+      // 从待办页跳来时强制展开（不因已展开而收起）
+      try {
+        detail.value = await api('GET', '/api/sessions/' + sessionId);
+        expandedId.value = sessionId;
+      } catch (e) { showError(e); }
     }
 
     // ---------- 标签页切换 ----------
@@ -244,7 +258,7 @@ createApp({
     return {
       tab, toast, switchTab,
       fmtTime, fmtDue, typeMeta, statusText, spClass,
-      sessions, detail, loadSessions, openSession, dismissMemory, retryJob,
+      sessions, detail, expandedId, loadSessions, toggleSession, audioUrl, dismissMemory, retryJob,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
       loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic,

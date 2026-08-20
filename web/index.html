@@ -50,65 +50,70 @@
   <!-- ============ 时间线 ============ -->
   <div class="wrap" v-if="tab==='timeline'">
     <div v-if="!sessions.length" class="card muted">还没有记录。去「录音」页上传或录一段吧。</div>
-    <div class="card" v-for="s in sessions" :key="s.id" style="cursor:pointer" @click="openSession(s.id)">
-      <div class="kv">
-        <div>
-          <b>{{ s.filename }}</b>
-          <div class="muted">{{ fmtTime(s.created_at) }} · {{ s.source === 'web_record' ? '录音' : '上传' }}</div>
+    <div v-for="s in sessions" :key="s.id">
+      <!-- 会话卡片：点击就地展开/收起转写详情 -->
+      <div class="card" style="cursor:pointer" @click="toggleSession(s.id)">
+        <div class="kv">
+          <div>
+            <b>{{ s.filename }}</b>
+            <div class="muted">{{ fmtTime(s.created_at) }} · {{ s.source === 'web_record' ? '录音' : '上传' }}</div>
+          </div>
+          <span class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
         </div>
-        <span class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
-      </div>
-    </div>
-
-    <!-- 详情弹层 -->
-    <div v-if="detail" class="card">
-      <div class="kv">
-        <b>转写详情</b>
-        <button class="muted" style="border:none;background:none;cursor:pointer" @click="detail=null">✕ 关闭</button>
-      </div>
-      <div class="muted" style="margin:6px 0">{{ detail.session.filename }}</div>
-      <div v-if="detail.job && detail.job.status==='failed'" style="margin:8px 0">
-        <span class="badge failed">处理失败</span>
-        <span class="muted">{{ detail.job.last_error }}</span>
-        <button class="primary" style="padding:4px 12px" @click="retryJob(detail.job.id)">重跑</button>
-      </div>
-      <div v-for="(sg, i) in detail.segments" :key="i" class="seg">
-        <span class="sp" :class="spClass(sg.speaker)">{{ sg.speaker }}</span>{{ sg.text }}
       </div>
 
-      <!-- memory 卡片 -->
-      <template v-if="detail.memories && detail.memories.length">
-        <div class="todo-group-title">提取的记忆</div>
-        <div class="card" v-for="m in detail.memories" :key="m.id" style="margin:6px 0; position:relative">
-          <div class="kv">
-            <div>
-              <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
-              <b>{{ m.title }}</b>
+      <!-- 就地展开的转写详情（紧贴当前卡片下方，不跳到页面底部） -->
+      <div v-if="expandedId===s.id" class="card" style="margin-top:-2px">
+        <!-- 音频播放器：点击播放原始音频 -->
+        <audio :src="audioUrl(s.id)" controls preload="none"
+               style="width:100%; margin:6px 0 10px"></audio>
+        <div class="kv">
+          <b>转写详情</b>
+          <button class="muted" style="border:none;background:none;cursor:pointer" @click="toggleSession(s.id)">✕ 关闭</button>
+        </div>
+        <div v-if="detail.job && detail.job.status==='failed'" style="margin:8px 0">
+          <span class="badge failed">处理失败</span>
+          <span class="muted">{{ detail.job.last_error }}</span>
+          <button class="primary" style="padding:4px 12px" @click="retryJob(detail.job.id)">重跑</button>
+        </div>
+        <div v-for="(sg, i) in detail.segments" :key="i" class="seg">
+          <span class="sp" :class="spClass(sg.speaker)">{{ sg.speaker }}</span>{{ sg.text }}
+        </div>
+
+        <!-- memory 卡片 -->
+        <template v-if="detail.memories && detail.memories.length">
+          <div class="todo-group-title">提取的记忆</div>
+          <div class="card" v-for="m in detail.memories" :key="m.id" style="margin:6px 0; position:relative">
+            <div class="kv">
+              <div>
+                <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+                <b>{{ m.title }}</b>
+              </div>
+              <button class="mini" @click="dismissMemory(m)" title="忽略此记忆">✕</button>
             </div>
-            <button class="mini" @click="dismissMemory(m)" title="忽略此记忆">✕</button>
+            <div style="margin:6px 0">{{ m.content }}</div>
+            <div class="muted">
+              重要度 {{ (m.importance ?? 0).toFixed(1) }} · 置信 {{ (m.confidence ?? 0).toFixed(2) }}
+              <template v-if="m.topic_name"> · {{ m.topic_name }}</template>
+              <template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template>
+            </div>
           </div>
-          <div style="margin:6px 0">{{ m.content }}</div>
-          <div class="muted">
-            重要度 {{ (m.importance ?? 0).toFixed(1) }} · 置信 {{ (m.confidence ?? 0).toFixed(2) }}
-            <template v-if="m.topic_name"> · {{ m.topic_name }}</template>
-            <template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template>
-          </div>
-        </div>
-      </template>
+        </template>
 
-      <!-- todo 卡片（只读，操作去待办页） -->
-      <template v-if="detail.todos && detail.todos.length">
-        <div class="todo-group-title">提取的待办</div>
-        <div class="card" v-for="td in detail.todos" :key="td.id" style="margin:6px 0">
-          <div class="kv">
-            <div>☑️ {{ td.title }}</div>
-            <span class="badge" :class="td.status">
-              {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : td.status === 'done' ? '已完成' : '已忽略' }}
-            </span>
+        <!-- todo 卡片（只读，操作去待办页） -->
+        <template v-if="detail.todos && detail.todos.length">
+          <div class="todo-group-title">提取的待办</div>
+          <div class="card" v-for="td in detail.todos" :key="td.id" style="margin:6px 0">
+            <div class="kv">
+              <div>☑️ {{ td.title }}</div>
+              <span class="badge" :class="td.status">
+                {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : td.status === 'done' ? '已完成' : '已忽略' }}
+              </span>
+            </div>
+            <div class="muted" v-if="td.due_at">截止 {{ fmtDue(td.due_at) }} · 到「待办」页处理</div>
           </div>
-          <div class="muted" v-if="td.due_at">截止 {{ fmtDue(td.due_at) }} · 到「待办」页处理</div>
-        </div>
-      </template>
+        </template>
+      </div>
     </div>
   </div>
 
