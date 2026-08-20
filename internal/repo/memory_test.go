@@ -294,3 +294,84 @@ func TestMemoryBumpConfidence(t *testing.T) {
 		t.Fatalf("confidence = %v, want 0.99（封顶）", gotHi.Confidence)
 	}
 }
+
+func TestMemoryListActive(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := &MemoryRepo{DB: db}
+	ctx := context.Background()
+	now := time.Now()
+	a := &Memory{Type: "fact", Title: "整理ListA", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: ids.New(), EventAt: &now, Status: "active"}
+	s := &Memory{Type: "fact", Title: "整理ListS", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: ids.New(), EventAt: &now, Status: "superseded"}
+	if err := mr.InsertExt(ctx, db, []*Memory{a, s}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := mr.ListActive(ctx, 1, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range rows {
+		got[m.Title] = true
+	}
+	if !got["整理ListA"] || got["整理ListS"] {
+		t.Fatalf("ListActive = %v, want 含整理ListA 不含 superseded", got)
+	}
+}
+
+func TestMemoryApplyConsolidation(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := &MemoryRepo{DB: db}
+	mtr := &MemoryTopicRepo{DB: db}
+	tr := &TopicRepo{DB: db}
+	ctx := context.Background()
+	_, _ = db.ExecContext(ctx, `UPDATE topic SET status='dismissed' WHERE user_id=1 AND name IN (?,?) AND status IN ('active','suggested')`, "整理靶主题", "整理源主题")
+	_, _ = db.ExecContext(ctx, `DELETE FROM memory WHERE title IN (?,?)`, "整理A记忆", "整理B记忆")
+	now := time.Now()
+	a := &Memory{Type: "fact", Title: "整理A记忆", Content: "A", EpistemicType: "observed", Confidence: 0.80, SessionID: ids.New(), EventAt: &now, Status: "active"}
+	b := &Memory{Type: "fact", Title: "整理B记忆", Content: "B", EpistemicType: "observed", Confidence: 0.80, SessionID: ids.New(), EventAt: &now, Status: "active"}
+	if err := mr.InsertExt(ctx, db, []*Memory{a, b}); err != nil {
+		t.Fatal(err)
+	}
+	x := &Topic{Name: "整理靶主题", Status: "active", CreatedBy: "ai"}
+	y := &Topic{Name: "整理源主题", Status: "active", CreatedBy: "ai"}
+	_ = tr.Create(ctx, x)
+	_ = tr.Create(ctx, y)
+	_ = mtr.AddLink(ctx, a.ID, x.ID)
+	_ = mtr.AddLink(ctx, b.ID, y.ID)
+
+	// merges 优先：B 被 merge 置 superseded；adjustment 指向 B 应被跳过 → adjusted=0
+	merged, adjusted, err := mr.ApplyConsolidation(ctx, ConsolidationReq{
+		Merges:      []MemoryMerge{{CanonicalID: a.ID, MemberIDs: []ids.ID{a.ID, b.ID}}},
+		Adjustments: []MemoryAdjustment{{MemoryID: b.ID, Kind: "corroborate"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged != 1 || adjusted != 0 {
+		t.Fatalf("merged=%d adjusted=%d, want 1/0（B 被 merge supersede，adjustment 跳过）", merged, adjusted)
+	}
+	bGot, _ := mr.Get(ctx, b.ID)
+	if bGot.Status != "superseded" {
+		t.Fatalf("B status=%s, want superseded", bGot.Status)
+	}
+	// A 聚合 X+Y（B 的 Y 迁来）
+	aLinks, _ := mtr.ListByMemoryIDs(ctx, []ids.ID{a.ID})
+	names := map[string]bool{}
+	for _, ti := range aLinks[a.ID] {
+		names[ti.Name] = true
+	}
+	if !names["整理靶主题"] || !names["整理源主题"] {
+		t.Fatalf("A topics=%v, want 含整理靶主题+整理源主题", names)
+	}
+	// B 的 memory_topic 已删
+	bLinks, _ := mtr.ListByMemoryIDs(ctx, []ids.ID{b.ID})
+	if len(bLinks[b.ID]) != 0 {
+		t.Fatalf("B topic 关联=%d, want 0（已迁删）", len(bLinks[b.ID]))
+	}
+}
