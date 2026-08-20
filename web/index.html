@@ -6,40 +6,66 @@
 <title>知微</title>
 <script src="/app/vendor/vue.global.prod.js"></script>
 <style>
+  /* 设计变量：一套克制的中性灰 + 靛蓝点缀，便于后续统一调主题 */
+  :root {
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --border: #e7e9ee;
+    --text: #1f2937;
+    --muted: #8a91a0;
+    --accent: #4f46e5;
+    --accent-soft: #eef2ff;
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 1px rgba(16,24,40,.03);
+    --shadow-hover: 0 6px 18px rgba(16,24,40,.09);
+    --radius: 14px;
+  }
   * { box-sizing: border-box; margin: 0; }
-  body { font-family: -apple-system, "PingFang SC", sans-serif; background: #f6f7f9; color: #222; }
-  .tabs { display: flex; background: #fff; border-bottom: 1px solid #e5e7eb; padding: 0 16px; }
-  .tabs button { padding: 14px 18px; border: none; background: none; font-size: 15px; cursor: pointer; color: #6b7280; }
-  .tabs button.active { color: #111; border-bottom: 2px solid #111; font-weight: 600; }
-  .wrap { max-width: 760px; margin: 0 auto; padding: 16px; }
-  .card { background: #fff; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
-  .muted { color: #9ca3af; font-size: 13px; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  /* 粘性标签栏：滚动时常驻，带毛玻璃与底部分隔 */
+  .tabs { position: sticky; top: 0; z-index: 10; display: flex; gap: 2px; background: rgba(255,255,255,.92); backdrop-filter: saturate(180%) blur(8px); border-bottom: 1px solid var(--border); padding: 0 12px; }
+  .brand { font-weight: 700; font-size: 16px; padding: 14px 14px 14px 6px; color: var(--accent); letter-spacing: .5px; }
+  .tabs button { padding: 14px 14px; border: none; background: none; font-size: 15px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; transition: color .15s; }
+  .tabs button:hover { color: #4b5563; }
+  .tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 18px 16px 64px; }
+  /* 卡片：加 1px 描边 + 更柔和的阴影，可点卡片悬停轻浮起 */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px; box-shadow: var(--shadow); transition: box-shadow .15s, transform .15s; }
+  .card.clickable:hover { box-shadow: var(--shadow-hover); }
+  .muted { color: var(--muted); font-size: 13px; }
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 99px; font-size: 12px; font-weight: 500; }
   .badge.pending, .badge.running, .badge.suggested { background: #fef3c7; color: #92400e; }
   .badge.completed, .badge.done, .badge.active, .badge.confirmed { background: #d1fae5; color: #065f46; }
   .badge.failed { background: #fee2e2; color: #991b1b; }
-  .badge.dismissed { background: #f3f4f6; color: #6b7280; }
-  .seg { padding: 8px 0; border-bottom: 1px dashed #f0f0f0; }
+  .badge.dismissed { background: #f1f2f5; color: #8a91a0; }
+  .seg { padding: 9px 0; border-bottom: 1px dashed #eceef2; line-height: 1.6; }
   .seg:last-child { border: none; }
-  .sp { font-size: 12px; color: #fff; border-radius: 6px; padding: 1px 6px; margin-right: 8px; }
+  .sp { font-size: 12px; color: #fff; border-radius: 6px; padding: 2px 7px; margin-right: 8px; font-weight: 500; }
   .sp1 { background: #6366f1; } .sp2 { background: #10b981; } .sp3 { background: #f59e0b; }
-  button.primary { background: #111; color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 15px; cursor: pointer; }
-  button.primary:disabled { background: #9ca3af; }
-  button.mini { background: #f3f4f6; color: #374151; border: none; border-radius: 8px; padding: 5px 12px; font-size: 13px; cursor: pointer; }
-  button.mini:hover { background: #e5e7eb; }
-  #drop { border: 2px dashed #d1d5db; border-radius: 12px; padding: 36px; text-align: center; color: #6b7280; margin-bottom: 12px; }
-  #drop.rec { border-color: #ef4444; color: #ef4444; }
-  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #111; color: #fff; padding: 10px 20px; border-radius: 10px; font-size: 14px; z-index: 99; }
-  .type-tag { display: inline-block; color: #fff; border-radius: 6px; padding: 1px 8px; font-size: 12px; margin-right: 8px; }
+  button.primary { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 15px; font-weight: 600; cursor: pointer; transition: filter .15s, transform .05s; }
+  button.primary:hover { filter: brightness(1.08); }
+  button.primary:active { transform: translateY(1px); }
+  button.primary:disabled { background: #c4c8d2; cursor: not-allowed; }
+  button.mini { background: #f3f4f7; color: #4b5563; border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; font-size: 13px; cursor: pointer; transition: background .15s; }
+  button.mini:hover { background: #e9ebf0; }
+  select.mini { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; font-size: 13px; color: #4b5563; cursor: pointer; }
+  #drop { border: 2px dashed #c7cad2; border-radius: var(--radius); padding: 40px; text-align: center; color: var(--muted); margin-bottom: 12px; background: var(--surface); transition: border-color .15s, color .15s, background .15s; }
+  #drop:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  #drop.rec { border-color: #ef4444; color: #ef4444; background: #fff5f5; }
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #1f2937; color: #fff; padding: 10px 20px; border-radius: 10px; font-size: 14px; z-index: 99; box-shadow: var(--shadow-hover); }
+  .type-tag { display: inline-block; color: #fff; border-radius: 6px; padding: 2px 9px; font-size: 12px; margin-right: 8px; font-weight: 500; }
   .kv { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-  .overdue { color: #dc2626; }
-  .todo-group-title { font-size: 14px; font-weight: 600; margin: 18px 0 8px; }
-  input.txt { border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 10px; font-size: 14px; width: 100%; }
+  .overdue { color: #dc2626; font-weight: 600; }
+  .todo-group-title { font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 20px 0 10px; }
+  input.txt { border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; font-size: 14px; width: 100%; background: #fff; transition: border-color .15s, box-shadow .15s; }
+  input.txt:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  /* 空状态：居中、留白、柔化，区别于内容卡片 */
+  .empty { text-align: center; padding: 28px 12px; color: var(--muted); }
 </style>
 </head>
 <body>
 <div id="app">
   <div class="tabs">
+    <span class="brand">知微</span>
     <button :class="{active: tab==='timeline'}" @click="switchTab('timeline')">时间线</button>
     <button :class="{active: tab==='record'}" @click="switchTab('record')">录音</button>
     <button :class="{active: tab==='topics'}" @click="switchTab('topics')">Topics</button>
@@ -49,10 +75,10 @@
 
   <!-- ============ 时间线 ============ -->
   <div class="wrap" v-if="tab==='timeline'">
-    <div v-if="!sessions.length" class="card muted">还没有记录。去「录音」页上传或录一段吧。</div>
+    <div v-if="!sessions.length" class="card empty">还没有记录。去「录音」页上传或录一段吧。</div>
     <div v-for="s in sessions" :key="s.id">
       <!-- 会话卡片：点击就地展开/收起转写详情 -->
-      <div class="card" style="cursor:pointer" @click="toggleSession(s.id)">
+      <div class="card clickable" style="cursor:pointer" @click="toggleSession(s.id)">
         <div class="kv">
           <div>
             <b>{{ s.filename }}</b>
@@ -146,7 +172,7 @@
         <input class="txt" v-model="newTopic.description" placeholder="描述（可选）" style="margin-bottom:8px">
         <button class="primary" style="padding:6px 16px; font-size:14px" @click="createTopic">创建</button>
       </div>
-      <div v-if="!topics.length" class="card muted">还没有主题。录音抽取后会自动归类，也可以手动新建。</div>
+      <div v-if="!topics.length" class="card empty">还没有主题。录音抽取后会自动归类，也可以手动新建。</div>
       <div class="card" v-for="t in topics" :key="t.id">
         <div class="kv">
           <div style="cursor:pointer" @click="openTopic(t.id)">
@@ -180,7 +206,7 @@
         </template>
       </div>
       <div class="todo-group-title">记忆时间线</div>
-      <div v-if="!topicDetail.memories.length" class="card muted">暂无记忆</div>
+      <div v-if="!topicDetail.memories.length" class="card empty">暂无记忆</div>
       <div class="card" v-for="m in topicDetail.memories" :key="m.id">
         <div>
           <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
@@ -190,7 +216,7 @@
         <div class="muted">{{ fmtTime(m.event_at) }}</div>
       </div>
       <div class="todo-group-title">关联待办</div>
-      <div v-if="!topicDetail.todos.length" class="card muted">暂无待办</div>
+      <div v-if="!topicDetail.todos.length" class="card empty">暂无待办</div>
       <div class="card" v-for="td in topicDetail.todos" :key="td.id">
         <div class="kv">
           <div>☑️ {{ td.title }}</div>
@@ -205,7 +231,7 @@
   <!-- ============ 待办 ============ -->
   <div class="wrap" v-if="tab==='todos'">
     <div class="todo-group-title">待确认（{{ suggestedTodos.length }}）</div>
-    <div v-if="!suggestedTodos.length" class="card muted">没有待确认的待办</div>
+    <div v-if="!suggestedTodos.length" class="card empty">没有待确认的待办</div>
     <div class="card" v-for="td in suggestedTodos" :key="td.id" style="background:#fffbeb">
       <div class="kv">
         <b>☑️ {{ td.title }}</b>
@@ -220,7 +246,7 @@
     </div>
 
     <div class="todo-group-title">进行中（{{ activeTodos.length }}）</div>
-    <div v-if="!activeTodos.length" class="card muted">没有进行中的待办</div>
+    <div v-if="!activeTodos.length" class="card empty">没有进行中的待办</div>
     <div class="card" v-for="td in activeTodos" :key="td.id">
       <div class="kv">
         <b>☑️ {{ td.title }}</b>
@@ -236,7 +262,7 @@
       已完成（{{ doneTodos.length }}）{{ doneCollapsed ? ' ▸' : ' ▾' }}
     </div>
     <template v-if="!doneCollapsed">
-      <div v-if="!doneTodos.length" class="card muted">没有已完成的待办</div>
+      <div v-if="!doneTodos.length" class="card empty">没有已完成的待办</div>
       <div class="card" v-for="td in doneTodos" :key="td.id" style="opacity:.6">
         <div class="kv">
           <div>✅ <s>{{ td.title }}</s></div>
