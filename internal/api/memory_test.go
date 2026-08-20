@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -284,5 +286,168 @@ func TestMemoryPatch(t *testing.T) {
 	r.ServeHTTP(rec4, req4)
 	if rec4.Code != http.StatusBadRequest {
 		t.Fatalf("非法 status 应 400, got %d", rec4.Code)
+	}
+}
+
+// setupMemoryConsolidateFixtures 预置 5 条 active memory：A/B 各带 1 个 topic（整理靶主题 X /
+// 整理源主题 Y，验证 merge 关联迁移），C/D/E 裸 memory（confidence 0.80，验证
+// corroborate/contradict/outdated 置信度演化）。名称用「整理」前缀避免与其他 fixture 混淆。
+func setupMemoryConsolidateFixtures(t *testing.T) (*repo.MemoryRepo, *repo.MemoryTopicRepo, *repo.TopicRepo, *repo.Memory, *repo.Memory, *repo.Memory, *repo.Memory, *repo.Memory) {
+	t.Helper()
+	if err := ids.Init(1); err != nil {
+		t.Fatal(err)
+	}
+	db, err := repo.NewDB(repo.TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := &repo.MemoryRepo{DB: db}
+	mtr := &repo.MemoryTopicRepo{DB: db}
+	tr := &repo.TopicRepo{DB: db}
+	ctx := context.Background()
+	for _, name := range []string{"整理靶主题", "整理源主题"} {
+		_, _ = db.ExecContext(ctx, `UPDATE topic SET status='dismissed' WHERE user_id=1 AND name=? AND status IN ('active','suggested')`, name)
+	}
+	_, _ = db.ExecContext(ctx, `DELETE FROM memory WHERE title IN (?, ?, ?, ?, ?)`,
+		"整理A记忆", "整理B记忆", "整理C记忆", "整理D记忆", "整理E记忆")
+	eventAt := time.Now()
+	mk := func(title string) *repo.Memory {
+		return &repo.Memory{Type: "fact", Title: title, Content: title + "的内容描述",
+			EpistemicType: "observed", Confidence: 0.80, SessionID: ids.New(), EventAt: &eventAt, Status: "active"}
+	}
+	a, b, c, d, e := mk("整理A记忆"), mk("整理B记忆"), mk("整理C记忆"), mk("整理D记忆"), mk("整理E记忆")
+	for _, m := range []*repo.Memory{a, b, c, d, e} {
+		if err := mr.InsertExt(ctx, db, []*repo.Memory{m}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x := &repo.Topic{Name: "整理靶主题", Status: "active", CreatedBy: "ai"}
+	y := &repo.Topic{Name: "整理源主题", Status: "active", CreatedBy: "ai"}
+	if err := tr.Create(ctx, x); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Create(ctx, y); err != nil {
+		t.Fatal(err)
+	}
+	if err := mtr.AddLink(ctx, a.ID, x.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := mtr.AddLink(ctx, b.ID, y.ID); err != nil {
+		t.Fatal(err)
+	}
+	return mr, mtr, tr, a, b, c, d, e
+}
+
+// TestMemoryConsolidate 验证整理提议路径：fake LLM 返回 canned merges+adjustments，
+// handler 调 ListActive → LLM.Chat → 容错解析 → 原样回传提议（不改库）。
+// fakeConsolidateLLM 复用 topic_test.go（同包 api）。
+func TestMemoryConsolidate(t *testing.T) {
+	mr, mtr, tr, a, b, _, _, _ := setupMemoryConsolidateFixtures(t)
+	canned := fmt.Sprintf(`{"merges":[{"canonical_id":"%s","member_ids":["%s","%s"]}],"adjustments":[{"memory_id":"%s","kind":"corroborate","reason":"B 佐证 A","evidence_ids":["%s"]}]}`,
+		a.ID.String(), a.ID.String(), b.ID.String(), b.ID.String(), a.ID.String())
+	r := chi.NewRouter()
+	RegisterMemory(r, &MemoryHandler{
+		Memories: mr, Topics: tr, MemoryTopics: mtr,
+		LLM: &fakeConsolidateLLM{resp: canned}, LLMModel: "test", ConsolidatePrompt: "sys",
+	})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/memories/consolidate", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("consolidate: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Merges []struct {
+			CanonicalID string   `json:"canonical_id"`
+			MemberIDs   []string `json:"member_ids"`
+		} `json:"merges"`
+		Adjustments []struct {
+			MemoryID string `json:"memory_id"`
+			Kind     string `json:"kind"`
+		} `json:"adjustments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v %s", err, rec.Body.String())
+	}
+	if len(resp.Merges) != 1 || resp.Merges[0].CanonicalID != a.ID.String() {
+		t.Fatalf("merges = %+v, want 1 组 canonical=%s", resp.Merges, a.ID)
+	}
+	if len(resp.Merges[0].MemberIDs) != 2 {
+		t.Fatalf("member_ids = %+v, want 2", resp.Merges[0].MemberIDs)
+	}
+	wantMembers := map[string]bool{a.ID.String(): false, b.ID.String(): false}
+	for _, mid := range resp.Merges[0].MemberIDs {
+		if _, ok := wantMembers[mid]; ok {
+			wantMembers[mid] = true
+		}
+	}
+	for k, v := range wantMembers {
+		if !v {
+			t.Fatalf("member_ids 缺 %s: %v", k, resp.Merges[0].MemberIDs)
+		}
+	}
+	if len(resp.Adjustments) != 1 || resp.Adjustments[0].MemoryID != b.ID.String() || resp.Adjustments[0].Kind != "corroborate" {
+		t.Fatalf("adjustments = %+v, want 1 条 {B, corroborate}", resp.Adjustments)
+	}
+}
+
+// TestMemoryMerge 验证整理落库事务：merge（A canonical，B member → B 的 topic 关联迁到 A、
+// B 置 superseded）+ adjustments（corroborate +0.05 / contradict -0.10 / outdated ×0.5+superseded）。
+// merges 优先：adjustments 跳过已被 merge supersede 的 member。不调 LLM（纯 DB 事务）。
+func TestMemoryMerge(t *testing.T) {
+	mr, mtr, tr, a, b, c, d, e := setupMemoryConsolidateFixtures(t)
+	r := chi.NewRouter()
+	RegisterMemory(r, &MemoryHandler{Memories: mr, Topics: tr, MemoryTopics: mtr}) // Merge 不调 LLM
+
+	body := fmt.Sprintf(`{"merges":[{"canonical_id":"%s","member_ids":["%s","%s"]}],"adjustments":[{"memory_id":"%s","kind":"corroborate","reason":"","evidence_ids":[]},{"memory_id":"%s","kind":"contradict","reason":"","evidence_ids":[]},{"memory_id":"%s","kind":"outdated","reason":"","evidence_ids":[]}]}`,
+		a.ID.String(), a.ID.String(), b.ID.String(), c.ID.String(), d.ID.String(), e.ID.String())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/memories/merge", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Applied  bool `json:"applied"`
+		Merged   int  `json:"merged"`
+		Adjusted int  `json:"adjusted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v %s", err, rec.Body.String())
+	}
+	if !resp.Applied || resp.Merged != 1 || resp.Adjusted != 3 {
+		t.Fatalf("resp = %+v, want applied merged=1 adjusted=3", resp)
+	}
+	ctx := context.Background()
+	// A 聚合：A 原 X(整理靶主题) + B 迁来 Y(整理源主题)
+	aLinks, _ := mtr.ListByMemoryIDs(ctx, []ids.ID{a.ID})
+	gotTopics := map[string]bool{}
+	for _, ti := range aLinks[a.ID] {
+		gotTopics[ti.Name] = true
+	}
+	if !gotTopics["整理靶主题"] || !gotTopics["整理源主题"] {
+		t.Fatalf("A topics = %+v, want 含整理靶主题+整理源主题", gotTopics)
+	}
+	// B superseded，B 的 memory_topic 已删
+	bGot, _ := mr.Get(ctx, b.ID)
+	if bGot.Status != "superseded" {
+		t.Fatalf("B status=%s, want superseded", bGot.Status)
+	}
+	bLinks, _ := mtr.ListByMemoryIDs(ctx, []ids.ID{b.ID})
+	if len(bLinks[b.ID]) != 0 {
+		t.Fatalf("B topic 关联=%d, want 0（已迁删）", len(bLinks[b.ID]))
+	}
+	// corroborate C 0.80→0.85；contradict D 0.80→0.70；outdated E 0.80→0.40 且 superseded
+	cGot, _ := mr.Get(ctx, c.ID)
+	if math.Abs(cGot.Confidence-0.85) > 0.001 {
+		t.Fatalf("C conf=%v, want 0.85", cGot.Confidence)
+	}
+	dGot, _ := mr.Get(ctx, d.ID)
+	if math.Abs(dGot.Confidence-0.70) > 0.001 {
+		t.Fatalf("D conf=%v, want 0.70", dGot.Confidence)
+	}
+	eGot, _ := mr.Get(ctx, e.ID)
+	if eGot.Status != "superseded" || math.Abs(eGot.Confidence-0.40) > 0.001 {
+		t.Fatalf("E = %+v, want superseded conf=0.40", eGot)
 	}
 }
