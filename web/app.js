@@ -249,6 +249,60 @@ createApp({
       return 1 - dp[m][n] / Math.max(m, n);
     }
 
+    // ---------- 记忆整理（D2 LLM 提议 → 用户编辑确认 → 应用） ----------
+    // 仿 T8 topic 智能合并：member 用 {id,name,checked} 对齐。canonical_id 是 memory id，
+    // 用 <select> 选 member（非文本输入）。点按钮先 loadMemories（GET /api/memories?limit=200，
+    // 取非 dismissed 记忆标题，上限 200；>200 条时超出部分 titleOf 回退为原始 id 字符串）。
+    const memories = ref([]);
+    async function loadMemories() {
+      try {
+        const d = await api('GET', '/api/memories?limit=200');
+        memories.value = d.memories || [];
+      } catch (e) { showError(e); }
+    }
+    const memoryDraft = ref(null); // {merges:[{canonical_id, members:[{id,name,checked}]}], adjustments:[{memory_id,title,kind,reason,evidence_ids,checked}]}
+    async function startMemoryConsolidate() {
+      try {
+        await loadMemories();
+        const d = await api('POST', '/api/memories/consolidate', {});
+        const titleOf = id => { const m = memories.value.find(x => x.id === id); return m ? m.title : id; };
+        memoryDraft.value = {
+          merges: (d.merges || []).map(g => ({
+            canonical_id: g.canonical_id || '',
+            members: (g.member_ids || []).map(id => ({ id, name: titleOf(id), checked: true })),
+          })),
+          adjustments: (d.adjustments || []).map(a => ({
+            memory_id: a.memory_id, title: titleOf(a.memory_id),
+            kind: a.kind, reason: a.reason,
+            evidence_ids: a.evidence_ids || [],
+            checked: true,
+          })),
+        };
+        if (!memoryDraft.value.merges.length && !memoryDraft.value.adjustments.length) toast.value = '暂无需要整理的记忆';
+      } catch (e) { showError(e); }
+    }
+    function toggleMemoryMember(g, id) {
+      const m = g.members.find(x => x.id === id);
+      if (m) m.checked = !m.checked;
+    }
+    function toggleMemoryAdjustment(a) { a.checked = !a.checked; }
+    // 只提交「canonical 非空 + 勾选 ≥2 member」的合并组 + 勾选的调整项
+    async function applyMemoryConsolidation() {
+      const d = memoryDraft.value || {};
+      const merges = (d.merges || [])
+        .map(g => ({ canonical_id: g.canonical_id, member_ids: g.members.filter(m => m.checked).map(m => m.id) }))
+        .filter(g => g.canonical_id && g.member_ids.length >= 2);
+      const adjustments = (d.adjustments || []).filter(a => a.checked)
+        .map(a => ({ memory_id: a.memory_id, kind: a.kind, reason: a.reason, evidence_ids: a.evidence_ids }));
+      if (!merges.length && !adjustments.length) { memoryDraft.value = null; return; }
+      try {
+        await api('POST', '/api/memories/merge', { merges, adjustments });
+        memoryDraft.value = null;
+        await reloadSession(detail.value.session.id);
+        await loadMemories();
+      } catch (e) { showError(e); }
+    }
+
     // ---------- Topics 智能合并（LLM 提议 → 用户编辑确认 → 应用） ----------
     // mergeDraft：合并提议草稿，每组 {canonical_name, members:[{id,name,checked}]}。
     // 用 {id,name,checked} 成员对象而非裸 id 数组，便于模板正确渲染 checkbox（修掉
@@ -359,6 +413,7 @@ createApp({
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
       loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, toggleMergeMember, applyMerge,
+      memories, loadMemories, memoryDraft, startMemoryConsolidate, toggleMemoryMember, toggleMemoryAdjustment, applyMemoryConsolidation,
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos,
       loadTodos, setTodoStatus, jumpToSession,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
