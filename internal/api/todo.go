@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -14,13 +15,14 @@ import (
 type TodoHandler struct {
 	Todos      *repo.TodoRepo
 	TodoTopics *repo.TodoTopicRepo // 手动加/删 todo↔topic 关联
-	Topics     *repo.TopicRepo      // 校验 topic 存在
+	Topics     *repo.TopicRepo     // 校验 topic 存在
 }
 
 // RegisterTodo 挂载 todo 路由（router.go 的统一接线在后续任务完成）。
 func RegisterTodo(r chi.Router, h *TodoHandler) {
 	r.Get("/api/todos", h.List)
 	r.Patch("/api/todos/{id}", h.Patch)
+	r.Delete("/api/todos/{id}", h.Delete)
 	r.Post("/api/todos/{id}/topics", h.AddTopic)
 	r.Delete("/api/todos/{id}/topics/{topic_id}", h.RemoveTopic)
 }
@@ -51,9 +53,10 @@ func (h *TodoHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"todos": rows})
 }
 
-// Patch 变更待办状态，按状态机校验：
-// suggested→confirmed、confirmed→done、任意非 dismissed→dismissed。
-// 校验顺序：解码+枚举校验（400）→ 存在性（404）→ 流转合法性（409）。
+// Patch 变更待办：title（改名）和/或 status（状态机流转）。至少一个非空（400）。
+// 校验顺序：解码（400）→ title/status 非空（400）→ status 枚举（400）→ 存在性（404）
+// → 流转合法性（409，先校验后变更，避免 title 已改但 status 409 的半成功）→ 变更（先 title 后 status）。
+// CanTransition 用 Get 出的原始 td.Status（title 变更不影响状态判断）。title 不做 CanTransition，与状态独立。
 func (h *TodoHandler) Patch(w http.ResponseWriter, r *http.Request) {
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
@@ -61,9 +64,19 @@ func (h *TodoHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		Title  string `json:"title"`
 		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !validTodoStatus(req.Status) {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" && req.Status == "" {
+		http.Error(w, "title 或 status 至少一个非空", http.StatusBadRequest)
+		return
+	}
+	if req.Status != "" && !validTodoStatus(req.Status) {
 		http.Error(w, "status 取值非法", http.StatusBadRequest)
 		return
 	}
@@ -72,15 +85,25 @@ func (h *TodoHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "todo 不存在", http.StatusNotFound)
 		return
 	}
-	if !repo.CanTransition(td.Status, req.Status) {
+	// 先校验流转再变更：title+status 同 body 且 status 非法时，不留下 title 已改的半成品。
+	if req.Status != "" && !repo.CanTransition(td.Status, req.Status) {
 		http.Error(w, "不允许的状态流转: "+td.Status+" → "+req.Status, http.StatusConflict)
 		return
 	}
-	if err := h.Todos.UpdateStatus(r.Context(), id, req.Status); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if title != "" {
+		if err := h.Todos.UpdateTitle(r.Context(), id, title); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		td.Title = title
 	}
-	td.Status = req.Status
+	if req.Status != "" {
+		if err := h.Todos.UpdateStatus(r.Context(), id, req.Status); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		td.Status = req.Status
+	}
 	writeJSON(w, map[string]any{"todo": td})
 }
 
@@ -142,6 +165,20 @@ func (h *TodoHandler) RemoveTopic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.TodoTopics.RemoveLink(r.Context(), id, tid); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Delete 硬删除待办 + 关联（单事务级联，2 步确认由前端）。幂等：不存在也 204。
+func (h *TodoHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.Todos.Delete(r.Context(), id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

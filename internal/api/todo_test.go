@@ -190,3 +190,66 @@ func TestTodoAddRemoveTopic(t *testing.T) {
 		t.Fatalf("不存在 todo 应 404, got %d", rec4.Code)
 	}
 }
+
+// TestTodoEditTitle 验证 PATCH title（无 status）改名成功、状态不变。
+func TestTodoEditTitle(t *testing.T) {
+	r, tr, td := setupTodoAPI(t)
+	ctx := context.Background()
+	newTitle := "改名后的待办-" + td.ID.String()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/todos/"+td.ID.String(),
+		strings.NewReader(`{"title":"`+newTitle+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edit title: %d %s", rec.Code, rec.Body.String())
+	}
+	got, _ := tr.Get(ctx, td.ID)
+	if got.Title != newTitle {
+		t.Fatalf("title=%s, want %s", got.Title, newTitle)
+	}
+	if got.Status != td.Status { // title 改动不应碰状态
+		t.Fatalf("status changed: %s -> %s", td.Status, got.Status)
+	}
+}
+
+// TestTodoDelete 验证 DELETE 硬删 todo（不存在也不报错→204），重复删除幂等。
+func TestTodoDelete(t *testing.T) {
+	r, tr, td := setupTodoAPI(t)
+	ctx := context.Background()
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/todos/"+td.ID.String(), nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d", rec.Code)
+	}
+	if _, err := tr.Get(ctx, td.ID); err == nil {
+		t.Fatal("todo 仍存在")
+	}
+	// 重复删除幂等（204）
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodDelete, "/api/todos/"+td.ID.String(), nil))
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("idempotent delete: %d", rec2.Code)
+	}
+}
+
+// TestTodoPatchTitleStatusBadTransition 验证 title+status 同 body 且 status 流转非法时
+// 返回 409 且 title 未被持久化（先校验后变更，避免半成功）。
+func TestTodoPatchTitleStatusBadTransition(t *testing.T) {
+	r, tr, td := setupTodoAPI(t)
+	ctx := context.Background()
+	origTitle := td.Title
+	// td 是 suggested；suggested→done 非法。同 body 发 title+status:done 应 409，title 不变。
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/todos/"+td.ID.String(),
+		strings.NewReader(`{"title":"应被回滚的名字","status":"done"}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d %s", rec.Code, rec.Body.String())
+	}
+	got, _ := tr.Get(ctx, td.ID)
+	if got.Title != origTitle {
+		t.Fatalf("title 被半成功持久化: %s, want %s", got.Title, origTitle)
+	}
+}

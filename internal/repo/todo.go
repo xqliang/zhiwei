@@ -28,8 +28,8 @@ type Todo struct {
 // Topics 由 attachTopics 在查询后填充（无 db tag，不参与 SQL 映射）。
 type TodoRow struct {
 	Todo
-	SourceSessionID *ids.ID    `db:"source_session_id" json:"source_session_id,omitempty"`
-	Topics           []TopicInfo `json:"topics,omitempty"`
+	SourceSessionID *ids.ID     `db:"source_session_id" json:"source_session_id,omitempty"`
+	Topics          []TopicInfo `json:"topics,omitempty"`
 }
 
 // CanTransition 校验 todo 状态流转。
@@ -91,6 +91,31 @@ func (r *TodoRepo) UpdateStatus(ctx context.Context, id ids.ID, status string) e
 	}
 	_, err := r.DB.ExecContext(ctx, `UPDATE todo SET status = ? WHERE id = ?`, status, id.Int64())
 	return err
+}
+
+// UpdateTitle 改待办标题（用户手改）。不做状态校验；状态流转走 UpdateStatus。
+// 「不存在」返回 nil（UPDATE 0 行，与 UpdateStatus 同语义）。
+func (r *TodoRepo) UpdateTitle(ctx context.Context, id ids.ID, title string) error {
+	_, err := r.DB.ExecContext(ctx, `UPDATE todo SET title = ? WHERE id = ?`, title, id.Int64())
+	return err
+}
+
+// Delete 硬删除待办 + 其 todo_topic 关联（单事务级联）。区别于 dismiss（软删，
+// 保留行+状态 dismissed）。不存在也不报错（DELETE 返回 0 行）。区别于
+// DeleteBySessionExt（按 session 批删派生 todo）。
+func (r *TodoRepo) Delete(ctx context.Context, id ids.ID) error {
+	tx, err := r.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM todo_topic WHERE todo_id = ?`, id.Int64()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM todo WHERE id = ?`, id.Int64()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // validTodoStatus 是 todo 状态的枚举校验。

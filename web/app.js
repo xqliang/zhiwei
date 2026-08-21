@@ -71,7 +71,9 @@ createApp({
       if (expandedId.value === id) {
         expandedId.value = null;
         detail.value = null;
-        editingMem.value = null;
+        editingMem.value = null;       // T1 已有
+        editingTodo.value = null;      // 新增
+        deletingTodoId.value = null;  // 新增
         return;
       }
       try {
@@ -374,10 +376,29 @@ createApp({
       catch (e) { showError(e); }
     }
     async function setTodoStatus(t, status) {
+      editingTodo.value = null; deletingTodoId.value = null; // todo 即将换组，清理编辑/删除态
       try {
         await api('PATCH', '/api/todos/' + t.id, { status });
         await loadTodos();
       } catch (e) { showError(e); }
+    }
+    // ---------- 待办 inplace 编辑 + 删除 ----------
+    const editingTodo = ref(null);
+    function startEditTodo(t) { editingTodo.value = { id: t.id, title: t.title }; }
+    function cancelEditTodo() { editingTodo.value = null; }
+    async function saveEditTodo(reload) {
+      const e = editingTodo.value;
+      if (!e || !e.title.trim()) return;
+      try { await api('PATCH', '/api/todos/' + e.id, { title: e.title.trim() }); editingTodo.value = null; if (reload) await reload(); }
+      catch (e2) { showError(e2); }
+    }
+    // 2 步行内删除确认：deletingTodoId 存正待确认删除的 todo id
+    const deletingTodoId = ref(null);
+    function askDeleteTodo(t) { deletingTodoId.value = t.id; }
+    function cancelDeleteTodo() { deletingTodoId.value = null; }
+    async function confirmDeleteTodo(t, reload) {
+      try { await api('DELETE', '/api/todos/' + t.id); deletingTodoId.value = null; if (reload) await reload(); }
+      catch (e) { showError(e); }
     }
     async function jumpToSession(sessionId) {
       switchTab('timeline');
@@ -393,7 +414,7 @@ createApp({
       tab.value = name;
       if (name === 'timeline') loadSessions();
       if (name === 'topics') { topicDetail.value = null; renaming.value = null; cancelManualMerge(); loadTopics(); }
-      if (name === 'todos') { loadTopics(); loadTodos(); }
+      if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; loadTopics(); loadTodos(); }
     }
     loadSessions();
     // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
@@ -413,6 +434,7 @@ createApp({
       manualMergeMode, manualSelected, manualMergeName, manualConfirming, startManualMerge, cancelManualMerge, toggleManualSelect, applyManualMerge, startManualConfirm,
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos,
       loadTodos, setTodoStatus, jumpToSession,
+      editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
     };
   }

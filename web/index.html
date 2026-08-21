@@ -145,10 +145,18 @@
           <div class="todo-group-title">提取的待办</div>
           <div class="card" v-for="td in detail.todos" :key="td.id" style="margin:6px 0">
             <div class="kv">
-              <div>☑️ {{ td.title }}</div>
-              <span class="badge" :class="td.status">
-                {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : td.status === 'done' ? '已完成' : '已忽略' }}
-              </span>
+              <div v-if="!editingTodo || editingTodo.id !== td.id" @click="startEditTodo(td)" style="cursor:text">☑️ {{ td.title }}</div>
+              <input v-else class="txt" v-model="editingTodo.title" style="display:inline-block;width:auto">
+              <div style="display:flex; gap:6px">
+                <button v-if="editingTodo && editingTodo.id === td.id" class="primary" style="padding:4px 10px" @click="saveEditTodo(() => reloadSession(detail.session.id))">保存</button>
+                <button v-if="editingTodo && editingTodo.id === td.id" class="mini" @click="cancelEditTodo()">取消</button>
+                <span v-if="!editingTodo || editingTodo.id !== td.id" class="badge" :class="td.status">
+                  {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : td.status === 'done' ? '已完成' : '已忽略' }}
+                </span>
+                <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="askDeleteTodo(td)">删除</button>
+                <button v-if="deletingTodoId === td.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTodo(td, () => reloadSession(detail.session.id))">确认删除?</button>
+                <button v-if="deletingTodoId === td.id" class="mini" @click="cancelDeleteTodo()">取消</button>
+              </div>
             </div>
             <div class="muted" v-if="td.due_at">截止 {{ fmtDue(td.due_at) }} · 到「待办」页处理</div>
           </div>
@@ -297,10 +305,16 @@
     <div v-if="!suggestedTodos.length" class="card empty">没有待确认的待办</div>
     <div class="card" v-for="td in suggestedTodos" :key="td.id" style="background:#fffbeb">
       <div class="kv">
-        <b>☑️ {{ td.title }}</b>
+        <b v-if="!editingTodo || editingTodo.id !== td.id" @click="startEditTodo(td)" style="cursor:text">☑️ {{ td.title }}</b>
+        <input v-else class="txt" v-model="editingTodo.title" style="display:inline-block;width:auto">
         <div style="display:flex; gap:6px">
-          <button class="mini" @click="setTodoStatus(td, 'confirmed')">加入</button>
-          <button class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
+          <button v-if="editingTodo && editingTodo.id === td.id" class="primary" style="padding:4px 10px" @click="saveEditTodo(loadTodos)">保存</button>
+          <button v-if="editingTodo && editingTodo.id === td.id" class="mini" @click="cancelEditTodo()">取消</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="setTodoStatus(td, 'confirmed')">加入</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="askDeleteTodo(td)">删除</button>
+          <button v-if="deletingTodoId === td.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTodo(td, loadTodos)">确认删除?</button>
+          <button v-if="deletingTodoId === td.id" class="mini" @click="cancelDeleteTodo()">取消</button>
         </div>
       </div>
       <div class="muted">生成 {{ fmtTime(td.created_at) }}<template v-if="td.status!=='suggested'"> · 处理 {{ fmtTime(td.updated_at) }}</template></div>
@@ -320,10 +334,16 @@
     <div v-if="!activeTodos.length" class="card empty">没有进行中的待办</div>
     <div class="card" v-for="td in activeTodos" :key="td.id">
       <div class="kv">
-        <b>☑️ {{ td.title }}</b>
+        <b v-if="!editingTodo || editingTodo.id !== td.id" @click="startEditTodo(td)" style="cursor:text">☑️ {{ td.title }}</b>
+        <input v-else class="txt" v-model="editingTodo.title" style="display:inline-block;width:auto">
         <div style="display:flex; gap:6px">
-          <button class="mini" @click="setTodoStatus(td, 'done')">完成</button>
-          <button class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
+          <button v-if="editingTodo && editingTodo.id === td.id" class="primary" style="padding:4px 10px" @click="saveEditTodo(loadTodos)">保存</button>
+          <button v-if="editingTodo && editingTodo.id === td.id" class="mini" @click="cancelEditTodo()">取消</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="setTodoStatus(td, 'done')">完成</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="askDeleteTodo(td)">删除</button>
+          <button v-if="deletingTodoId === td.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTodo(td, loadTodos)">确认删除?</button>
+          <button v-if="deletingTodoId === td.id" class="mini" @click="cancelDeleteTodo()">取消</button>
         </div>
       </div>
       <div class="muted">生成 {{ fmtTime(td.created_at) }}<template v-if="td.status!=='suggested'"> · 处理 {{ fmtTime(td.updated_at) }}</template></div>
@@ -345,6 +365,11 @@
       <div class="card" v-for="td in doneTodos" :key="td.id" style="opacity:.6">
         <div class="kv">
           <div>✅ <s>{{ td.title }}</s></div>
+          <div style="display:flex; gap:6px">
+            <button v-if="deletingTodoId !== td.id" class="mini" @click="askDeleteTodo(td)">删除</button>
+            <button v-if="deletingTodoId === td.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTodo(td, loadTodos)">确认删除?</button>
+            <button v-if="deletingTodoId === td.id" class="mini" @click="cancelDeleteTodo()">取消</button>
+          </div>
         </div>
         <div class="muted">生成 {{ fmtTime(td.created_at) }}<template v-if="td.status!=='suggested'"> · 处理 {{ fmtTime(td.updated_at) }}</template></div>
         <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
@@ -355,6 +380,6 @@
   </div>
 </div>
 
-<script src="/app/app.8f1f65f0.js"></script>
+<script src="/app/app.e8fa4945.js"></script>
 </body>
 </html>
