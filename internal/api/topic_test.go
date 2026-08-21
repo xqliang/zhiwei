@@ -416,3 +416,46 @@ func TestTopicConsolidate(t *testing.T) {
 		}
 	}
 }
+
+// TestTopicDelete 验证 DELETE 硬删 topic + 其 memory_topic/todo_topic 关联（单事务级联），
+// member B 完好（关联不误删）。区别于 dismiss（PATCH dismissed 软删）。重复删除幂等。
+func TestTopicDelete(t *testing.T) {
+	tr, mr, tdr, a, b := setupMergeFixtures(t)
+	r := chi.NewRouter()
+	RegisterTopic(r, &TopicHandler{Topics: tr, Memories: mr, Todos: tdr}) // Delete 不调 LLM
+	ctx := context.Background()
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/topics/"+a.ID.String(), nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := tr.Get(ctx, a.ID); err == nil {
+		t.Fatal("topic a 仍存在")
+	}
+	// a 的关联已级联删
+	var n int
+	if err := tr.DB.GetContext(ctx, &n, `SELECT COUNT(*) FROM memory_topic WHERE topic_id = ?`, a.ID.Int64()); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("a memory_topic 残留 %d", n)
+	}
+	if err := tr.DB.GetContext(ctx, &n, `SELECT COUNT(*) FROM todo_topic WHERE topic_id = ?`, a.ID.Int64()); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("a todo_topic 残留 %d", n)
+	}
+	// b 完好（未被误删/误改 dismissed）
+	gotB, err := tr.Get(ctx, b.ID)
+	if err != nil || gotB.Status == "dismissed" {
+		t.Fatalf("b 被误删/误改: err=%v status=%s", err, gotB.Status)
+	}
+	// 重复删除幂等（204）
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodDelete, "/api/topics/"+a.ID.String(), nil))
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("idempotent delete: %d", rec2.Code)
+	}
+}

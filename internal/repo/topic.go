@@ -186,3 +186,24 @@ func (r *TopicRepo) MergeGroups(ctx context.Context, groups []MergeGroup) error 
 	}
 	return tx.Commit()
 }
+
+// Delete 硬删除 topic + 其 memory_topic/todo_topic 关联（单事务级联）。区别于 dismiss
+// （PATCH dismissed 软删，保留行）。不存在也不报错。与 MergeGroups 互补：MergeGroups
+// 迁移关联+保留 member 行（审计），Delete 彻底清 topic+关联。
+func (r *TopicRepo) Delete(ctx context.Context, id ids.ID) error {
+	tx, err := r.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_topic WHERE topic_id = ?`, id.Int64()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM todo_topic WHERE topic_id = ?`, id.Int64()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM topic WHERE id = ?`, id.Int64()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

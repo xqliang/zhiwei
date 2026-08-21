@@ -193,15 +193,29 @@ createApp({
       } catch (e) { showError(e); }
     }
     async function confirmTopic(t) {
+      deletingTopicId.value = null; // topic 状态变 active + loadTopics，清理删除态
       try {
         await api('PATCH', '/api/topics/' + t.id, { status: 'active' });
         await loadTopics();
       } catch (e) { showError(e); }
     }
     async function dismissTopic(t) {
+      deletingTopicId.value = null; // topic 即将 dismissed + loadTopics 离开列表，清理删除态
       try {
         await api('PATCH', '/api/topics/' + t.id, { status: 'dismissed' });
         await loadTopics();
+      } catch (e) { showError(e); }
+    }
+    // ---------- topic 删除（硬删，2 步确认） ----------
+    const deletingTopicId = ref(null);
+    function askDeleteTopic(t) { deletingTopicId.value = t.id; }
+    function cancelDeleteTopic() { deletingTopicId.value = null; }
+    async function confirmDeleteTopic(t) {
+      try {
+        await api('DELETE', '/api/topics/' + t.id);
+        deletingTopicId.value = null;
+        await loadTopics();
+        if (topicDetail.value && topicDetail.value.topic.id === t.id) closeTopicDetail();
       } catch (e) { showError(e); }
     }
     // 关闭主题详情：同时清空重命名状态，避免残留的输入框污染下次打开
@@ -209,6 +223,7 @@ createApp({
       topicDetail.value = null;
       renaming.value = null;
       editingMem.value = null;
+      deletingTopicId.value = null; // 清理删除态，避免残留确认按钮
     }
     function startRename(t) { renaming.value = { id: t.id, name: t.name }; }
     async function commitRename() {
@@ -413,7 +428,7 @@ createApp({
     function switchTab(name) {
       tab.value = name;
       if (name === 'timeline') loadSessions();
-      if (name === 'topics') { topicDetail.value = null; renaming.value = null; cancelManualMerge(); loadTopics(); }
+      if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; cancelManualMerge(); loadTopics(); }
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; loadTopics(); loadTodos(); }
     }
     loadSessions();
@@ -430,7 +445,7 @@ createApp({
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissMemory, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
-      loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, toggleMergeMember, applyMerge,
+      loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, toggleMergeMember, applyMerge, deletingTopicId, askDeleteTopic, cancelDeleteTopic, confirmDeleteTopic,
       manualMergeMode, manualSelected, manualMergeName, manualConfirming, startManualMerge, cancelManualMerge, toggleManualSelect, applyManualMerge, startManualConfirm,
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos,
       loadTodos, setTodoStatus, jumpToSession,

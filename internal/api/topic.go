@@ -37,6 +37,7 @@ func RegisterTopic(r chi.Router, h *TopicHandler) {
 	r.Post("/api/topics/merge", h.Merge)
 	r.Get("/api/topics/{id}", h.Get)
 	r.Patch("/api/topics/{id}", h.Patch)
+	r.Delete("/api/topics/{id}", h.Delete)
 }
 
 // List 返回非 dismissed 主题及关联计数（active memory 数 / confirmed todo 数），
@@ -269,4 +270,18 @@ func (h *TopicHandler) Merge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"merged": true})
+}
+
+// Delete 硬删除 topic + 关联（单事务级联，2 步确认由前端）。幂等：不存在也 204。
+func (h *TopicHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.Topics.Delete(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

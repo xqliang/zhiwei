@@ -225,8 +225,11 @@
             </div>
           </div>
           <div v-if="!manualMergeMode" style="display:flex; gap:6px">
-            <button class="mini" v-if="t.status==='suggested'" @click="confirmTopic(t)">确认</button>
-            <button class="mini" @click="dismissTopic(t)">忽略</button>
+            <button class="mini" v-if="t.status==='suggested' && deletingTopicId !== t.id" @click="confirmTopic(t)">确认</button>
+            <button class="mini" v-if="deletingTopicId !== t.id" @click="dismissTopic(t)">忽略</button>
+            <button v-if="deletingTopicId !== t.id" class="mini" @click="askDeleteTopic(t)">删除</button>
+            <button v-if="deletingTopicId === t.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTopic(t)">确认删除?</button>
+            <button v-if="deletingTopicId === t.id" class="mini" @click="cancelDeleteTopic()">取消</button>
           </div>
         </div>
       </div>
@@ -380,6 +383,6 @@
   </div>
 </div>
 
-<script src="/app/app.e8fa4945.js"></script>
+<script src="/app/app.f9d56ced.js"></script>
 </body>
 </html>
