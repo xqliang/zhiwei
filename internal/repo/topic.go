@@ -105,6 +105,22 @@ ORDER BY memory_count DESC, open_todo_count DESC, t.updated_at DESC`, userID)
 	return list, err
 }
 
+// ListDismissed 列出已忽略（dismissed）主题及关联计数，供「已忽略主题」折叠区查看/恢复。
+// 与 ListWithCounts 互补：后者排除 dismissed，本方法只取 dismissed，按更新时间倒序。
+func (r *TopicRepo) ListDismissed(ctx context.Context, userID int64) ([]TopicWithCount, error) {
+	var list []TopicWithCount
+	err := r.DB.SelectContext(ctx, &list, `
+SELECT t.*,
+  (SELECT COUNT(*) FROM memory_topic mt JOIN memory m ON mt.memory_id=m.id
+     WHERE mt.topic_id = t.id AND m.status='active') AS memory_count,
+  (SELECT COUNT(*) FROM todo_topic tt JOIN todo td ON tt.todo_id=td.id
+     WHERE tt.topic_id = t.id AND td.status='confirmed') AS open_todo_count
+FROM topic t
+WHERE t.user_id = ? AND t.status = 'dismissed'
+ORDER BY t.updated_at DESC`, userID)
+	return list, err
+}
+
 func (r *TopicRepo) UpdateStatus(ctx context.Context, id ids.ID, status string) error {
 	_, err := r.DB.ExecContext(ctx, `UPDATE topic SET status = ? WHERE id = ?`, status, id.Int64())
 	return err

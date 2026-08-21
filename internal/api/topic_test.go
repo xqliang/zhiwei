@@ -459,3 +459,64 @@ func TestTopicDelete(t *testing.T) {
 		t.Fatalf("idempotent delete: %d", rec2.Code)
 	}
 }
+
+// TestTopicListDismissed 验证 GET /api/topics?dismissed=1 返回已忽略主题（含 a、不含 b），
+// GET /api/topics（默认）排除 dismissed（含 b、不含 a）。供「已忽略主题」折叠区 + 恢复。
+func TestTopicListDismissed(t *testing.T) {
+	tr, mr, tdr, a, b := setupMergeFixtures(t)
+	r := chi.NewRouter()
+	RegisterTopic(r, &TopicHandler{Topics: tr, Memories: mr, Todos: tdr})
+	ctx := context.Background()
+
+	// 忽略 a
+	if err := tr.UpdateStatus(ctx, a.ID, "dismissed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// GET ?dismissed=1 → 含 a 不含 b
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/topics?dismissed=1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismissed list: %d %s", rec.Code, rec.Body.String())
+	}
+	var respD struct {
+		Topics []struct {
+			ID string `json:"id"`
+		} `json:"topics"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &respD); err != nil {
+		t.Fatalf("json: %v %s", err, rec.Body.String())
+	}
+	haveD := map[string]bool{}
+	for _, tp := range respD.Topics {
+		haveD[tp.ID] = true
+	}
+	if !haveD[a.ID.String()] {
+		t.Fatalf("dismissed 列表缺 a: %v", haveD)
+	}
+	if haveD[b.ID.String()] {
+		t.Fatalf("dismissed 列表不应含 b（b 未忽略）")
+	}
+
+	// GET /api/topics（默认）→ 含 b 不含 a（a 已忽略被排除）
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/topics", nil))
+	var respA struct {
+		Topics []struct {
+			ID string `json:"id"`
+		} `json:"topics"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &respA); err != nil {
+		t.Fatalf("json: %v %s", err, rec2.Body.String())
+	}
+	haveA := map[string]bool{}
+	for _, tp := range respA.Topics {
+		haveA[tp.ID] = true
+	}
+	if haveA[a.ID.String()] {
+		t.Fatalf("默认列表不应含已忽略的 a")
+	}
+	if !haveA[b.ID.String()] {
+		t.Fatalf("默认列表缺 b")
+	}
+}

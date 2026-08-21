@@ -43,7 +43,14 @@ func RegisterTopic(r chi.Router, h *TopicHandler) {
 // List 返回非 dismissed 主题及关联计数（active memory 数 / confirmed todo 数），
 // 按计数倒序，供前端 Topics 页展示。
 func (h *TopicHandler) List(w http.ResponseWriter, r *http.Request) {
-	list, err := h.Topics.ListWithCounts(r.Context(), 1)
+	// ?dismissed=1 返回已忽略主题（折叠区查看/恢复）；默认返回非 dismissed（活跃列表）。
+	var list []repo.TopicWithCount
+	var err error
+	if r.URL.Query().Get("dismissed") == "1" {
+		list, err = h.Topics.ListDismissed(r.Context(), 1)
+	} else {
+		list, err = h.Topics.ListWithCounts(r.Context(), 1)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

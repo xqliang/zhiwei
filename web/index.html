@@ -257,9 +257,13 @@
             </div>
           </div>
           <div v-if="!manualMergeMode" style="display:flex; gap:6px">
-            <button class="mini" v-if="t.status==='suggested' && deletingTopicId !== t.id" @click="confirmTopic(t)">确认</button>
-            <button class="mini" v-if="deletingTopicId !== t.id" @click="dismissTopic(t)">忽略</button>
-            <button v-if="deletingTopicId !== t.id" class="mini" @click="askDeleteTopic(t)">删除</button>
+            <button class="mini" v-if="t.status==='suggested' && deletingTopicId !== t.id && dismissingTopicId !== t.id" @click="confirmTopic(t)">确认</button>
+            <button class="mini" v-if="deletingTopicId !== t.id && dismissingTopicId !== t.id" @click="askDismissTopic(t)">忽略</button>
+            <button v-if="deletingTopicId !== t.id && dismissingTopicId !== t.id" class="mini" @click="askDeleteTopic(t)">删除</button>
+            <!-- 忽略 2 步确认 -->
+            <button v-if="dismissingTopicId === t.id" class="mini" style="background:#fef3c7;color:#92400e" @click="confirmDismissTopic(t)">确认忽略?</button>
+            <button v-if="dismissingTopicId === t.id" class="mini" @click="cancelDismissTopic()">取消</button>
+            <!-- 删除 2 步确认 -->
             <button v-if="deletingTopicId === t.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTopic(t)">确认删除?</button>
             <button v-if="deletingTopicId === t.id" class="mini" @click="cancelDeleteTopic()">取消</button>
           </div>
@@ -278,6 +282,24 @@
           </div>
         </div>
       </div>
+      <!-- 已忽略主题折叠区（默认收起，仅当有已忽略主题时显示） -->
+      <template v-if="dismissedTopics.length">
+        <div class="todo-group-title" style="cursor:pointer" @click="dismissedCollapsed = !dismissedCollapsed">
+          已忽略主题（{{ dismissedTopics.length }}）{{ dismissedCollapsed ? ' ▸' : ' ▾' }}
+        </div>
+        <template v-if="!dismissedCollapsed">
+          <div class="card" v-for="t in dismissedTopics" :key="t.id" style="opacity:.7">
+            <div class="kv">
+              <div>
+                <b>{{ t.name }}</b>
+                <span class="badge dismissed">已忽略</span>
+                <div class="muted">{{ t.memory_count }} 条记忆 · {{ t.open_todo_count }} 个进行中待办</div>
+              </div>
+              <button class="mini" @click="restoreTopic(t)">恢复</button>
+            </div>
+          </div>
+        </template>
+      </template>
     </template>
 
     <!-- 详情视图 -->
@@ -415,6 +437,6 @@
   </div>
 </div>
 
-<script src="/app/app.b0e3416b.js"></script>
+<script src="/app/app.e4b9df3e.js"></script>
 </body>
 </html>

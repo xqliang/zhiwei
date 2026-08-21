@@ -204,35 +204,57 @@ createApp({
         topics.value = d.topics || [];
       } catch (e) { showError(e); }
     }
+    // 已忽略主题（status=dismissed）折叠区：单独 GET ?dismissed=1，与活跃列表分离。
+    const dismissedTopics = ref([]);
+    const dismissedCollapsed = ref(true); // 默认收起
+    async function loadDismissedTopics() {
+      try {
+        const d = await api('GET', '/api/topics?dismissed=1');
+        dismissedTopics.value = d.topics || [];
+      } catch (e) { showError(e); }
+    }
     async function openTopic(id) {
       try {
         topicDetail.value = await api('GET', '/api/topics/' + id);
       } catch (e) { showError(e); }
     }
     async function confirmTopic(t) {
-      deletingTopicId.value = null; // topic 状态变 active + loadTopics，清理删除态
+      deletingTopicId.value = null; dismissingTopicId.value = null; // topic 状态变 active，清理删除/忽略确认态
       try {
         await api('PATCH', '/api/topics/' + t.id, { status: 'active' });
         await loadTopics();
       } catch (e) { showError(e); }
     }
-    async function dismissTopic(t) {
-      deletingTopicId.value = null; // topic 即将 dismissed + loadTopics 离开列表，清理删除态
+    // ---------- topic 忽略/删除（均 2 步确认，互斥）+ 恢复 ----------
+    const dismissingTopicId = ref(null);
+    const deletingTopicId = ref(null);
+    function askDismissTopic(t) { deletingTopicId.value = null; dismissingTopicId.value = t.id; }
+    function cancelDismissTopic() { dismissingTopicId.value = null; }
+    async function confirmDismissTopic(t) { // 忽略=软隐藏（status=dismissed，行保留可恢复）
       try {
         await api('PATCH', '/api/topics/' + t.id, { status: 'dismissed' });
+        dismissingTopicId.value = null;
         await loadTopics();
+        await loadDismissedTopics();
       } catch (e) { showError(e); }
     }
-    // ---------- topic 删除（硬删，2 步确认） ----------
-    const deletingTopicId = ref(null);
-    function askDeleteTopic(t) { deletingTopicId.value = t.id; }
+    function askDeleteTopic(t) { dismissingTopicId.value = null; deletingTopicId.value = t.id; }
     function cancelDeleteTopic() { deletingTopicId.value = null; }
     async function confirmDeleteTopic(t) {
       try {
         await api('DELETE', '/api/topics/' + t.id);
         deletingTopicId.value = null;
         await loadTopics();
+        await loadDismissedTopics();
         if (topicDetail.value && topicDetail.value.topic.id === t.id) closeTopicDetail();
+      } catch (e) { showError(e); }
+    }
+    // 恢复已忽略主题（PATCH status=active）
+    async function restoreTopic(t) {
+      try {
+        await api('PATCH', '/api/topics/' + t.id, { status: 'active' });
+        await loadTopics();
+        await loadDismissedTopics();
       } catch (e) { showError(e); }
     }
     // 关闭主题详情：同时清空重命名状态，避免残留的输入框污染下次打开
@@ -240,7 +262,7 @@ createApp({
       topicDetail.value = null;
       renaming.value = null;
       editingMem.value = null;
-      deletingTopicId.value = null; // 清理删除态，避免残留确认按钮
+      deletingTopicId.value = null; dismissingTopicId.value = null; // 清理删除/忽略确认态
     }
     function startRename(t) { renaming.value = { id: t.id, name: t.name }; }
     async function commitRename() {
@@ -509,7 +531,7 @@ createApp({
     function switchTab(name) {
       tab.value = name;
       if (name === 'timeline') { deletingSessionId.value = null; loadSessions(); }
-      if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; cancelManualMerge(); loadTopics(); }
+      if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; dismissingTopicId.value = null; cancelManualMerge(); loadDismissedTopics(); loadTopics(); }
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; loadTopics(); loadTodos(); }
     }
     loadSessions();
@@ -526,7 +548,7 @@ createApp({
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissMemory, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
-      loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, toggleMergeMember, applyMerge, deletingTopicId, askDeleteTopic, cancelDeleteTopic, confirmDeleteTopic,
+      loadTopics, openTopic, closeTopicDetail, confirmTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, toggleMergeMember, applyMerge, deletingTopicId, askDeleteTopic, cancelDeleteTopic, confirmDeleteTopic, dismissingTopicId, askDismissTopic, cancelDismissTopic, confirmDismissTopic, restoreTopic, dismissedTopics, dismissedCollapsed, loadDismissedTopics,
       manualMergeMode, manualSelected, manualMergeName, manualConfirming, startManualMerge, cancelManualMerge, toggleManualSelect, applyManualMerge, startManualConfirm,
       memories, loadMemories, memoryDraft, startMemoryConsolidate, toggleMemoryMember, toggleMemoryAdjustment, applyMemoryConsolidation,
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos,
