@@ -6,60 +6,190 @@
 <title>知微</title>
 <script src="/app/vendor/vue.global.prod.js"></script>
 <style>
-  /* 设计变量：一套克制的中性灰 + 靛蓝点缀，便于后续统一调主题 */
+  /* ===== 设计系统：暖白纸调 + 深靛蓝点缀 =====
+     克制的编辑级品质——靠字号阶梯、分层阴影、字距与微交互立调性，
+     而非堆砌色彩。CJK 沿用平台原生 PingFang SC（高品质，非通用 AI 字体）。 */
   :root {
-    --bg: #f4f5f7;
+    --bg: #f6f4ef;
     --surface: #ffffff;
-    --border: #e7e9ee;
-    --text: #1f2937;
-    --muted: #8a91a0;
-    --accent: #4f46e5;
-    --accent-soft: #eef2ff;
-    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 1px rgba(16,24,40,.03);
-    --shadow-hover: 0 6px 18px rgba(16,24,40,.09);
+    --surface-2: #fbfaf6;
+    --surface-sunken: #f1ede5;
+    --border: #e7e2d6;
+    --border-strong: #d6cfbe;
+    --text: #2a2825;
+    --text-2: #57534c;
+    --muted: #9a9388;
+    --accent: #4338ca;
+    --accent-hover: #3730a3;
+    --accent-soft: #eef0fb;
+    --accent-2: #0e7490;
+    --danger: #b91c1c;
+    --danger-soft: #fee2e2;
+    --warn: #b45309;
+    --warn-soft: #fef3c7;
+    --ok: #047857;
+    --ok-soft: #d1fae5;
+    --shadow: 0 1px 2px rgba(42,40,37,.05), 0 1px 3px rgba(42,40,37,.03);
+    --shadow-hover: 0 6px 20px rgba(42,40,37,.09), 0 2px 6px rgba(42,40,37,.05);
+    --ring: 0 0 0 3px var(--accent-soft);
     --radius: 14px;
+    --radius-sm: 9px;
+    --radius-lg: 18px;
+    --fs-xs: 12px;
+    --fs-sm: 13px;
+    --fs-base: 15px;
+    --fs-md: 16px;
+    --fs-lg: 19px;
+    --fs-xl: 23px;
   }
   * { box-sizing: border-box; margin: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; -webkit-font-smoothing: antialiased; }
-  /* 粘性标签栏：滚动时常驻，带毛玻璃与底部分隔 */
-  .tabs { position: sticky; top: 0; z-index: 10; display: flex; gap: 2px; background: rgba(255,255,255,.92); backdrop-filter: saturate(180%) blur(8px); border-bottom: 1px solid var(--border); padding: 0 12px; }
-  .brand { font-weight: 700; font-size: 16px; padding: 14px 14px 14px 6px; color: var(--accent); letter-spacing: .5px; }
-  .tabs button { padding: 14px 14px; border: none; background: none; font-size: 15px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; transition: color .15s; }
-  .tabs button:hover { color: #4b5563; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+    background: var(--bg);
+    background-image:
+      radial-gradient(1200px 600px at 50% -200px, #fffdf8 0%, transparent 60%),
+      radial-gradient(800px 400px at 100% 100%, #f0ece2 0%, transparent 55%);
+    background-attachment: fixed;
+    color: var(--text);
+    font-size: var(--fs-base);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .num, .muted, .badge, .todo-group-title, .day-group-title { font-variant-numeric: tabular-nums; }
+
+  /* 标签栏：粘性 + 毛玻璃 */
+  .tabs {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 2px;
+    background: rgba(255,253,248,.88);
+    backdrop-filter: saturate(180%) blur(10px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 14px;
+  }
+  .brand { font-weight: 800; font-size: var(--fs-lg); padding: 14px 14px 14px 4px; color: var(--accent); letter-spacing: .04em; }
+  .tabs button {
+    padding: 14px 14px; border: none; background: none;
+    font-size: var(--fs-base); cursor: pointer; color: var(--muted);
+    border-bottom: 2px solid transparent; transition: color .15s, border-color .15s;
+    white-space: nowrap;
+  }
+  .tabs button:hover { color: var(--text-2); }
   .tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
-  .wrap { max-width: 760px; margin: 0 auto; padding: 18px 16px 64px; }
-  /* 卡片：加 1px 描边 + 更柔和的阴影，可点卡片悬停轻浮起 */
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px; box-shadow: var(--shadow); transition: box-shadow .15s, transform .15s; }
-  .card.clickable:hover { box-shadow: var(--shadow-hover); }
-  .muted { color: var(--muted); font-size: 13px; }
-  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 99px; font-size: 12px; font-weight: 500; }
-  .badge.pending, .badge.running, .badge.suggested { background: #fef3c7; color: #92400e; }
-  .badge.completed, .badge.done, .badge.active, .badge.confirmed { background: #d1fae5; color: #065f46; }
-  .badge.failed { background: #fee2e2; color: #991b1b; }
-  .badge.dismissed { background: #f1f2f5; color: #8a91a0; }
-  .seg { padding: 9px 0; border-bottom: 1px dashed #eceef2; line-height: 1.6; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 18px 16px 80px; animation: fadeup .28s ease both; }
+  @keyframes fadeup { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* 卡片：分层阴影 + 描边 + 顶部高光 */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 18px; margin-bottom: 12px;
+    box-shadow: var(--shadow), inset 0 1px 0 rgba(255,255,255,.5);
+    transition: box-shadow .18s, transform .18s, border-color .18s;
+  }
+  .card.clickable { cursor: pointer; }
+  .card.clickable:hover { box-shadow: var(--shadow-hover), inset 0 1px 0 rgba(255,255,255,.5); transform: translateY(-1px); border-color: var(--border-strong); }
+  .card.detail { border-color: var(--border-strong); }
+  .card.sunken { background: var(--surface-2); }
+
+  .muted { color: var(--muted); font-size: var(--fs-sm); }
+  .kv { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+  .overdue { color: var(--danger); font-weight: 600; }
+
+  /* 徽标 */
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 99px; font-size: var(--fs-xs); font-weight: 500; white-space: nowrap; }
+  .badge.pending, .badge.running, .badge.suggested { background: var(--warn-soft); color: var(--warn); }
+  .badge.completed, .badge.done, .badge.active, .badge.confirmed { background: var(--ok-soft); color: var(--ok); }
+  .badge.failed { background: var(--danger-soft); color: var(--danger); }
+  .badge.dismissed { background: var(--surface-sunken); color: var(--muted); }
+
+  /* 转写分段 */
+  .seg { padding: 10px 0; border-bottom: 1px dashed #ece7da; line-height: 1.7; display: flex; gap: 8px; align-items: flex-start; }
   .seg:last-child { border: none; }
-  .sp { font-size: 12px; color: #fff; border-radius: 6px; padding: 2px 7px; margin-right: 8px; font-weight: 500; }
-  .sp1 { background: #6366f1; } .sp2 { background: #10b981; } .sp3 { background: #f59e0b; }
-  button.primary { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 10px 22px; font-size: 15px; font-weight: 600; cursor: pointer; transition: filter .15s, transform .05s; }
-  button.primary:hover { filter: brightness(1.08); }
-  button.primary:active { transform: translateY(1px); }
-  button.primary:disabled { background: #c4c8d2; cursor: not-allowed; }
-  button.mini { background: #f3f4f7; color: #4b5563; border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; font-size: 13px; cursor: pointer; transition: background .15s; }
-  button.mini:hover { background: #e9ebf0; }
-  select.mini { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; font-size: 13px; color: #4b5563; cursor: pointer; }
-  #drop { border: 2px dashed #c7cad2; border-radius: var(--radius); padding: 40px; text-align: center; color: var(--muted); margin-bottom: 12px; background: var(--surface); transition: border-color .15s, color .15s, background .15s; }
+  .sp { font-size: var(--fs-xs); color: #fff; border-radius: 6px; padding: 2px 8px; font-weight: 600; white-space: nowrap; flex-shrink: 0; margin-top: 2px; }
+  .sp1 { background: #4338ca; } .sp2 { background: #0e7490; } .sp3 { background: #b45309; }
+  .seg-text { flex: 1; min-width: 0; }
+  textarea.seg-edit { width: 100%; margin: 0; font-size: var(--fs-base); line-height: 1.6; resize: vertical; }
+
+  /* 按钮：全局不换行 + focus 环 + 按下反馈 */
+  button { font-family: inherit; white-space: nowrap; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; border: none; border-radius: 9px; cursor: pointer; font-size: var(--fs-sm); font-weight: 500; transition: background .15s, color .15s, filter .12s, transform .04s; white-space: nowrap; }
+  .btn:focus-visible { outline: none; box-shadow: var(--ring); }
+  .btn:active { transform: translateY(1px); }
+  .btn.primary { background: var(--accent); color: #fff; padding: 9px 20px; font-size: var(--fs-base); font-weight: 600; }
+  .btn.primary:hover { background: var(--accent-hover); }
+  .btn.primary:disabled { background: #c8c3b4; cursor: not-allowed; }
+  .btn.mini { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); padding: 6px 12px; }
+  .btn.mini:hover { background: var(--surface-sunken); border-color: var(--border-strong); }
+  .btn.ghost { background: transparent; color: var(--muted); padding: 6px 10px; }
+  .btn.ghost:hover { color: var(--text-2); background: var(--surface-sunken); }
+  .btn.danger { background: var(--danger-soft); color: var(--danger); padding: 6px 12px; border: 1px solid #f3caca; }
+  .btn.warn { background: var(--warn-soft); color: var(--warn); padding: 6px 12px; }
+  .btn:disabled { cursor: not-allowed; opacity: .7; }
+  .btn-link { background: none; border: none; color: var(--muted); cursor: pointer; font-size: var(--fs-sm); padding: 2px 4px; }
+  .btn-link:hover { color: var(--text-2); }
+
+  select.mini, input[type=date].mini { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; font-size: var(--fs-sm); color: var(--text-2); cursor: pointer; font-family: inherit; }
+  select.mini:focus, input[type=date].mini:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+
+  #drop { border: 2px dashed var(--border-strong); border-radius: var(--radius-lg); padding: 44px; text-align: center; color: var(--muted); margin-bottom: 14px; background: var(--surface); transition: border-color .15s, color .15s, background .15s; }
   #drop:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-  #drop.rec { border-color: #ef4444; color: #ef4444; background: #fff5f5; }
-  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #1f2937; color: #fff; padding: 10px 20px; border-radius: 10px; font-size: 14px; z-index: 99; box-shadow: var(--shadow-hover); }
-  .type-tag { display: inline-block; color: #fff; border-radius: 6px; padding: 2px 9px; font-size: 12px; margin-right: 8px; font-weight: 500; }
-  .kv { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-  .overdue { color: #dc2626; font-weight: 600; }
-  .todo-group-title { font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 20px 0 10px; }
-  input.txt { border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; font-size: 14px; width: 100%; background: #fff; transition: border-color .15s, box-shadow .15s; }
-  input.txt:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  /* 空状态：居中、留白、柔化，区别于内容卡片 */
-  .empty { text-align: center; padding: 28px 12px; color: var(--muted); }
+  #drop.rec { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
+
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--text); color: #fff; padding: 11px 22px; border-radius: 10px; font-size: var(--fs-sm); z-index: 99; box-shadow: var(--shadow-hover); }
+
+  .type-tag { display: inline-block; color: #fff; border-radius: 6px; padding: 2px 9px; font-size: var(--fs-xs); margin-right: 8px; font-weight: 600; white-space: nowrap; }
+
+  .todo-group-title { font-size: var(--fs-xs); font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin: 22px 2px 10px; }
+  .day-group-title { font-size: var(--fs-sm); font-weight: 700; color: var(--text-2); margin: 20px 2px 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .day-group-title .muted { font-weight: 500; }
+
+  /* 输入框 */
+  input.txt, textarea.txt { border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; font-size: var(--fs-base); width: 100%; background: #fff; font-family: inherit; line-height: 1.6; transition: border-color .15s, box-shadow .15s; }
+  input.txt:focus, textarea.txt:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+  textarea.txt { resize: vertical; }
+  input.inline { width: auto; min-width: 160px; display: inline-block; }
+
+  /* 就地可编辑：hover 淡底 + ✎ 提示 */
+  .editable { cursor: text; border-radius: 6px; padding: 1px 6px; margin: -1px -6px; transition: background .15s, box-shadow .15s; position: relative; display: inline; }
+  .editable:hover { background: var(--accent-soft); }
+  .editable .hint { opacity: 0; margin-left: 6px; font-size: var(--fs-xs); color: var(--accent); font-weight: 500; transition: opacity .15s; }
+  .editable:hover .hint { opacity: .85; }
+  .edit-form { margin-top: 6px; }
+  .edit-form textarea.txt { margin-bottom: 8px; }
+  .edit-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+  .card-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .field-label { display: block; font-size: var(--fs-xs); font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+  /* topic 标签编辑行：已有 chip（带 ✕）+ 「+ 关联」虚线胶囊下拉，内联紧凑 */
+  .topic-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: var(--fs-xs); font-weight: 500; line-height: 1.4; }
+  .chip-x { background: none; border: none; color: inherit; opacity: .45; cursor: pointer; font-size: 11px; padding: 0 4px; line-height: 1; }
+  .chip-x:hover { opacity: 1; }
+  .chip-add { position: relative; display: inline-flex; align-items: center; padding: 3px 12px; border-radius: 99px; border: 1px dashed var(--border-strong); color: var(--muted); font-size: var(--fs-xs); cursor: pointer; background: var(--surface); white-space: nowrap; }
+  .chip-add:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+  .chip-add select { position: absolute; inset: 0; opacity: 0; cursor: pointer; border: none; background: none; font-size: var(--fs-xs); }
+
+  /* 工具栏（搜索 / 过滤） */
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .toolbar input, .toolbar select, .toolbar .btn { height: 36px; box-sizing: border-box; }
+  .toolbar input.txt { max-width: 260px; }
+  .toolbar .spacer { flex: 1; }
+  /* 时间快捷方式 */
+  .preset-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .preset { height: 30px; padding: 0 12px; border-radius: 99px; border: 1px solid var(--border); background: var(--surface); color: var(--text-2); font-size: var(--fs-xs); cursor: pointer; transition: background .15s, color .15s, border-color .15s; white-space: nowrap; font-family: inherit; }
+  .preset:hover { border-color: var(--border-strong); background: var(--surface-sunken); }
+  .preset.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  /* 空状态 */
+  .empty { text-align: center; padding: 32px 12px; color: var(--muted); }
+
+  /* 加载骨架 + 旋转 */
+  .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .skeleton-line { height: 12px; border-radius: 6px; background: linear-gradient(90deg, var(--surface-sunken) 25%, #efebe1 37%, var(--surface-sunken) 63%); background-size: 400% 100%; animation: shimmer 1.4s ease infinite; margin: 8px 0; }
+  @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+  .skeleton-line.short { width: 40%; }
+  .skeleton-line.med { width: 70%; }
 </style>
 </head>
 <body>
@@ -68,131 +198,177 @@
     <span class="brand">知微</span>
     <button :class="{active: tab==='timeline'}" @click="switchTab('timeline')">时间线</button>
     <button :class="{active: tab==='record'}" @click="switchTab('record')">录音</button>
-    <button :class="{active: tab==='topics'}" @click="switchTab('topics')">Topics</button>
+    <button :class="{active: tab==='topics'}" @click="switchTab('topics')">主题</button>
+    <button :class="{active: tab==='memories'}" @click="switchTab('memories')">记忆</button>
     <button :class="{active: tab==='todos'}" @click="switchTab('todos')">待办</button>
   </div>
   <div v-if="toast" class="toast">{{ toast }}</div>
 
   <!-- ============ 时间线 ============ -->
   <div class="wrap" v-if="tab==='timeline'">
+    <!-- 工具栏：搜索 + 日期范围筛选 -->
+    <div class="toolbar">
+      <input class="txt" v-model="tlSearch" placeholder="搜索转写内容 / 文件名…">
+      <input type="date" class="mini" v-model="tlDateFrom" title="起始日期" @change="tlPreset=''">
+      <input type="date" class="mini" v-model="tlDateTo" title="截止日期" @change="tlPreset=''">
+      <button v-if="tlSearch || tlDateFrom || tlDateTo || tlPreset" class="btn ghost" @click="clearTlFilter">清除</button>
+      <div class="spacer"></div>
+      <span class="muted">{{ filteredSessions.length }} 条</span>
+    </div>
+    <!-- 时间快捷方式：点即设置日期范围，手动改日期会取消激活 -->
+    <div class="preset-row">
+      <button class="preset" :class="{active: tlPreset==='1d'}" @click="applyPreset('1d')">最近1天</button>
+      <button class="preset" :class="{active: tlPreset==='2d'}" @click="applyPreset('2d')">最近2天</button>
+      <button class="preset" :class="{active: tlPreset==='3d'}" @click="applyPreset('3d')">最近3天</button>
+      <button class="preset" :class="{active: tlPreset==='7d'}" @click="applyPreset('7d')">最近7天</button>
+      <button class="preset" :class="{active: tlPreset==='30d'}" @click="applyPreset('30d')">最近30天</button>
+      <button class="preset" :class="{active: tlPreset==='week'}" @click="applyPreset('week')">本周</button>
+      <button class="preset" :class="{active: tlPreset==='lastweek'}" @click="applyPreset('lastweek')">上周</button>
+      <button class="preset" :class="{active: tlPreset==='month'}" @click="applyPreset('month')">本月</button>
+    </div>
+
     <div v-if="!sessions.length" class="card empty">还没有记录。去「录音」页上传或录一段吧。</div>
-    <div v-for="s in sessions" :key="s.id">
-      <!-- 会话卡片：点击就地展开/收起转写详情 -->
-      <div class="card clickable" style="cursor:pointer" @click="toggleSession(s.id)">
-        <div class="kv">
-          <div>
-            <b>{{ s.filename }}</b>
-            <div v-if="s.asr_preview" class="muted">{{ s.asr_preview }}</div>
-            <div class="muted">{{ fmtTime(s.created_at) }} · {{ s.source === 'web_record' ? '录音' : '上传' }} · {{ s.memory_count }} 条记忆 · {{ s.todo_count }} 个待办</div>
-          </div>
-          <div style="display:flex; align-items:center; gap:6px" @click.stop>
-            <span class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
-            <button v-if="deletingSessionId !== s.id" class="mini" @click="askDeleteSession(s)">删除</button>
-            <button v-if="deletingSessionId === s.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteSession(s)">确认删除?</button>
-            <button v-if="deletingSessionId === s.id" class="mini" @click="cancelDeleteSession()">取消</button>
-          </div>
-        </div>
-      </div>
+    <div v-if="sessions.length && !filteredSessions.length" class="card empty">没有匹配的记录。</div>
 
-      <!-- 就地展开的转写详情（紧贴当前卡片下方，不跳到页面底部） -->
-      <div v-if="expandedId===s.id" class="card" style="margin-top:-2px">
-        <!-- 音频播放器：点击播放原始音频 -->
-        <audio :src="audioUrl(s.id)" controls preload="none"
-               style="width:100%; margin:6px 0 10px"></audio>
-        <div class="kv">
-          <b>转写详情</b>
-          <button class="muted" style="border:none;background:none;cursor:pointer" @click="toggleSession(s.id)">✕ 关闭</button>
-        </div>
-        <div v-if="detail.job && detail.job.status==='failed'" style="margin:8px 0">
-          <span class="badge failed">处理失败</span>
-          <span class="muted">{{ detail.job.last_error }}</span>
-          <button class="primary" style="padding:4px 12px" @click="retryJob(detail.job.id)">重跑</button>
-        </div>
-        <div v-for="(sg, i) in detail.segments" :key="i" class="seg">
-          <span class="sp" :class="spClass(sg.speaker)">{{ sg.speaker }}</span>{{ sg.text }}
-        </div>
-
-        <!-- memory 卡片 -->
-        <template v-if="detail.memories && detail.memories.length">
-          <div class="kv" style="margin-top:6px">
-            <div class="todo-group-title" style="margin:0">提取的记忆</div>
-            <button class="mini" @click="startMemoryConsolidate">记忆整理</button>
-          </div>
-          <div class="card" v-for="m in detail.memories" :key="m.id" style="margin:6px 0; position:relative">
-            <div class="kv">
-              <div>
-                <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
-                <b v-if="!editingMem || editingMem.id !== m.id" @click="startEditMemory(m)" style="cursor:text">{{ m.title }}</b>
-                <input v-else class="txt" v-model="editingMem.title" style="display:inline-block;width:auto">
-              </div>
-              <button class="mini" @click="dismissMemory(m)" title="忽略此记忆">✕</button>
-            </div>
-            <div v-if="editingMem && editingMem.id === m.id">
-              <textarea class="txt" v-model="editingMem.content" rows="3" style="margin:6px 0"></textarea>
-              <div style="display:flex; gap:8px; margin-bottom:6px">
-                <button class="primary" style="padding:4px 12px" @click="saveEditMemory(() => reloadSession(detail.session.id))">保存</button>
-                <button class="mini" @click="cancelEditMemory()">取消</button>
+    <div v-for="g in sessionsByDay" :key="g.day">
+      <div class="day-group-title">{{ g.label }} <span class="muted">· {{ g.items.length }} 条</span></div>
+      <div v-for="s in g.items" :key="s.id">
+        <!-- 会话卡片：默认显 ASR 预览，空才显文件名 -->
+        <div class="card clickable" @click="toggleSession(s.id)">
+          <div class="kv">
+            <div style="min-width:0">
+              <b v-if="s.asr_preview" style="word-break:break-word">{{ s.asr_preview }}</b>
+              <span v-else class="muted">（暂无转写内容）</span>
+              <div class="muted">
+                {{ fmtTime(s.created_at) }} · {{ s.source === 'web_record' ? '录音' : '上传' }}
+                <template v-if="s.memory_count"> · {{ s.memory_count }} 条记忆</template>
+                <template v-if="s.todo_count"> · {{ s.todo_count }} 个待办</template>
               </div>
             </div>
-            <div v-else style="margin:6px 0">{{ m.content }}</div>
-            <div class="muted">
-              重要度 {{ (m.importance ?? 0).toFixed(1) }} · 置信 {{ (m.confidence ?? 0).toFixed(2) }}
-              <template v-if="topicChips(m).length">
-                · <span v-for="tp in topicChips(m)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}<span v-if="tp.source==='user'" style="opacity:.6">✎</span><button class="mini" style="padding:0 4px;margin-left:2px" @click.stop="removeMemoryTopic(m, tp.id)">✕</button></span>
-              </template>
-              <select class="mini" @change="if($event.target.value){addMemoryTopic(m,$event.target.value);$event.target.value=''}">
-                <option value="">+ 关联</option>
-                <option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option>
+            <div style="display:flex; align-items:center; gap:6px; flex-shrink:0" @click.stop>
+              <span v-if="reextractingId !== s.id" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
+              <span v-else class="badge running"><span class="spinner"></span> 重新提取中</span>
+              <button v-if="reextractConfirmId !== s.id && deletingSessionId !== s.id && reextractingId !== s.id" class="btn mini" @click="askReextract(s)">重新提取</button>
+              <button v-if="reextractConfirmId === s.id" class="btn warn" @click="confirmReextract(s)">确认重提取?</button>
+              <button v-if="reextractConfirmId === s.id" class="btn ghost" @click="cancelReextract()">取消</button>
+              <button v-if="deletingSessionId !== s.id && reextractConfirmId !== s.id" class="btn mini" @click="askDeleteSession(s)">删除</button>
+              <button v-if="deletingSessionId === s.id" class="btn danger" @click="confirmDeleteSession(s)">确认删除?</button>
+              <button v-if="deletingSessionId === s.id" class="btn ghost" @click="cancelDeleteSession()">取消</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 就地展开的转写详情 -->
+        <div v-if="expandedId===s.id" class="card detail" style="margin-top:-2px">
+          <audio :src="audioUrl(s.id)" controls preload="none" style="width:100%; margin:6px 0 10px"></audio>
+          <div class="kv" style="margin-bottom:6px">
+            <b>转写详情</b>
+            <div style="display:flex; gap:6px; align-items:center">
+              <button v-if="segDirty" class="btn primary" style="padding:6px 14px" @click="saveTranscript(s)">保存转写修改</button>
+              <button class="btn-link" @click="toggleSession(s.id)">✕ 关闭</button>
+            </div>
+          </div>
+          <div v-if="detail.job && detail.job.status==='failed'" style="margin:8px 0">
+            <span class="badge failed">处理失败</span>
+            <span class="muted">{{ detail.job.last_error }}</span>
+            <button class="btn primary" style="padding:4px 12px" @click="retryJob(detail.job.id)">重跑</button>
+          </div>
+          <div v-for="(sg, i) in detail.segments" :key="i" class="seg">
+            <span class="sp" :class="spClass(sg.speaker)">{{ sg.speaker }}</span>
+            <div class="seg-text">
+              <div v-if="!segEditing(sg)" class="editable" @click="startEditSeg(sg)" title="点击编辑转写文本">{{ sg.text }}<span class="hint">✎ 编辑</span></div>
+              <div v-else class="edit-form" style="margin:0">
+                <textarea class="txt seg-edit" v-model="segDraft[sg.id]" rows="2"></textarea>
+                <div class="edit-actions">
+                  <button class="btn mini" @click="cancelEditSeg(sg)">取消</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-if="segDirty" class="muted" style="margin-top:4px">有未保存的转写修改，点上方「保存转写修改」生效后即可「重新提取」。</div>
+
+          <!-- memory 卡片 -->
+          <template v-if="detail.memories && detail.memories.length">
+            <div class="kv" style="margin-top:10px">
+              <div class="todo-group-title" style="margin:0">提取的记忆</div>
+              <button class="btn mini" :disabled="memConsolidating" @click="startMemoryConsolidate">
+                <span v-if="memConsolidating" class="spinner"></span>{{ memConsolidating ? '整理中…' : '记忆整理' }}
+              </button>
+            </div>
+            <div class="card sunken" v-for="m in detail.memories" :key="m.id" style="margin:6px 0">
+              <div class="kv">
+                <div style="min-width:0">
+                  <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+                  <b v-if="!editingMem || editingMem.id !== m.id" class="editable" @click="startEditMemory(m)" title="点击编辑">{{ m.title }}<span class="hint">✎</span></b>
+                </div>
+                <button v-if="dismissingMemId !== m.id" class="btn ghost" @click="askDismissMem(m)" title="忽略此记忆">✕</button>
+                <button v-if="dismissingMemId === m.id" class="btn warn" @click="confirmDismissMem(m, () => reloadSession(detail.value.session.id))">确认忽略?</button>
+                <button v-if="dismissingMemId === m.id" class="btn ghost" @click="cancelDismissMem()">取消</button>
+              </div>
+              <div v-if="editingMem && editingMem.id === m.id" class="edit-form">
+                <input class="txt" v-model="editingMem.title" style="margin-bottom:8px">
+                <textarea class="txt" v-model="editingMem.content" rows="3"></textarea>
+                <div class="edit-actions" style="margin-top:8px">
+                  <button class="btn primary" style="padding:6px 14px" @click="saveEditMemory(() => reloadSession(detail.session.id))">保存</button>
+                  <button class="btn mini" @click="cancelEditMemory()">取消</button>
+                </div>
+              </div>
+              <div v-else style="margin:6px 0">{{ m.content }}</div>
+              <div class="muted">重要度 {{ (m.importance ?? 0).toFixed(1) }} · 置信 {{ (m.confidence ?? 0).toFixed(2) }}<template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template></div>
+              <div class="topic-row">
+                <span v-for="tp in topicChips(m)" :key="tp.id" class="chip">{{ tp.name }}<span v-if="tp.source==='user'" style="opacity:.55; font-size:10px">✎</span><button class="chip-x" @click.stop="removeMemoryTopic(m, tp.id)" title="取消关联">✕</button></span>
+                <label class="chip-add">+ 关联<select @change="if($event.target.value){addMemoryTopic(m,$event.target.value);$event.target.value=''}"><option value="">+ 关联</option><option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option></select></label>
+              </div>
+            </div>
+          </template>
+
+          <!-- 记忆整理草稿 -->
+          <div class="card" v-if="memoryDraft">
+            <div class="todo-group-title">记忆整理提议（编辑后确认）</div>
+            <div v-if="!memoryDraft.merges.length && !memoryDraft.adjustments.length" class="muted">暂无可整理项</div>
+            <div v-if="memoryDraft.merges.length" class="muted" style="margin-bottom:4px">合并组</div>
+            <div v-for="(g, gi) in memoryDraft.merges" :key="'mg'+gi" style="margin-bottom:12px; padding-bottom:10px; border-bottom:1px dashed var(--border)">
+              <select class="mini" v-model="g.canonical_id" style="margin-bottom:6px">
+                <option v-for="m in g.members" :key="m.id" :value="m.id">保留: {{ m.name }}</option>
               </select>
-              <template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template>
-            </div>
-          </div>
-        </template>
-
-        <!-- 记忆整理草稿（D2） -->
-        <div class="card" v-if="memoryDraft">
-          <div class="todo-group-title">记忆整理提议（编辑后确认）</div>
-          <div v-if="!memoryDraft.merges.length && !memoryDraft.adjustments.length" class="muted">暂无可整理项</div>
-          <div v-if="memoryDraft.merges.length" class="muted" style="margin-bottom:4px">合并组</div>
-          <div v-for="(g, gi) in memoryDraft.merges" :key="'mg'+gi" style="margin-bottom:12px; padding-bottom:10px; border-bottom:1px dashed var(--border)">
-            <select class="mini" v-model="g.canonical_id" style="margin-bottom:6px">
-              <option v-for="m in g.members" :key="m.id" :value="m.id">保留: {{ m.name }}</option>
-            </select>
-            <div v-for="m in g.members" :key="m.id" class="muted" style="margin:2px 0">
-              <label><input type="checkbox" :checked="m.checked" @change="toggleMemoryMember(g, m.id)"> {{ m.name }}</label>
-            </div>
-          </div>
-          <div v-if="memoryDraft.adjustments.length" class="muted" style="margin-bottom:4px">置信度调整</div>
-          <div v-for="(a, ai) in memoryDraft.adjustments" :key="'ma'+ai" class="muted" style="margin:2px 0">
-            <label><input type="checkbox" :checked="a.checked" @change="toggleMemoryAdjustment(a)"> {{ a.title }} · {{ a.kind }}<span v-if="a.reason"> — {{ a.reason }}</span></label>
-          </div>
-          <div style="display:flex; gap:8px; margin-top:8px">
-            <button class="primary" @click="applyMemoryConsolidation">确认整理</button>
-            <button class="mini" @click="memoryDraft = null">取消</button>
-          </div>
-        </div>
-
-        <!-- todo 卡片（只读，操作去待办页） -->
-        <template v-if="detail.todos && detail.todos.length">
-          <div class="todo-group-title">提取的待办</div>
-          <div class="card" v-for="td in detail.todos" :key="td.id" style="margin:6px 0">
-            <div class="kv">
-              <div v-if="!editingTodo || editingTodo.id !== td.id" @click="startEditTodo(td)" style="cursor:text">☑️ {{ td.title }}</div>
-              <input v-else class="txt" v-model="editingTodo.title" style="display:inline-block;width:auto">
-              <div style="display:flex; gap:6px">
-                <button v-if="editingTodo && editingTodo.id === td.id" class="primary" style="padding:4px 10px" @click="saveEditTodo(() => reloadSession(detail.session.id))">保存</button>
-                <button v-if="editingTodo && editingTodo.id === td.id" class="mini" @click="cancelEditTodo()">取消</button>
-                <span v-if="!editingTodo || editingTodo.id !== td.id" class="badge" :class="td.status">
-                  {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : td.status === 'done' ? '已完成' : '已忽略' }}
-                </span>
-                <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="askDeleteTodo(td)">删除</button>
-                <button v-if="deletingTodoId === td.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTodo(td, () => reloadSession(detail.session.id))">确认删除?</button>
-                <button v-if="deletingTodoId === td.id" class="mini" @click="cancelDeleteTodo()">取消</button>
+              <div v-for="m in g.members" :key="m.id" class="muted" style="margin:2px 0">
+                <label><input type="checkbox" :checked="m.checked" @change="toggleMemoryMember(g, m.id)"> {{ m.name }}</label>
               </div>
             </div>
-            <div class="muted" v-if="td.due_at">截止 {{ fmtDue(td.due_at) }} · 到「待办」页处理</div>
+            <div v-if="memoryDraft.adjustments.length" class="muted" style="margin-bottom:4px">置信度调整</div>
+            <div v-for="(a, ai) in memoryDraft.adjustments" :key="'ma'+ai" class="muted" style="margin:2px 0">
+              <label><input type="checkbox" :checked="a.checked" @change="toggleMemoryAdjustment(a)"> {{ a.title }} · {{ a.kind }}<span v-if="a.reason"> — {{ a.reason }}</span></label>
+            </div>
+            <div class="edit-actions" style="margin-top:8px">
+              <button class="btn primary" @click="applyMemoryConsolidation">确认整理</button>
+              <button class="btn mini" @click="memoryDraft = null">取消</button>
+            </div>
           </div>
-        </template>
+
+          <!-- todo 卡片（只读，操作去待办页） -->
+          <template v-if="detail.todos && detail.todos.length">
+            <div class="todo-group-title">提取的待办</div>
+            <div class="card sunken" v-for="td in detail.todos" :key="td.id" style="margin:6px 0">
+              <div class="kv">
+                <div v-if="!editingTodo || editingTodo.id !== td.id" class="editable" @click="startEditTodo(td)" title="点击编辑">☑️ {{ td.title }}<span class="hint">✎</span></div>
+                <div v-else style="min-width:0; flex:1">
+                  <input class="txt" v-model="editingTodo.title">
+                </div>
+                <div style="display:flex; gap:6px; flex-shrink:0">
+                  <button v-if="editingTodo && editingTodo.id === td.id" class="btn primary" style="padding:6px 12px" @click="saveEditTodo(() => reloadSession(detail.session.id))">保存</button>
+                  <button v-if="editingTodo && editingTodo.id === td.id" class="btn mini" @click="cancelEditTodo()">取消</button>
+                  <span v-if="!editingTodo || editingTodo.id !== td.id" class="badge" :class="td.status">
+                    {{ todoStatusText(td.status) }}
+                  </span>
+                  <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="btn mini" @click="askDeleteTodo(td)">删除</button>
+                  <button v-if="deletingTodoId === td.id" class="btn danger" @click="confirmDeleteTodo(td, () => reloadSession(detail.session.id))">确认删除?</button>
+                  <button v-if="deletingTodoId === td.id" class="btn ghost" @click="cancelDeleteTodo()">取消</button>
+                </div>
+              </div>
+              <div class="muted" v-if="td.due_at">截止 {{ fmtDue(td.due_at) }} · 到「待办」页处理</div>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
   </div>
@@ -201,11 +377,11 @@
   <div class="wrap" v-if="tab==='record'">
     <div id="drop" :class="{rec: recording}" @dragover.prevent @drop.prevent="onDrop">
       <template v-if="!recording">拖拽音频文件到此处，或点击下方按钮录音</template>
-      <template v-else>● 录音中…（{{ recSeconds }}s）</template>
+      <template v-else><span class="spinner"></span> 录音中…（{{ recSeconds }}s）</template>
     </div>
     <div style="display:flex; gap:12px">
-      <button class="primary" v-if="!recording" @click="startRec">开始录音</button>
-      <button class="primary" v-else @click="stopRec">停止并上传</button>
+      <button class="btn primary" v-if="!recording" @click="startRec">开始录音</button>
+      <button class="btn primary" v-else @click="stopRec">停止并上传</button>
     </div>
     <div v-if="uploadInfo" class="card" style="margin-top:12px">
       <div class="muted">{{ uploadInfo.filename }}</div>
@@ -213,17 +389,26 @@
     </div>
   </div>
 
-  <!-- ============ Topics ============ -->
+  <!-- ============ 主题 ============ -->
   <div class="wrap" v-if="tab==='topics'">
     <!-- 列表视图 -->
     <template v-if="!topicDetail">
       <div class="kv" style="margin-bottom:12px">
-        <b>主题</b>
+        <b style="font-size:var(--fs-lg)">主题</b>
         <div style="display:flex; gap:6px">
-          <button class="mini" @click="startConsolidate">智能合并</button>
-          <button class="mini" @click="startManualMerge">手动合并</button>
-          <button class="primary" style="padding:6px 16px; font-size:14px" @click="showNewTopic = !showNewTopic">＋ 新建</button>
+          <button class="btn mini" :disabled="consolidating" @click="startConsolidate">
+            <span v-if="consolidating" class="spinner"></span>{{ consolidating ? '合并中…' : '智能合并' }}
+          </button>
+          <button class="btn mini" @click="startManualMerge">手动合并</button>
+          <button class="btn primary" style="padding:7px 16px" @click="toggleNewTopic">{{ showNewTopic ? '收起' : '＋ 新建' }}</button>
         </div>
+      </div>
+      <!-- 智能合并即时骨架（点击后立即出现） -->
+      <div class="card" v-if="consolidating">
+        <div class="muted" style="margin-bottom:6px"><span class="spinner"></span> 正在生成合并提议…</div>
+        <div class="skeleton-line med"></div>
+        <div class="skeleton-line"></div>
+        <div class="skeleton-line short"></div>
       </div>
       <div class="card" v-if="mergeDraft">
         <div class="todo-group-title">合并提议（编辑后确认）</div>
@@ -234,38 +419,47 @@
             <label><input type="checkbox" :checked="m.checked" @change="toggleMergeMember(g, m.id)"> {{ m.name }}</label>
           </div>
         </div>
-        <div style="display:flex; gap:8px; margin-top:8px">
-          <button class="primary" @click="applyMerge">确认合并</button>
-          <button class="mini" @click="mergeDraft = null">取消</button>
+        <div class="edit-actions" style="margin-top:8px">
+          <button class="btn primary" @click="applyMerge">确认合并</button>
+          <button class="btn mini" @click="mergeDraft = null">取消</button>
         </div>
       </div>
       <div class="card" v-if="showNewTopic">
-        <input class="txt" v-model="newTopic.name" placeholder="主题名称（必填）" style="margin-bottom:8px">
-        <input class="txt" v-model="newTopic.description" placeholder="描述（可选）" style="margin-bottom:8px">
-        <button class="primary" style="padding:6px 16px; font-size:14px" @click="createTopic">创建</button>
+        <div class="kv" style="margin-bottom:12px">
+          <b style="font-size:var(--fs-md)">新建主题</b>
+          <button class="btn-link" @click="cancelNewTopic">✕</button>
+        </div>
+        <label class="field-label" for="nt-name">主题名称</label>
+        <input id="nt-name" class="txt" v-focus v-model="newTopic.name" placeholder="必填" @keyup.enter="createTopic" @keyup.esc="cancelNewTopic" style="margin-bottom:10px">
+        <label class="field-label" for="nt-desc">描述（可选）</label>
+        <input id="nt-desc" class="txt" v-model="newTopic.description" placeholder="一句话说明" @keyup.esc="cancelNewTopic" style="margin-bottom:12px">
+        <div class="edit-actions">
+          <button class="btn primary" :disabled="creating || !newTopic.name.trim()" @click="createTopic">
+            <span v-if="creating" class="spinner"></span>{{ creating ? '创建中…' : '创建' }}
+          </button>
+          <button class="btn ghost" @click="cancelNewTopic">取消</button>
+        </div>
       </div>
       <div v-if="!topics.length" class="card empty">还没有主题。录音抽取后会自动归类，也可以手动新建。</div>
       <div class="card" v-for="t in topics" :key="t.id">
         <div class="kv">
           <div style="display:flex; align-items:center; gap:8px">
             <input v-if="manualMergeMode" type="checkbox" :checked="manualSelected.includes(t.id)" @change="toggleManualSelect(t)">
-            <div style="cursor:pointer" @click="!manualMergeMode && openTopic(t.id)">
+            <div style="cursor:pointer; min-width:0" @click="!manualMergeMode && openTopic(t.id)">
               <b>{{ t.name }}</b>
               <span v-if="t.status==='suggested'" class="badge suggested">待确认</span>
-              <span v-if="suspectOf(t, topics)" class="badge" style="background:#fef3c7;color:#92400e">疑似可合并: {{ suspectOf(t, topics) }}</span>
+              <span v-if="suspectOf(t, topics)" class="badge" style="background:var(--warn-soft);color:var(--warn)">疑似可合并: {{ suspectOf(t, topics) }}</span>
               <div class="muted">{{ t.memory_count }} 条记忆 · {{ t.open_todo_count }} 个进行中待办</div>
             </div>
           </div>
-          <div v-if="!manualMergeMode" style="display:flex; gap:6px">
-            <button class="mini" v-if="t.status==='suggested' && deletingTopicId !== t.id && dismissingTopicId !== t.id" @click="confirmTopic(t)">确认</button>
-            <button class="mini" v-if="deletingTopicId !== t.id && dismissingTopicId !== t.id" @click="askDismissTopic(t)">忽略</button>
-            <button v-if="deletingTopicId !== t.id && dismissingTopicId !== t.id" class="mini" @click="askDeleteTopic(t)">删除</button>
-            <!-- 忽略 2 步确认 -->
-            <button v-if="dismissingTopicId === t.id" class="mini" style="background:#fef3c7;color:#92400e" @click="confirmDismissTopic(t)">确认忽略?</button>
-            <button v-if="dismissingTopicId === t.id" class="mini" @click="cancelDismissTopic()">取消</button>
-            <!-- 删除 2 步确认 -->
-            <button v-if="deletingTopicId === t.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTopic(t)">确认删除?</button>
-            <button v-if="deletingTopicId === t.id" class="mini" @click="cancelDeleteTopic()">取消</button>
+          <div v-if="!manualMergeMode" style="display:flex; gap:6px; flex-shrink:0">
+            <button class="btn mini" v-if="t.status==='suggested' && deletingTopicId !== t.id && dismissingTopicId !== t.id" @click="confirmTopic(t)">确认</button>
+            <button class="btn mini" v-if="deletingTopicId !== t.id && dismissingTopicId !== t.id" @click="askDismissTopic(t)">忽略</button>
+            <button v-if="deletingTopicId !== t.id && dismissingTopicId !== t.id" class="btn mini" @click="askDeleteTopic(t)">删除</button>
+            <button v-if="dismissingTopicId === t.id" class="btn warn" @click="confirmDismissTopic(t)">确认忽略?</button>
+            <button v-if="dismissingTopicId === t.id" class="btn ghost" @click="cancelDismissTopic()">取消</button>
+            <button v-if="deletingTopicId === t.id" class="btn danger" @click="confirmDeleteTopic(t)">确认删除?</button>
+            <button v-if="deletingTopicId === t.id" class="btn ghost" @click="cancelDeleteTopic()">取消</button>
           </div>
         </div>
       </div>
@@ -273,71 +467,72 @@
         <div class="kv">
           <div class="muted">已选 {{ manualSelected.length }} 个主题</div>
           <div style="display:flex; gap:8px">
-            <button v-if="!manualConfirming" class="primary" style="padding:6px 14px" :disabled="manualSelected.length < 2" @click="startManualConfirm">开始合并</button>
+            <button v-if="!manualConfirming" class="btn primary" style="padding:7px 14px" :disabled="manualSelected.length < 2" @click="startManualConfirm">开始合并</button>
             <template v-else>
-              <input class="txt" v-model="manualMergeName" placeholder="规范名（必填）" style="width:auto">
-              <button class="primary" style="padding:6px 14px" @click="applyManualMerge">确认合并</button>
+              <input class="txt inline" v-model="manualMergeName" placeholder="规范名（必填）">
+              <button class="btn primary" style="padding:7px 14px" @click="applyManualMerge">确认合并</button>
             </template>
-            <button class="mini" @click="cancelManualMerge">取消</button>
+            <button class="btn mini" @click="cancelManualMerge">取消</button>
           </div>
         </div>
       </div>
-      <!-- 已忽略主题折叠区（默认收起，仅当有已忽略主题时显示） -->
+      <!-- 已忽略主题折叠区（默认收起） -->
       <template v-if="dismissedTopics.length">
         <div class="todo-group-title" style="cursor:pointer" @click="dismissedCollapsed = !dismissedCollapsed">
           已忽略主题（{{ dismissedTopics.length }}）{{ dismissedCollapsed ? ' ▸' : ' ▾' }}
         </div>
         <template v-if="!dismissedCollapsed">
-          <div class="card" v-for="t in dismissedTopics" :key="t.id" style="opacity:.7">
+          <div class="card" v-for="t in dismissedTopics" :key="t.id" style="opacity:.72">
             <div class="kv">
               <div>
                 <b>{{ t.name }}</b>
-                <span class="badge dismissed">已忽略</span>
                 <div class="muted">{{ t.memory_count }} 条记忆 · {{ t.open_todo_count }} 个进行中待办</div>
               </div>
-              <button class="mini" @click="restoreTopic(t)">恢复</button>
+              <button class="btn mini" @click="restoreTopic(t)">恢复</button>
             </div>
           </div>
         </template>
       </template>
     </template>
 
-    <!-- 详情视图 -->
+    <!-- 详情视图：改名就地并入 header，不再独占一行 -->
     <template v-else>
-      <div class="kv" style="margin-bottom:12px">
-        <div>
-          <b>{{ topicDetail.topic.name }}</b>
-          <span v-if="topicDetail.topic.status==='suggested'" class="badge suggested">待确认</span>
-          <div class="muted" v-if="topicDetail.topic.description">{{ topicDetail.topic.description }}</div>
+      <div class="kv" style="margin-bottom:14px; align-items:flex-start">
+        <div style="min-width:0; flex:1">
+          <template v-if="renaming===null">
+            <b class="editable" @click="startRename(topicDetail.topic)" title="点击改名" style="font-size:var(--fs-lg)">{{ topicDetail.topic.name }}<span class="hint">✎ 改名</span></b>
+            <span v-if="topicDetail.topic.status==='suggested'" class="badge suggested" style="vertical-align:middle">待确认</span>
+          </template>
+          <template v-else>
+            <input class="txt inline" v-model="renaming.name" @keyup.enter="commitRename" style="font-size:var(--fs-md); max-width:320px">
+            <button class="btn primary" style="padding:6px 14px; margin-left:8px" @click="commitRename">保存</button>
+            <button class="btn mini" @click="renaming = null">取消</button>
+          </template>
+          <div class="muted" v-if="topicDetail.topic.description" style="margin-top:4px">{{ topicDetail.topic.description }}</div>
         </div>
-        <button class="mini" @click="closeTopicDetail">← 返回列表</button>
-      </div>
-      <div class="card" style="margin-bottom:12px">
-        <button class="mini" v-if="renaming===null" @click="startRename(topicDetail.topic)">改名</button>
-        <template v-else>
-          <input class="txt" v-model="renaming.name" style="margin-bottom:8px">
-          <button class="mini" @click="commitRename">保存</button>
-        </template>
+        <button class="btn mini" @click="closeTopicDetail">← 返回列表</button>
       </div>
       <div class="todo-group-title">记忆时间线</div>
       <div v-if="!topicDetail.memories || !topicDetail.memories.length" class="card empty">暂无记忆</div>
       <div class="card" v-for="m in topicDetail.memories" :key="m.id">
-        <div>
-          <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
-          <b v-if="!editingMem || editingMem.id !== m.id" @click="startEditMemory(m)" style="cursor:text">{{ m.title }}</b>
-          <input v-else class="txt" v-model="editingMem.title" style="display:inline-block;width:auto">
+        <div class="kv">
+          <div style="min-width:0">
+            <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+            <b v-if="!editingMem || editingMem.id !== m.id" class="editable" @click="startEditMemory(m)" title="点击编辑">{{ m.title }}<span class="hint">✎</span></b>
+          </div>
         </div>
-        <div v-if="editingMem && editingMem.id === m.id">
-          <textarea class="txt" v-model="editingMem.content" rows="3" style="margin:6px 0"></textarea>
-          <div style="display:flex; gap:8px; margin-bottom:6px">
-            <button class="primary" style="padding:4px 12px" @click="saveEditMemory(() => openTopic(topicDetail.topic.id))">保存</button>
-            <button class="mini" @click="cancelEditMemory()">取消</button>
+        <div v-if="editingMem && editingMem.id === m.id" class="edit-form">
+          <input class="txt" v-model="editingMem.title" style="margin-bottom:8px">
+          <textarea class="txt" v-model="editingMem.content" rows="3"></textarea>
+          <div class="edit-actions" style="margin-top:8px">
+            <button class="btn primary" style="padding:6px 14px" @click="saveEditMemory(() => openTopic(topicDetail.topic.id))">保存</button>
+            <button class="btn mini" @click="cancelEditMemory()">取消</button>
           </div>
         </div>
         <div v-else style="margin:6px 0">{{ m.content }}</div>
-        <div class="muted">
-          <span v-for="tp in topicChips(m)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}</span>
-          {{ fmtTime(m.event_at) }}
+        <div class="muted">置信 {{ (m.confidence ?? 0).toFixed(2) }}<template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template></div>
+        <div v-if="topicChips(m).length" class="topic-row">
+          <span v-for="tp in topicChips(m)" :key="tp.id" class="chip">{{ tp.name }}</span>
         </div>
       </div>
       <div class="todo-group-title">关联待办</div>
@@ -345,73 +540,118 @@
       <div class="card" v-for="td in topicDetail.todos" :key="td.id">
         <div class="kv">
           <div>☑️ {{ td.title }}</div>
-          <span class="badge" :class="td.status">
-            {{ td.status === 'suggested' ? '待确认' : td.status === 'confirmed' ? '已确认' : td.status === 'done' ? '已完成' : '已忽略' }}
-          </span>
+          <span class="badge" :class="td.status">{{ todoStatusText(td.status) }}</span>
         </div>
-        <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
-          <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}</span>
+        <div v-if="topicChips(td).length" class="topic-row">
+          <span v-for="tp in topicChips(td)" :key="tp.id" class="chip">{{ tp.name }}</span>
         </div>
       </div>
     </template>
+  </div>
+
+  <!-- ============ 记忆 ============ -->
+  <div class="wrap" v-if="tab==='memories'">
+    <div class="toolbar">
+      <input class="txt" v-model="memSearch" placeholder="搜索记忆标题 / 内容…" style="max-width:280px">
+      <select class="mini" v-model="memConfMin">
+        <option value="0">全部置信度</option>
+        <option value="0.5">置信 ≥ 0.5</option>
+        <option value="0.7">置信 ≥ 0.7</option>
+        <option value="0.9">置信 ≥ 0.9</option>
+      </select>
+      <div class="spacer"></div>
+      <span class="muted">{{ filteredMemories.length }} 条</span>
+    </div>
+    <div v-if="!filteredMemories.length" class="card empty">没有匹配的记忆</div>
+    <div class="card" v-for="m in filteredMemories" :key="m.id">
+      <div class="kv">
+        <div style="min-width:0">
+          <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+          <b v-if="!editingMem || editingMem.id !== m.id" class="editable" @click="startEditMemory(m)" title="点击编辑">{{ m.title }}<span class="hint">✎</span></b>
+        </div>
+      </div>
+      <div v-if="editingMem && editingMem.id === m.id" class="edit-form">
+        <input class="txt" v-model="editingMem.title" style="margin-bottom:8px">
+        <textarea class="txt" v-model="editingMem.content" rows="3"></textarea>
+        <div class="edit-actions" style="margin-top:8px">
+          <button class="btn primary" style="padding:6px 14px" @click="saveEditMemory(loadMemories)">保存</button>
+          <button class="btn mini" @click="cancelEditMemory()">取消</button>
+        </div>
+      </div>
+      <div v-else style="margin:6px 0">{{ m.content }}</div>
+      <div class="muted">置信 <b style="color:var(--accent)">{{ (m.confidence ?? 0).toFixed(2) }}</b> · 重要度 {{ (m.importance ?? 0).toFixed(1) }}<template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template></div>
+      <div class="topic-row">
+        <span v-for="tp in topicChips(m)" :key="tp.id" class="chip">{{ tp.name }}<button class="chip-x" @click.stop="removeMemoryTopic(m, tp.id)" title="取消关联">✕</button></span>
+        <label class="chip-add">+ 关联<select @change="if($event.target.value){addMemoryTopic(m,$event.target.value);$event.target.value=''}"><option value="">+ 关联</option><option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option></select></label>
+      </div>
+      <div class="card-actions">
+        <div class="muted" v-if="m.session_id" style="cursor:pointer" @click="jumpToSession(m.session_id)">↗ 查看来源对话</div>
+        <div style="flex:1"></div>
+        <button v-if="dismissingMemId !== m.id" class="btn mini" @click="askDismissMem(m)">忽略</button>
+        <button v-if="dismissingMemId === m.id" class="btn warn" @click="confirmDismissMem(m, loadMemories)">确认忽略?</button>
+        <button v-if="dismissingMemId === m.id" class="btn ghost" @click="cancelDismissMem()">取消</button>
+      </div>
+    </div>
   </div>
 
   <!-- ============ 待办 ============ -->
   <div class="wrap" v-if="tab==='todos'">
     <div class="todo-group-title">待确认（{{ suggestedTodos.length }}）</div>
     <div v-if="!suggestedTodos.length" class="card empty">没有待确认的待办</div>
-    <div class="card" v-for="td in suggestedTodos" :key="td.id" style="background:#fffbeb">
+    <div class="card" v-for="td in suggestedTodos" :key="td.id" style="background:#fffdf5">
       <div class="kv">
-        <b v-if="!editingTodo || editingTodo.id !== td.id" @click="startEditTodo(td)" style="cursor:text">☑️ {{ td.title }}</b>
-        <input v-else class="txt" v-model="editingTodo.title" style="display:inline-block;width:auto">
-        <div style="display:flex; gap:6px">
-          <button v-if="editingTodo && editingTodo.id === td.id" class="primary" style="padding:4px 10px" @click="saveEditTodo(loadTodos)">保存</button>
-          <button v-if="editingTodo && editingTodo.id === td.id" class="mini" @click="cancelEditTodo()">取消</button>
-          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="setTodoStatus(td, 'confirmed')">加入</button>
-          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
-          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="askDeleteTodo(td)">删除</button>
-          <button v-if="deletingTodoId === td.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTodo(td, loadTodos)">确认删除?</button>
-          <button v-if="deletingTodoId === td.id" class="mini" @click="cancelDeleteTodo()">取消</button>
+        <div v-if="!editingTodo || editingTodo.id !== td.id" class="editable" @click="startEditTodo(td)" title="点击编辑">☑️ {{ td.title }}<span class="hint">✎</span></div>
+        <div v-else style="min-width:0; flex:1">
+          <input class="txt" v-model="editingTodo.title">
+        </div>
+        <div style="display:flex; gap:6px; flex-shrink:0">
+          <button v-if="editingTodo && editingTodo.id === td.id" class="btn primary" style="padding:6px 12px" @click="saveEditTodo(loadTodos)">保存</button>
+          <button v-if="editingTodo && editingTodo.id === td.id" class="btn mini" @click="cancelEditTodo()">取消</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="btn mini" @click="setTodoStatus(td, 'confirmed')">加入</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id && dismissingTodoId !== td.id" class="btn mini" @click="askDismissTodo(td)">忽略</button>
+          <button v-if="dismissingTodoId === td.id" class="btn warn" @click="confirmDismissTodo(td)">确认忽略?</button>
+          <button v-if="dismissingTodoId === td.id" class="btn ghost" @click="cancelDismissTodo()">取消</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="btn mini" @click="askDeleteTodo(td)">删除</button>
+          <button v-if="deletingTodoId === td.id" class="btn danger" @click="confirmDeleteTodo(td, loadTodos)">确认删除?</button>
+          <button v-if="deletingTodoId === td.id" class="btn ghost" @click="cancelDeleteTodo()">取消</button>
         </div>
       </div>
       <div class="muted">生成 {{ fmtTime(td.created_at) }}<template v-if="td.status!=='suggested'"> · 处理 {{ fmtTime(td.updated_at) }}</template></div>
-      <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
-        <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}<button class="mini" style="padding:0 4px;margin-left:2px" @click.stop="removeTodoTopic(td, tp.id)">✕</button></span>
+      <div class="topic-row" v-if="topicChips(td).length || td.status!=='done'">
+        <span v-for="tp in topicChips(td)" :key="tp.id" class="chip">{{ tp.name }}<button class="chip-x" @click.stop="removeTodoTopic(td, tp.id)" title="取消关联">✕</button></span>
+        <label v-if="td.status!=='done'" class="chip-add">+ 关联<select @change="if($event.target.value){addTodoTopic(td,$event.target.value);$event.target.value=''}"><option value="">+ 关联 Topic</option><option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option></select></label>
       </div>
-      <select class="mini" v-if="td.status!=='done'" @change="if($event.target.value){addTodoTopic(td,$event.target.value);$event.target.value=''}">
-        <option value="">+ 关联 Topic</option>
-        <option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option>
-      </select>
       <div class="muted" v-if="td.due_at" :class="{overdue: new Date(td.due_at) < new Date()}">截止 {{ fmtDue(td.due_at) }}</div>
-      <div class="muted" v-if="td.source_session_id" style="cursor:pointer"
-           @click="jumpToSession(td.source_session_id)">↗ 查看来源对话</div>
+      <div class="muted" v-if="td.source_session_id" style="cursor:pointer" @click="jumpToSession(td.source_session_id)">↗ 查看来源对话</div>
     </div>
 
     <div class="todo-group-title">进行中（{{ activeTodos.length }}）</div>
     <div v-if="!activeTodos.length" class="card empty">没有进行中的待办</div>
     <div class="card" v-for="td in activeTodos" :key="td.id">
       <div class="kv">
-        <b v-if="!editingTodo || editingTodo.id !== td.id" @click="startEditTodo(td)" style="cursor:text">☑️ {{ td.title }}</b>
-        <input v-else class="txt" v-model="editingTodo.title" style="display:inline-block;width:auto">
-        <div style="display:flex; gap:6px">
-          <button v-if="editingTodo && editingTodo.id === td.id" class="primary" style="padding:4px 10px" @click="saveEditTodo(loadTodos)">保存</button>
-          <button v-if="editingTodo && editingTodo.id === td.id" class="mini" @click="cancelEditTodo()">取消</button>
-          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="setTodoStatus(td, 'done')">完成</button>
-          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="setTodoStatus(td, 'dismissed')">忽略</button>
-          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="mini" @click="askDeleteTodo(td)">删除</button>
-          <button v-if="deletingTodoId === td.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTodo(td, loadTodos)">确认删除?</button>
-          <button v-if="deletingTodoId === td.id" class="mini" @click="cancelDeleteTodo()">取消</button>
+        <div v-if="!editingTodo || editingTodo.id !== td.id" class="editable" @click="startEditTodo(td)" title="点击编辑">☑️ {{ td.title }}<span class="hint">✎</span></div>
+        <div v-else style="min-width:0; flex:1">
+          <input class="txt" v-model="editingTodo.title">
+        </div>
+        <div style="display:flex; gap:6px; flex-shrink:0">
+          <button v-if="editingTodo && editingTodo.id === td.id" class="btn primary" style="padding:6px 12px" @click="saveEditTodo(loadTodos)">保存</button>
+          <button v-if="editingTodo && editingTodo.id === td.id" class="btn mini" @click="cancelEditTodo()">取消</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="btn mini" @click="setTodoStatus(td, 'done')">完成</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id && dismissingTodoId !== td.id" class="btn mini" @click="askDismissTodo(td)">忽略</button>
+          <button v-if="dismissingTodoId === td.id" class="btn warn" @click="confirmDismissTodo(td)">确认忽略?</button>
+          <button v-if="dismissingTodoId === td.id" class="btn ghost" @click="cancelDismissTodo()">取消</button>
+          <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="btn mini" @click="askDeleteTodo(td)">删除</button>
+          <button v-if="deletingTodoId === td.id" class="btn danger" @click="confirmDeleteTodo(td, loadTodos)">确认删除?</button>
+          <button v-if="deletingTodoId === td.id" class="btn ghost" @click="cancelDeleteTodo()">取消</button>
         </div>
       </div>
       <div class="muted">生成 {{ fmtTime(td.created_at) }}<template v-if="td.status!=='suggested'"> · 处理 {{ fmtTime(td.updated_at) }}</template></div>
-      <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
-        <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}<button class="mini" style="padding:0 4px;margin-left:2px" @click.stop="removeTodoTopic(td, tp.id)">✕</button></span>
+      <div class="topic-row" v-if="topicChips(td).length || td.status!=='done'">
+        <span v-for="tp in topicChips(td)" :key="tp.id" class="chip">{{ tp.name }}<button class="chip-x" @click.stop="removeTodoTopic(td, tp.id)" title="取消关联">✕</button></span>
+        <label v-if="td.status!=='done'" class="chip-add">+ 关联<select @change="if($event.target.value){addTodoTopic(td,$event.target.value);$event.target.value=''}"><option value="">+ 关联 Topic</option><option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option></select></label>
       </div>
-      <select class="mini" v-if="td.status!=='done'" @change="if($event.target.value){addTodoTopic(td,$event.target.value);$event.target.value=''}">
-        <option value="">+ 关联 Topic</option>
-        <option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option>
-      </select>
       <div class="muted" v-if="td.due_at" :class="{overdue: new Date(td.due_at) < new Date()}">截止 {{ fmtDue(td.due_at) }}</div>
+      <div class="muted" v-if="td.source_session_id" style="cursor:pointer" @click="jumpToSession(td.source_session_id)">↗ 查看来源对话</div>
     </div>
 
     <div class="todo-group-title" style="cursor:pointer" @click="doneCollapsed = !doneCollapsed">
@@ -419,24 +659,45 @@
     </div>
     <template v-if="!doneCollapsed">
       <div v-if="!doneTodos.length" class="card empty">没有已完成的待办</div>
-      <div class="card" v-for="td in doneTodos" :key="td.id" style="opacity:.6">
+      <div class="card" v-for="td in doneTodos" :key="td.id" style="opacity:.62">
         <div class="kv">
           <div>✅ <s>{{ td.title }}</s></div>
           <div style="display:flex; gap:6px">
-            <button v-if="deletingTodoId !== td.id" class="mini" @click="askDeleteTodo(td)">删除</button>
-            <button v-if="deletingTodoId === td.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteTodo(td, loadTodos)">确认删除?</button>
-            <button v-if="deletingTodoId === td.id" class="mini" @click="cancelDeleteTodo()">取消</button>
+            <button v-if="deletingTodoId !== td.id" class="btn mini" @click="askDeleteTodo(td)">删除</button>
+            <button v-if="deletingTodoId === td.id" class="btn danger" @click="confirmDeleteTodo(td, loadTodos)">确认删除?</button>
+            <button v-if="deletingTodoId === td.id" class="btn ghost" @click="cancelDeleteTodo()">取消</button>
           </div>
         </div>
         <div class="muted">生成 {{ fmtTime(td.created_at) }}<template v-if="td.status!=='suggested'"> · 处理 {{ fmtTime(td.updated_at) }}</template></div>
-        <div v-if="topicChips(td).length" class="muted" style="margin-top:4px">
-          <span v-for="tp in topicChips(td)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}</span>
+        <div v-if="topicChips(td).length" class="topic-row">
+          <span v-for="tp in topicChips(td)" :key="tp.id" class="chip">{{ tp.name }}</span>
         </div>
+        <div class="muted" v-if="td.source_session_id" style="cursor:pointer" @click="jumpToSession(td.source_session_id)">↗ 查看来源对话</div>
+      </div>
+    </template>
+
+    <!-- 已忽略（dismissed 终态，不可恢复，仅供查看+硬删） -->
+    <div class="todo-group-title" style="cursor:pointer" @click="dismissedTodoCollapsed = !dismissedTodoCollapsed">
+      已忽略（{{ dismissedTodos.length }}）{{ dismissedTodoCollapsed ? ' ▸' : ' ▾' }}
+    </div>
+    <template v-if="!dismissedTodoCollapsed">
+      <div v-if="!dismissedTodos.length" class="card empty">没有已忽略的待办</div>
+      <div class="card" v-for="td in dismissedTodos" :key="td.id" style="opacity:.62">
+        <div class="kv">
+          <div><s>{{ td.title }}</s></div>
+          <div style="display:flex; gap:6px">
+            <button v-if="deletingTodoId !== td.id" class="btn mini" @click="askDeleteTodo(td)">删除</button>
+            <button v-if="deletingTodoId === td.id" class="btn danger" @click="confirmDeleteTodo(td, loadDismissedTodos)">确认删除?</button>
+            <button v-if="deletingTodoId === td.id" class="btn ghost" @click="cancelDeleteTodo()">取消</button>
+          </div>
+        </div>
+        <div class="muted">生成 {{ fmtTime(td.created_at) }}</div>
+        <div class="muted" v-if="td.source_session_id" style="cursor:pointer" @click="jumpToSession(td.source_session_id)">↗ 查看来源对话</div>
       </div>
     </template>
   </div>
 </div>
 
-<script src="/app/app.e4b9df3e.js"></script>
+<script src="/app/app.7896e8d1.js"></script>
 </body>
 </html>

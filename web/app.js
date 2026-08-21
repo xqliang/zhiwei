@@ -12,7 +12,7 @@ const TYPE_META = {
   preference: { label: '偏好', color: '#059669' },
 };
 
-createApp({
+const app = createApp({
   setup() {
     const tab = ref('timeline');
     const toast = ref('');
@@ -32,12 +32,15 @@ createApp({
         opt.body = JSON.stringify(body);
       }
       const r = await fetch(url, opt);
+      const text = await r.text();
       if (!r.ok) {
         let msg = '请求失败';
-        try { msg = (await r.json()).error || msg; } catch (e) {}
+        try { msg = (text ? JSON.parse(text).error : '') || msg; } catch (e) {}
         throw new Error(msg);
       }
-      return r.json();
+      // 部分写操作（关联/删除 topic）返回 200/204 空体，r.json() 会抛
+      // "Unexpected end of JSON input"——空体直接返回 null，调用方按需判断。
+      return text ? JSON.parse(text) : null;
     }
     function showError(e) {
       toast.value = (e && e.message) || String(e);
@@ -49,6 +52,13 @@ createApp({
       if (status === 'failed') return '失败';
       if (status === 'running') return '处理中 · ' + (stage || '');
       return '排队中';
+    }
+    // 待办状态 → 中文标签（模板多处复用，集中一处避免散落的三元）
+    function todoStatusText(status) {
+      if (status === 'suggested') return '待确认';
+      if (status === 'confirmed') return '已确认';
+      if (status === 'done') return '已完成';
+      return '已忽略';
     }
     function spClass(speaker) {
       const n = (speaker || '').replace(/\D/g, '') || '1';
@@ -62,7 +72,8 @@ createApp({
 
     async function loadSessions() {
       try {
-        const d = await api('GET', '/api/sessions');
+        // limit=200：时间线客户端筛选/搜索需要更大窗口（单用户 MVP 足够）
+        const d = await api('GET', '/api/sessions?limit=200');
         sessions.value = d.sessions || [];
       } catch (e) { showError(e); }
     }
@@ -105,11 +116,16 @@ createApp({
     }
     // 原始音频流式地址（ ServeAudio 端点）
     function audioUrl(id) { return '/api/sessions/' + id + '/audio'; }
-    async function dismissMemory(m) {
-      editingMem.value = null;
+    // ---------- 记忆忽略（2 步确认，时间线/主题内页/记忆 tab 共用） ----------
+    // dismissingMemId = 待确认忽略的记忆 id。确认后 PATCH status=dismissed，再按当前视图 reload。
+    const dismissingMemId = ref(null);
+    function askDismissMem(m) { editingMem.value = null; dismissingMemId.value = m.id; }
+    function cancelDismissMem() { dismissingMemId.value = null; }
+    async function confirmDismissMem(m, reload) {
       try {
         await api('PATCH', '/api/memories/' + m.id, { status: 'dismissed' });
-        detail.value.memories = (detail.value.memories || []).filter(x => x.id !== m.id);
+        dismissingMemId.value = null;
+        if (reload) await reload();
       } catch (e) { showError(e); }
     }
     // ---------- 记忆 inplace 编辑（复用 PATCH /api/memories/{id}） ----------
@@ -196,6 +212,10 @@ createApp({
     const topicDetail = ref(null);
     const showNewTopic = ref(false);
     const newTopic = ref({ name: '', description: '' });
+    const creating = ref(false); // 创建中：按钮 loading + 禁用防重复提交
+    // 新建主题表单：打开/关闭与清空。关闭时还原输入与 creating 态，避免残留。
+    function cancelNewTopic() { showNewTopic.value = false; newTopic.value = { name: '', description: '' }; creating.value = false; }
+    function toggleNewTopic() { if (showNewTopic.value) cancelNewTopic(); else showNewTopic.value = true; }
     const renaming = ref(null); // { id, name }
 
     async function loadTopics() {
@@ -281,7 +301,12 @@ createApp({
       }
     }
     async function createTopic() {
-      if (!newTopic.value.name.trim()) return;
+      if (creating.value) return; // 防重复提交
+      if (!newTopic.value.name.trim()) {
+        toast.value = '请输入主题名称'; setTimeout(() => { toast.value = ''; }, 2000);
+        return;
+      }
+      creating.value = true; // 即时反馈：按钮变「创建中…」+ spinner
       try {
         // 提交前对名称与描述做 trim，避免首尾空白进入库
         await api('POST', '/api/topics', {
@@ -291,7 +316,9 @@ createApp({
         newTopic.value = { name: '', description: '' };
         showNewTopic.value = false;
         await loadTopics();
+        toast.value = '主题已创建'; setTimeout(() => { toast.value = ''; }, 2000);
       } catch (e) { showError(e); }
+      finally { creating.value = false; }
     }
 
     // ---------- Topics 相似度启发（疑似可合并提示，纯前端） ----------
@@ -335,6 +362,8 @@ createApp({
     }
     const memoryDraft = ref(null); // {merges:[{canonical_id, members:[{id,name,checked}]}], adjustments:[{memory_id,title,kind,reason,evidence_ids,checked}]}
     async function startMemoryConsolidate() {
+      if (memConsolidating.value) return; // 防重复点击
+      memConsolidating.value = true;      // 立即反馈：按钮 loading
       try {
         await loadMemories();
         const d = await api('POST', '/api/memories/consolidate', {});
@@ -357,6 +386,7 @@ createApp({
         }
         memoryDraft.value = { merges, adjustments };
       } catch (e) { showError(e); }
+      finally { memConsolidating.value = false; }
     }
     function toggleMemoryMember(g, id) {
       const m = g.members.find(x => x.id === id);
@@ -388,6 +418,8 @@ createApp({
     // startConsolidate：调后端 consolidate（LLM 按该用户主题列表给合并组提议），
     // 落进草稿供用户编辑 canonical 名与勾选成员；不改库。
     async function startConsolidate() {
+      if (consolidating.value) return; // 防重复点击
+      consolidating.value = true;      // 立即反馈：按钮 loading + 骨架卡片
       try {
         const d = await api('POST', '/api/topics/consolidate', {});
         const groups = (d.groups || []).map(g => ({
@@ -405,6 +437,7 @@ createApp({
         }
         mergeDraft.value = groups;
       } catch (e) { showError(e); }
+      finally { consolidating.value = false; }
     }
     // toggleMergeMember：勾选/取消某组成员（直接翻转 m.checked，Vue 深响应式自动重渲染）。
     function toggleMergeMember(g, id) {
@@ -472,6 +505,16 @@ createApp({
         todos.value = d.todos || [];
       } catch (e) { showError(e); }
     }
+    // 已忽略待办（dismissed 终态，仅供查看+硬删）。?dismissed=1 走后端 ListDismissed。
+    const dismissedTodos = ref([]);
+    const dismissedTodoCollapsed = ref(true); // 默认收起（区别于主题页的 dismissedCollapsed）
+    async function loadDismissedTodos() {
+      try {
+        const d = await api('GET', '/api/todos?dismissed=1');
+        dismissedTodos.value = d.todos || [];
+      } catch (e) { showError(e); }
+    }
+    async function reloadAllTodos() { await loadTodos(); await loadDismissedTodos(); }
     // ---------- 待办/记忆 ↔ topic 多对多手动关联 ----------
     // 取条目身上的 topic 徽标数组（统一从 topics[] 读取，兼容空值）
     function topicChips(item) { return (item && item.topics) || []; }
@@ -485,19 +528,25 @@ createApp({
       try { await api('DELETE', '/api/todos/' + t.id + '/topics/' + topicId); await loadTodos(); }
       catch (e) { showError(e); }
     }
+    // 关联变更后按当前视图刷新：记忆 tab 刷 memories，时间线详情刷 session。
+    // 原先硬编码 reloadSession(detail.session.id)——在记忆 tab（无展开 session）会崩。
+    async function reloadAfterMemoryTopic() {
+      if (tab.value === 'memories') await loadMemories();
+      else if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
+    }
     async function addMemoryTopic(m, topicId) {
-      try { await api('POST', '/api/memories/' + m.id + '/topics', { topic_id: topicId }); await reloadSession(detail.value.session.id); }
+      try { await api('POST', '/api/memories/' + m.id + '/topics', { topic_id: topicId }); await reloadAfterMemoryTopic(); }
       catch (e) { showError(e); }
     }
     async function removeMemoryTopic(m, topicId) {
-      try { await api('DELETE', '/api/memories/' + m.id + '/topics/' + topicId); await reloadSession(detail.value.session.id); }
+      try { await api('DELETE', '/api/memories/' + m.id + '/topics/' + topicId); await reloadAfterMemoryTopic(); }
       catch (e) { showError(e); }
     }
     async function setTodoStatus(t, status) {
-      editingTodo.value = null; deletingTodoId.value = null; // todo 即将换组，清理编辑/删除态
+      editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; // todo 即将换组，清理编辑/删除/忽略态
       try {
         await api('PATCH', '/api/todos/' + t.id, { status });
-        await loadTodos();
+        await reloadAllTodos();
       } catch (e) { showError(e); }
     }
     // ---------- 待办 inplace 编辑 + 删除 ----------
@@ -518,6 +567,15 @@ createApp({
       try { await api('DELETE', '/api/todos/' + t.id); deletingTodoId.value = null; if (reload) await reload(); }
       catch (e) { showError(e); }
     }
+    // 2 步行内忽略确认：dismissingTodoId 存正待确认忽略的 todo id（与删除态互斥）
+    const dismissingTodoId = ref(null);
+    function askDismissTodo(t) { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = t.id; }
+    function cancelDismissTodo() { dismissingTodoId.value = null; }
+    async function confirmDismissTodo(t) {
+      try { await setTodoStatus(t, 'dismissed'); }
+      catch (e) { showError(e); }
+      finally { dismissingTodoId.value = null; }
+    }
     async function jumpToSession(sessionId) {
       switchTab('timeline');
       // 从待办页跳来时强制展开（不因已展开而收起）
@@ -527,12 +585,171 @@ createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 时间线筛选 / 按天分组（纯前端） ----------
+    // 搜索 + 日期范围 + 按天分组均为客户端计算：数据量 ≤200，O(n) 过滤可忽略。
+    const tlSearch = ref('');
+    const tlDateFrom = ref(''); // YYYY-MM-DD
+    const tlDateTo = ref('');
+    const tlPreset = ref(''); // 当前激活的时间快捷方式（空=无）
+    function clearTlFilter() { tlSearch.value = ''; tlDateFrom.value = ''; tlDateTo.value = ''; tlPreset.value = ''; }
+    // fmtDate：Date -> 'YYYY-MM-DD'（date input 值格式）
+    function fmtDate(d) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+    // applyPreset：点快捷方式即设置 from/to（复用既有日期过滤），并标记激活态。
+    // 手动改任一日期输入会清空 tlPreset（视为自定义范围）。
+    function applyPreset(name) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const daysAgo = (n) => { const d = new Date(today); d.setDate(d.getDate() - n); return d; };
+      // 周一=0..周日=6（JS getDay 周日=0，转换）
+      const mondayOffset = (today.getDay() + 6) % 7;
+      let from, to;
+      switch (name) {
+        case '1d': from = daysAgo(0); to = today; break;                  // 最近1天=今天
+        case '2d': from = daysAgo(1); to = today; break;
+        case '3d': from = daysAgo(2); to = today; break;
+        case '7d': from = daysAgo(6); to = today; break;
+        case '30d': from = daysAgo(29); to = today; break;
+        case 'week': from = daysAgo(mondayOffset); to = daysAgo(mondayOffset - 6); break;      // 本周一~周日
+        case 'lastweek': from = daysAgo(mondayOffset + 7); to = daysAgo(mondayOffset + 1); break; // 上周一~周日
+        case 'month': from = new Date(today.getFullYear(), today.getMonth(), 1); to = new Date(today.getFullYear(), today.getMonth() + 1, 0); break; // 本月1~月末
+        default: clearTlFilter(); return;
+      }
+      tlDateFrom.value = fmtDate(from);
+      tlDateTo.value = fmtDate(to);
+      tlPreset.value = name;
+    }
+    function dayKey(iso) { return (iso || '').slice(0, 10); } // 取 YYYY-MM-DD
+    const WEEK_ZH = ['日', '一', '二', '三', '四', '五', '六'];
+    function dayLabel(key) {
+      if (!key) return '';
+      const d = new Date(key + 'T00:00:00');
+      if (isNaN(d.getTime())) return key;
+      return `${d.getMonth() + 1}月${d.getDate()}日 · 周${WEEK_ZH[d.getDay()]}`;
+    }
+    // filteredSessions：搜索(asr_preview+filename 子串) + 日期范围
+    const filteredSessions = computed(() => {
+      const q = tlSearch.value.trim().toLowerCase();
+      const from = tlDateFrom.value, to = tlDateTo.value;
+      return sessions.value.filter(s => {
+        if (q) {
+          const hay = ((s.asr_preview || '') + ' ' + (s.filename || '')).toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        const k = dayKey(s.created_at);
+        if (from && k < from) return false;
+        if (to && k > to) return false;
+        return true;
+      });
+    });
+    // sessionsByDay：按日期分组并倒序，保留 filteredSessions 内的原始顺序
+    const sessionsByDay = computed(() => {
+      const map = {}, order = [];
+      for (const s of filteredSessions.value) {
+        const k = dayKey(s.created_at) || '未知';
+        if (!map[k]) { map[k] = []; order.push(k); }
+        map[k].push(s);
+      }
+      order.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+      return order.map(k => ({ day: k, label: dayLabel(k), items: map[k] }));
+    });
+
+    // ---------- ASR 转写就地编辑 ----------
+    // segDraft = { [segId]: text }：键存在即该段处于编辑态（点击进入、保存/取消清键）。
+    const segDraft = ref({});
+    function segEditing(sg) { return !!(sg && sg.id !== undefined && segDraft.value[sg.id] !== undefined); }
+    function startEditSeg(sg) { segDraft.value[sg.id] = sg.text; }
+    function cancelEditSeg(sg) { delete segDraft.value[sg.id]; }
+    const segDirty = computed(() => Object.keys(segDraft.value).length > 0);
+    async function saveTranscript(s) {
+      const draft = segDraft.value;
+      const segs = Object.keys(draft).map(id => ({ id, text: draft[id] }));
+      if (!segs.length) return;
+      try {
+        await api('PATCH', '/api/sessions/' + s.id + '/transcript', { segments: segs });
+        segDraft.value = {};
+        await reloadSession(s.id);
+        toast.value = '转写已保存'; setTimeout(() => { toast.value = ''; }, 2000);
+      } catch (e) { showError(e); }
+    }
+
+    // ---------- 重新提取（基于最新 ASR 重跑 segment→extract） ----------
+    // 点卡片「重新提取」→ 2 步确认 → 若有未保存转写先存盘 → POST reextract 建任务
+    // → 轮询 job 状态 → 完成后刷新列表+详情。2 步确认提示会覆盖旧记忆/待办。
+    const reextractingId = ref(null);   // 正在重新提取的 session id（卡片显 loading）
+    const reextractConfirmId = ref(null); // 待确认重新提取的 session id
+    let reextractPollTimer = null;
+    function askReextract(s) { deletingSessionId.value = null; reextractConfirmId.value = s.id; }
+    function cancelReextract() { reextractConfirmId.value = null; }
+    async function confirmReextract(s) { reextractConfirmId.value = null; await reextractSession(s); }
+    async function reextractSession(s) {
+      if (reextractingId.value) return;
+      // 当前展开且有未保存转写修改 → 先存盘，确保用最新 ASR 提取
+      if (expandedId.value === s.id && segDirty.value) {
+        await saveTranscript(s);
+      }
+      reextractingId.value = s.id;
+      try {
+        await api('POST', '/api/sessions/' + s.id + '/reextract', {});
+        toast.value = '正在重新提取…';
+        const poll = async () => {
+          let st = '', err = '';
+          try {
+            const r = await api('GET', '/api/sessions/' + s.id);
+            st = r.job ? r.job.status : (r.session && r.session.status) || '';
+            err = r.job ? (r.job.last_error || '') : '';
+          } catch (e) { /* 轮询失败静默重试 */ }
+          if (st === 'done' || st === 'completed') {
+            reextractingId.value = null;
+            toast.value = '重新提取完成'; setTimeout(() => { toast.value = ''; }, 2500);
+            await loadSessions();
+            if (expandedId.value === s.id) await reloadSession(s.id);
+          } else if (st === 'failed') {
+            reextractingId.value = null;
+            toast.value = '重新提取失败' + (err ? '：' + err : '');
+            setTimeout(() => { toast.value = ''; }, 4000);
+          } else {
+            reextractPollTimer = setTimeout(poll, 2000);
+          }
+        };
+        poll();
+      } catch (e) {
+        reextractingId.value = null;
+        showError(e);
+      }
+    }
+
+    // ---------- 智能合并 / 记忆整理：即时反馈标志 ----------
+    const consolidating = ref(false);
+    const memConsolidating = ref(false);
+
+    // ---------- 记忆 tab ----------
+    // 复用 memories（loadMemories 拉 ?limit=200）。客户端按置信度过滤 + 搜索 + 时间倒序。
+    const memSearch = ref('');
+    const memConfMin = ref('0');
+    const filteredMemories = computed(() => {
+      const q = memSearch.value.trim().toLowerCase();
+      const min = Number(memConfMin.value) || 0;
+      return memories.value
+        .filter(m => (m.confidence ?? 0) >= min)
+        .filter(m => !q || ((m.title || '') + ' ' + (m.content || '')).toLowerCase().includes(q))
+        .sort((a, b) => {
+          // event_at 为空时回退 created_at，保证有值的不被排到末尾
+          const ta = new Date(a.event_at || a.created_at).getTime();
+          const tb = new Date(b.event_at || b.created_at).getTime();
+          return (tb || 0) - (ta || 0);
+        });
+    });
     // ---------- 标签页切换 ----------
     function switchTab(name) {
       tab.value = name;
-      if (name === 'timeline') { deletingSessionId.value = null; loadSessions(); }
+      if (name === 'timeline') { deletingSessionId.value = null; reextractConfirmId.value = null; segDraft.value = {}; loadSessions(); }
+      if (name === 'memories') { memSearch.value = ''; loadMemories(); }
       if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; dismissingTopicId.value = null; cancelManualMerge(); loadDismissedTopics(); loadTopics(); }
-      if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; loadTopics(); loadTodos(); }
+      if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; loadTopics(); loadTodos(); loadDismissedTodos(); }
     }
     loadSessions();
     // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
@@ -540,21 +757,28 @@ createApp({
     // mount 时一并拉一次，保证首屏就有可选项（评审 M1）。
     loadTopics();
 
-    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); });
+    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); clearTimeout(reextractPollTimer); });
 
     return {
       tab, toast, switchTab,
-      fmtTime, fmtDue, typeMeta, statusText, spClass,
-      sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissMemory, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
+      fmtTime, fmtDue, typeMeta, statusText, todoStatusText, spClass,
+      sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissingMemId, askDismissMem, cancelDismissMem, confirmDismissMem, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
+      tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay,
+      segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript,
+      reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
-      topics, topicDetail, showNewTopic, newTopic, renaming,
-      loadTopics, openTopic, closeTopicDetail, confirmTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, toggleMergeMember, applyMerge, deletingTopicId, askDeleteTopic, cancelDeleteTopic, confirmDeleteTopic, dismissingTopicId, askDismissTopic, cancelDismissTopic, confirmDismissTopic, restoreTopic, dismissedTopics, dismissedCollapsed, loadDismissedTopics,
+      topics, topicDetail, showNewTopic, newTopic, creating, toggleNewTopic, cancelNewTopic, renaming,
+      loadTopics, openTopic, closeTopicDetail, confirmTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, consolidating, toggleMergeMember, applyMerge, deletingTopicId, askDeleteTopic, cancelDeleteTopic, confirmDeleteTopic, dismissingTopicId, askDismissTopic, cancelDismissTopic, confirmDismissTopic, restoreTopic, dismissedTopics, dismissedCollapsed, loadDismissedTopics,
       manualMergeMode, manualSelected, manualMergeName, manualConfirming, startManualMerge, cancelManualMerge, toggleManualSelect, applyManualMerge, startManualConfirm,
-      memories, loadMemories, memoryDraft, startMemoryConsolidate, toggleMemoryMember, toggleMemoryAdjustment, applyMemoryConsolidation,
-      todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos,
+      memories, loadMemories, memoryDraft, startMemoryConsolidate, memConsolidating, toggleMemoryMember, toggleMemoryAdjustment, applyMemoryConsolidation,
+      memSearch, memConfMin, filteredMemories,
+      todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos, dismissedTodos, dismissedTodoCollapsed, loadDismissedTodos,
       loadTodos, setTodoStatus, jumpToSession,
-      editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo,
+      editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
     };
   }
-}).mount('#app');
+});
+// v-focus：表单展开时自动聚焦输入框（v-if 挂载即触发 mounted）
+app.directive('focus', { mounted: el => el.focus() });
+app.mount('#app');

@@ -27,9 +27,20 @@ func RegisterTodo(r chi.Router, h *TodoHandler) {
 	r.Delete("/api/todos/{id}/topics/{topic_id}", h.RemoveTopic)
 }
 
-// List 返回待办列表（排除 dismissed），支持 status/topic_id 过滤。
+// List 返回待办列表（默认排除 dismissed），支持 status/topic_id 过滤。
+// ?dismissed=1 返回已忽略待办（折叠区查看，终态不可恢复，仅供查看+硬删）。
 // 列表行附带 source_session_id（前端「跳转时间线」用）。
 func (h *TodoHandler) List(w http.ResponseWriter, r *http.Request) {
+	// ?dismissed=1 单独取已忽略待办（与默认 List 的「排除 dismissed」互补）
+	if r.URL.Query().Get("dismissed") == "1" {
+		rows, err := h.Todos.ListDismissed(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"todos": rows})
+		return
+	}
 	// 校验顺序：先参数合法性（400），再查库
 	status := r.URL.Query().Get("status")
 	if status != "" && !validTodoStatus(status) {

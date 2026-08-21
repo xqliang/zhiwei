@@ -110,6 +110,17 @@ func TestTodoInsertAndList(t *testing.T) {
 			t.Fatal("dismissed 不应出现在 List")
 		}
 	}
+	// dismissed 应出现在 ListDismissed（「已忽略」折叠区取数）
+	dismissedRows, _ := tr.ListDismissed(ctx)
+	var dismissedSeen bool
+	for _, row := range dismissedRows {
+		if row.ID == td.ID {
+			dismissedSeen = true
+		}
+	}
+	if !dismissedSeen {
+		t.Fatal("dismissed 应出现在 ListDismissed")
+	}
 
 	// 幂等清理：按来源 session 删除（先删 todo 再删 memory 的顺序由 stage 保证）
 	if err := tr.DeleteBySessionExt(ctx, db, sid); err != nil {

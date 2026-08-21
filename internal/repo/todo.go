@@ -156,6 +156,21 @@ func (r *TodoRepo) List(ctx context.Context, status string, topicID *ids.ID) ([]
 	return rows, nil
 }
 
+// ListDismissed 返回已忽略（status=dismissed）待办，供前端「已忽略」折叠区展示。
+// dismissed 是终态不可恢复，此处仅供查看 + 硬删。与 List（排除 dismissed）互补。
+func (r *TodoRepo) ListDismissed(ctx context.Context) ([]TodoRow, error) {
+	var rows []TodoRow
+	err := r.DB.SelectContext(ctx, &rows, todoListBase+`
+ WHERE t.status = 'dismissed' ORDER BY t.id DESC LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.attachTopics(ctx, rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // ListByTopic 是 Topic 详情页的 todo 列表（含已完成，不含 dismissed）。
 func (r *TodoRepo) ListByTopic(ctx context.Context, topicID ids.ID) ([]TodoRow, error) {
 	var rows []TodoRow

@@ -25,6 +25,8 @@ type QueryHandler struct {
 func RegisterQuery(r chi.Router, h *QueryHandler) {
 	r.Get("/api/sessions", h.ListSessions)
 	r.Get("/api/sessions/{id}", h.GetSession)
+	r.Patch("/api/sessions/{id}/transcript", h.PatchTranscript)
+	r.Post("/api/sessions/{id}/reextract", h.Reextract)
 	r.Delete("/api/sessions/{id}", h.DeleteSession)
 	r.Get("/api/sessions/{id}/audio", h.ServeAudio)
 	r.Post("/api/jobs/{id}/retry", h.RetryJob)
@@ -76,6 +78,7 @@ FROM audio_session s ORDER BY s.id DESC LIMIT ?`, limit)
 }
 
 type segmentView struct {
+	ID      string `json:"id"`
 	Speaker string `json:"speaker"`
 	Text    string `json:"text"`
 	StartMS int64  `json:"start_ms"`
@@ -99,7 +102,7 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 		views := make([]segmentView, len(segs))
 		for i, sg := range segs {
 			views[i] = segmentView{
-				Speaker: speakerLabelName(sg.SpeakerLabel), Text: sg.Text,
+				ID: sg.ID.String(), Speaker: speakerLabelName(sg.SpeakerLabel), Text: sg.Text,
 				StartMS: sg.StartMS, EndMS: sg.EndMS,
 			}
 		}
@@ -123,6 +126,82 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, resp)
+}
+
+// PatchTranscript 就地修正 ASR 转写段文本：body {segments:[{id,text}]}。
+// 校验 session 存在 → 取 transcript → 逐段 UpdateSegmentText（带 transcript_id 作用域，
+// 跨会话 id 静默忽略）→ RecomputeFullText 同步 full_text/confidence。
+// 只改转写文本，不触发抽取；前端保存后可单独点「重新提取」走 Reextract。
+func (h *QueryHandler) PatchTranscript(w http.ResponseWriter, r *http.Request) {
+	sid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.Sessions.Get(r.Context(), sid); err != nil {
+		http.Error(w, "session 不存在", http.StatusNotFound)
+		return
+	}
+	tr, err := h.Transcripts.GetBySession(r.Context(), sid)
+	if err != nil {
+		http.Error(w, "transcript 不存在", http.StatusNotFound)
+		return
+	}
+	var req struct {
+		Segments []struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		} `json:"segments"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	for _, sg := range req.Segments {
+		segID, err := ids.ParseID(sg.ID)
+		if err != nil {
+			http.Error(w, "非法 segment id: "+sg.ID, http.StatusBadRequest)
+			return
+		}
+		// 直接写用户输入（含清空），作用域到本 transcript 防跨会话误写
+		if err := h.Transcripts.UpdateSegmentText(r.Context(), tr.ID, segID, sg.Text); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := h.Transcripts.RecomputeFullText(r.Context(), tr.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// Reextract 基于当前（可能已编辑的）ASR 重新抽取记忆/待办：
+// 在 segment stage 建一个 pending job，pool 领取后重算 full_text（segment）→
+// 重新抽取（extract，对本 session 幂等：删旧 memory/todo 再重插）→ done。
+// SetJobID 把 session 指向新 job，前端轮询 GET /api/sessions/{id} 的 job.status 可见进度。
+// 必须已有 transcript（无转写的 session 无法跑 segment→extract）。
+func (h *QueryHandler) Reextract(w http.ResponseWriter, r *http.Request) {
+	sid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.Sessions.Get(r.Context(), sid); err != nil {
+		http.Error(w, "session 不存在", http.StatusNotFound)
+		return
+	}
+	if _, err := h.Transcripts.GetBySession(r.Context(), sid); err != nil {
+		http.Error(w, "该会话暂无转写，无法重新提取", http.StatusConflict)
+		return
+	}
+	j := &repo.Job{SessionID: sid, Stage: "segment", Status: "pending"}
+	if err := h.Jobs.Create(r.Context(), j); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = h.Sessions.SetJobID(r.Context(), sid, j.ID)
+	writeJSON(w, map[string]any{"job_id": j.ID})
 }
 
 func (h *QueryHandler) RetryJob(w http.ResponseWriter, r *http.Request) {

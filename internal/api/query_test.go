@@ -277,3 +277,109 @@ func TestDeleteSession(t *testing.T) {
 		}
 	}
 }
+
+// TestPatchTranscript 验证 ASR 就地编辑：PATCH 段文本后，再取详情段文本已更新。
+func TestPatchTranscript(t *testing.T) {
+	r, sid, _ := buildEnrichedSession(t)
+
+	// GET 详情拿首个 segment id
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		Segments []struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		} `json:"segments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil || len(detail.Segments) == 0 {
+		t.Fatalf("detail 解析: %v %s", err, rec.Body.String())
+	}
+	seg := detail.Segments[0]
+	if seg.ID == "" {
+		t.Fatalf("segment 缺 id: %s", rec.Body.String())
+	}
+
+	// PATCH 改文本
+	body, _ := json.Marshal(map[string]any{
+		"segments": []map[string]string{{"id": seg.ID, "text": "修正后的转写文本"}},
+	})
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodPatch,
+		"/api/sessions/"+sid.String()+"/transcript", strings.NewReader(string(body))))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("patch: %d %s", rec2.Code, rec2.Body.String())
+	}
+
+	// 再 GET 验证段文本已更新
+	rec3 := httptest.NewRecorder()
+	r.ServeHTTP(rec3, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if !strings.Contains(rec3.Body.String(), "修正后的转写文本") {
+		t.Fatalf("段文本未更新: %s", rec3.Body.String())
+	}
+
+	// 不存在的 session → 404
+	rec4 := httptest.NewRecorder()
+	r.ServeHTTP(rec4, httptest.NewRequest(http.MethodPatch,
+		"/api/sessions/"+ids.New().String()+"/transcript", strings.NewReader(`{"segments":[]}`)))
+	if rec4.Code != http.StatusNotFound {
+		t.Fatalf("不存在应 404, got %d", rec4.Code)
+	}
+}
+
+// TestReextract 验证重新提取建 job：成功→job_id 返回 + session 指向新 job（stage=segment, pending）；
+// 无转写 session→409；不存在 session→404。测试无 pool 运行，job 保持 pending 可稳定断言。
+func TestReextract(t *testing.T) {
+	r, sid, sessions := buildEnrichedSession(t)
+	ctx := context.Background()
+
+	// 成功：POST reextract
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost,
+		"/api/sessions/"+sid.String()+"/reextract", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reextract: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		JobID any `json:"job_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp.JobID == nil {
+		t.Fatalf("缺 job_id: %v %s", err, rec.Body.String())
+	}
+
+	// GET 详情：job.stage=segment、status=pending（无 pool，job 保持 pending）
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	body := rec2.Body.String()
+	if !strings.Contains(body, `"stage":"segment"`) {
+		t.Fatalf("job.stage 不是 segment: %s", body)
+	}
+	if !strings.Contains(body, `"status":"pending"`) {
+		t.Fatalf("job.status 不是 pending: %s", body)
+	}
+
+	// 无转写的 session → 409（建一个裸 session，无 transcript）
+	bareSID := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: bareSID, Source: "web_upload", Filename: "bare.wav",
+		StoragePath: "/tmp/bare.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec3 := httptest.NewRecorder()
+	r.ServeHTTP(rec3, httptest.NewRequest(http.MethodPost,
+		"/api/sessions/"+bareSID.String()+"/reextract", nil))
+	if rec3.Code != http.StatusConflict {
+		t.Fatalf("无转写应 409, got %d %s", rec3.Code, rec3.Body.String())
+	}
+
+	// 不存在的 session → 404
+	rec4 := httptest.NewRecorder()
+	r.ServeHTTP(rec4, httptest.NewRequest(http.MethodPost,
+		"/api/sessions/"+ids.New().String()+"/reextract", nil))
+	if rec4.Code != http.StatusNotFound {
+		t.Fatalf("不存在应 404, got %d", rec4.Code)
+	}
+}
