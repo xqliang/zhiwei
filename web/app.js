@@ -305,6 +305,40 @@ createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 手动合并 topic（选多个→输新名→复用 /api/topics/merge） ----------
+    // manualMergeMode=选择模式；manualSelected=勾选 id；manualConfirming=已点开始合并→输名。
+    const manualMergeMode = ref(false);
+    const manualSelected = ref([]);
+    const manualMergeName = ref('');
+    const manualConfirming = ref(false);
+    function startManualMerge() {
+      manualMergeMode.value = true; manualSelected.value = []; manualConfirming.value = false; manualMergeName.value = '';
+    }
+    function cancelManualMerge() {
+      manualMergeMode.value = false; manualSelected.value = []; manualConfirming.value = false; manualMergeName.value = '';
+    }
+    function toggleManualSelect(t) {
+      const i = manualSelected.value.indexOf(t.id);
+      if (i >= 0) manualSelected.value.splice(i, 1); else manualSelected.value.push(t.id);
+    }
+    async function applyManualMerge() {
+      const ids = manualSelected.value.slice();
+      if (ids.length < 2) { toast.value = '至少选 2 个主题'; return; }
+      const name = manualMergeName.value.trim();
+      if (!name) { toast.value = '请输入规范名'; return; }
+      try {
+        await api('POST', '/api/topics/merge', { groups: [{ canonical_name: name, member_ids: ids }] });
+        cancelManualMerge();
+        await loadTopics();
+      } catch (e) { showError(e); }
+    }
+    // startManualConfirm：从「开始合并」进入输名阶段，默认填首个选中 topic 的名。
+    function startManualConfirm() {
+      manualConfirming.value = true;
+      const first = topics.value.find(t => t.id === manualSelected.value[0]);
+      manualMergeName.value = (first && first.name) || '';
+    }
+
     // ---------- 待办 ----------
     const todos = ref([]);
     const doneCollapsed = ref(true);
@@ -358,7 +392,7 @@ createApp({
     function switchTab(name) {
       tab.value = name;
       if (name === 'timeline') loadSessions();
-      if (name === 'topics') { topicDetail.value = null; renaming.value = null; loadTopics(); }
+      if (name === 'topics') { topicDetail.value = null; renaming.value = null; cancelManualMerge(); loadTopics(); }
       if (name === 'todos') { loadTopics(); loadTodos(); }
     }
     loadSessions();
@@ -376,6 +410,7 @@ createApp({
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
       loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, toggleMergeMember, applyMerge,
+      manualMergeMode, manualSelected, manualMergeName, manualConfirming, startManualMerge, cancelManualMerge, toggleManualSelect, applyManualMerge, startManualConfirm,
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos,
       loadTodos, setTodoStatus, jumpToSession,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,

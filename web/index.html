@@ -181,6 +181,7 @@
         <b>主题</b>
         <div style="display:flex; gap:6px">
           <button class="mini" @click="startConsolidate">智能合并</button>
+          <button class="mini" @click="startManualMerge">手动合并</button>
           <button class="primary" style="padding:6px 16px; font-size:14px" @click="showNewTopic = !showNewTopic">＋ 新建</button>
         </div>
       </div>
@@ -206,15 +207,31 @@
       <div v-if="!topics.length" class="card empty">还没有主题。录音抽取后会自动归类，也可以手动新建。</div>
       <div class="card" v-for="t in topics" :key="t.id">
         <div class="kv">
-          <div style="cursor:pointer" @click="openTopic(t.id)">
-            <b>{{ t.name }}</b>
-            <span v-if="t.status==='suggested'" class="badge suggested">待确认</span>
-            <span v-if="suspectOf(t, topics)" class="badge" style="background:#fef3c7;color:#92400e">疑似可合并: {{ suspectOf(t, topics) }}</span>
-            <div class="muted">{{ t.memory_count }} 条记忆 · {{ t.open_todo_count }} 个进行中待办</div>
+          <div style="display:flex; align-items:center; gap:8px">
+            <input v-if="manualMergeMode" type="checkbox" :checked="manualSelected.includes(t.id)" @change="toggleManualSelect(t)">
+            <div style="cursor:pointer" @click="!manualMergeMode && openTopic(t.id)">
+              <b>{{ t.name }}</b>
+              <span v-if="t.status==='suggested'" class="badge suggested">待确认</span>
+              <span v-if="suspectOf(t, topics)" class="badge" style="background:#fef3c7;color:#92400e">疑似可合并: {{ suspectOf(t, topics) }}</span>
+              <div class="muted">{{ t.memory_count }} 条记忆 · {{ t.open_todo_count }} 个进行中待办</div>
+            </div>
           </div>
-          <div style="display:flex; gap:6px">
+          <div v-if="!manualMergeMode" style="display:flex; gap:6px">
             <button class="mini" v-if="t.status==='suggested'" @click="confirmTopic(t)">确认</button>
             <button class="mini" @click="dismissTopic(t)">忽略</button>
+          </div>
+        </div>
+      </div>
+      <div class="card" v-if="manualMergeMode" style="position:sticky; bottom:0">
+        <div class="kv">
+          <div class="muted">已选 {{ manualSelected.length }} 个主题</div>
+          <div style="display:flex; gap:8px">
+            <button v-if="!manualConfirming" class="primary" style="padding:6px 14px" :disabled="manualSelected.length < 2" @click="startManualConfirm">开始合并</button>
+            <template v-else>
+              <input class="txt" v-model="manualMergeName" placeholder="规范名（必填）" style="width:auto">
+              <button class="primary" style="padding:6px 14px" @click="applyManualMerge">确认合并</button>
+            </template>
+            <button class="mini" @click="cancelManualMerge">取消</button>
           </div>
         </div>
       </div>
@@ -338,6 +355,6 @@
   </div>
 </div>
 
-<script src="/app/app.01a315a4.js"></script>
+<script src="/app/app.8f1f65f0.js"></script>
 </body>
 </html>
