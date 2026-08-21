@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
@@ -24,26 +25,47 @@ type QueryHandler struct {
 func RegisterQuery(r chi.Router, h *QueryHandler) {
 	r.Get("/api/sessions", h.ListSessions)
 	r.Get("/api/sessions/{id}", h.GetSession)
+	r.Delete("/api/sessions/{id}", h.DeleteSession)
 	r.Get("/api/sessions/{id}/audio", h.ServeAudio)
 	r.Post("/api/jobs/{id}/retry", h.RetryJob)
 }
 
+// ListSessions 列出会话，每行富化 asr_preview（转写前 120 字）+ memory_count +
+// todo_count（单 SQL 相关子查询，避免 N+1），并附最新 job 状态（处理进度）。
+// asr_full 不外泄（json:"-"），仅截断后以 asr_preview 输出。
 func (h *QueryHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 	limit := intQuery(r, "limit", 50)
-	list, err := h.Sessions.List(r.Context(), limit, 0)
+	type row struct {
+		repo.AudioSession
+		JobStatus   string `json:"job_status,omitempty"`
+		JobStage    string `json:"job_stage,omitempty"`
+		MemoryCount int    `db:"memory_count" json:"memory_count"`
+		TodoCount   int    `db:"todo_count" json:"todo_count"`
+		AsrFull     string `db:"asr_full" json:"-"` // GROUP_CONCAT 全文，截断后给 AsrPreview
+		AsrPreview  string `db:"-" json:"asr_preview"`
+	}
+	var rows []row
+	err := h.Sessions.DB.SelectContext(r.Context(), &rows, `
+SELECT s.*,
+  (SELECT COUNT(*) FROM memory WHERE session_id = s.id AND status = 'active') AS memory_count,
+  (SELECT COUNT(*) FROM todo WHERE source_memory_id IN (SELECT id FROM memory WHERE session_id = s.id) AND status != 'dismissed') AS todo_count,
+  (SELECT IFNULL(GROUP_CONCAT(seg.text ORDER BY seg.start_ms SEPARATOR ''), '')
+     FROM transcript_segment seg JOIN transcript tr ON tr.id = seg.transcript_id
+     WHERE tr.session_id = s.id) AS asr_full
+FROM audio_session s ORDER BY s.id DESC LIMIT ?`, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// 附带每个 session 最新 job 状态，前端展示处理进度
-	type row struct {
-		repo.AudioSession
-		JobStatus string `json:"job_status,omitempty"`
-		JobStage  string `json:"job_stage,omitempty"`
-	}
-	out := make([]row, len(list))
-	for i, s := range list {
-		out[i] = row{AudioSession: s}
+	out := make([]row, len(rows))
+	for i, s := range rows {
+		out[i] = s
+		// asr_full 截 120 runes（够卡片预览；GROUP_CONCAT 默认上限 1024 够取前 120）
+		if rs := []rune(s.AsrFull); len(rs) > 120 {
+			out[i].AsrPreview = string(rs[:120]) + "…"
+		} else {
+			out[i].AsrPreview = s.AsrFull
+		}
 		if s.JobID != nil {
 			if j, err := h.Jobs.Get(r.Context(), *s.JobID); err == nil {
 				out[i].JobStatus, out[i].JobStage = j.Status, j.Stage
@@ -179,6 +201,31 @@ func intOffset(r *http.Request) int {
 		return 0
 	}
 	return n
+}
+
+// DeleteSession 硬删除 session + 派生数据（级联单事务）+ 音频文件 best-effort。
+// 2 步确认由前端；后端：Get 不存在→404，删成功→204。音频文件库外删，失败仅 log 不阻断
+// （DB 已删，文件残留可接受；区别于 DB 事务的强一致）。StoragePath 是 json:"-" 不外泄，
+// 此处仅服务端读用于删文件。
+func (h *QueryHandler) DeleteSession(w http.ResponseWriter, r *http.Request) {
+	sid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	s, err := h.Sessions.Get(r.Context(), sid)
+	if err != nil {
+		http.Error(w, "session 不存在", http.StatusNotFound)
+		return
+	}
+	if err := h.Sessions.Delete(r.Context(), sid, s.JobID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if s.StoragePath != "" {
+		_ = os.Remove(s.StoragePath) // best-effort：失败不阻断（DB 已删）
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

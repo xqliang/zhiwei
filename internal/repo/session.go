@@ -57,3 +57,35 @@ func (r *SessionRepo) SetJobID(ctx context.Context, id ids.ID, jobID ids.ID) err
 	_, err := r.DB.ExecContext(ctx, `UPDATE audio_session SET job_id = ? WHERE id = ?`, jobID.Int64(), id.Int64())
 	return err
 }
+
+// Delete 硬删除 session + 全部派生数据（单事务级联）。音频文件由 handler 库外删（best-effort）。
+// 顺序：关联子表先于主表（子查询依赖主表行仍存在）；各步 target 表 ≠ 子查询 source 表，
+// 无 MySQL「不能在子查询里更新目标表」之限。jobID 非空则一并删 pipeline_job。
+// 注意 job 表实际名为 pipeline_job（见 migrations/000001）。
+func (r *SessionRepo) Delete(ctx context.Context, id ids.ID, jobID *ids.ID) error {
+	tx, err := r.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	steps := []string{
+		`DELETE FROM memory_topic WHERE memory_id IN (SELECT id FROM memory WHERE session_id = ?)`,
+		`DELETE FROM todo_topic WHERE todo_id IN (SELECT id FROM todo WHERE source_memory_id IN (SELECT id FROM memory WHERE session_id = ?))`,
+		`DELETE FROM todo WHERE source_memory_id IN (SELECT id FROM memory WHERE session_id = ?)`,
+		`DELETE FROM memory WHERE session_id = ?`,
+		`DELETE FROM transcript_segment WHERE transcript_id IN (SELECT id FROM transcript WHERE session_id = ?)`,
+		`DELETE FROM transcript WHERE session_id = ?`,
+		`DELETE FROM audio_session WHERE id = ?`,
+	}
+	for _, q := range steps {
+		if _, err := tx.ExecContext(ctx, q, id.Int64()); err != nil {
+			return err
+		}
+	}
+	if jobID != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM pipeline_job WHERE id = ?`, jobID.Int64()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

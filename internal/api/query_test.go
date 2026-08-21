@@ -158,3 +158,122 @@ func TestServeAudio(t *testing.T) {
 		t.Fatalf("不存在应 404, got %d", rec2.Code)
 	}
 }
+
+// buildEnrichedSession 构造 1 session + 1 段转写 + 1 active memory + 1 confirmed todo，
+// 供 ListSessions 富化与 DeleteSession 级联测试共用。返回 router+session id+SessionRepo
+// （含 DB 句柄供断言）。
+func buildEnrichedSession(t *testing.T) (http.Handler, ids.ID, *repo.SessionRepo) {
+	_ = ids.Init(1)
+	db, err := repo.NewDB(repo.TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	jobs := &repo.JobRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	memories := &repo.MemoryRepo{DB: db}
+	todos := &repo.TodoRepo{DB: db}
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "enriched.wav",
+		StoragePath: "/tmp/enriched.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	conf := 0.95
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1",
+			Text: "明天记得发邮件确认设计稿", StartMS: 0, EndMS: 1000, Confidence: &conf},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventAt := time.Now()
+	_ = memories.InsertExt(ctx, db, []*repo.Memory{{
+		Type: "event", Title: "富化用例发邮件", Content: "明天记得给 Tom 发邮件",
+		EpistemicType: "observed", Confidence: 0.9, SessionID: sid,
+		EventAt: &eventAt, Status: "active",
+	}})
+	memRows, _ := memories.ListBySession(ctx, sid)
+	_ = todos.InsertExt(ctx, db, []*repo.Todo{{
+		Title: "富化用例给 Tom 发邮件", SourceMemoryID: &memRows[0].ID, Status: "confirmed", Confidence: 0.9,
+	}})
+
+	r := chi.NewRouter()
+	RegisterQuery(r, &QueryHandler{
+		Sessions: sessions, Jobs: jobs, Transcripts: transcripts, Memories: memories, Todos: todos,
+	})
+	return r, sid, sessions
+}
+
+// TestListSessionsEnriched 验证 ListSessions 富化字段：asr_preview 含转写文本、
+// memory_count/todo_count 各 1。按 session id 精确定位，避免脏库其他行干扰。
+func TestListSessionsEnriched(t *testing.T) {
+	r, sid, _ := buildEnrichedSession(t)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Sessions []struct {
+			ID          string `json:"id"`
+			AsrPreview  string `json:"asr_preview"`
+			MemoryCount int    `json:"memory_count"`
+			TodoCount   int    `json:"todo_count"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v %s", err, rec.Body.String())
+	}
+	found := false
+	for _, s := range resp.Sessions {
+		if s.ID == sid.String() {
+			found = true
+			if !strings.Contains(s.AsrPreview, "明天记得发邮件") {
+				t.Fatalf("asr_preview=%s", s.AsrPreview)
+			}
+			if s.MemoryCount != 1 {
+				t.Fatalf("memory_count=%d, want 1", s.MemoryCount)
+			}
+			if s.TodoCount != 1 {
+				t.Fatalf("todo_count=%d, want 1", s.TodoCount)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("session %s missing: %s", sid, rec.Body.String())
+	}
+}
+
+// TestDeleteSession 验证 DELETE session 级联：audio_session/memory/transcript/todo 均删。
+func TestDeleteSession(t *testing.T) {
+	r, sid, sr := buildEnrichedSession(t)
+	ctx := context.Background()
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	// 级联断言：四类行均 0（todo 经 source_memory_id 子查询，memory 删后子查询空→0）
+	checks := []struct{ name, sql string }{
+		{"audio_session", `SELECT COUNT(*) FROM audio_session WHERE id = ?`},
+		{"memory", `SELECT COUNT(*) FROM memory WHERE session_id = ?`},
+		{"transcript", `SELECT COUNT(*) FROM transcript WHERE session_id = ?`},
+		{"todo", `SELECT COUNT(*) FROM todo WHERE source_memory_id IN (SELECT id FROM memory WHERE session_id = ?)`},
+	}
+	for _, c := range checks {
+		var n int
+		if err := sr.DB.GetContext(ctx, &n, c.sql, sid.Int64()); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if n != 0 {
+			t.Fatalf("%s 残留 %d", c.name, n)
+		}
+	}
+}
