@@ -317,19 +317,23 @@ createApp({
         await loadMemories();
         const d = await api('POST', '/api/memories/consolidate', {});
         const titleOf = id => { const m = memories.value.find(x => x.id === id); return m ? m.title : id; };
-        memoryDraft.value = {
-          merges: (d.merges || []).map(g => ({
-            canonical_id: g.canonical_id || '',
-            members: (g.member_ids || []).map(id => ({ id, name: titleOf(id), checked: true })),
-          })),
-          adjustments: (d.adjustments || []).map(a => ({
-            memory_id: a.memory_id, title: titleOf(a.memory_id),
-            kind: a.kind, reason: a.reason,
-            evidence_ids: a.evidence_ids || [],
-            checked: true,
-          })),
-        };
-        if (!memoryDraft.value.merges.length && !memoryDraft.value.adjustments.length) toast.value = '暂无需要整理的记忆';
+        const merges = (d.merges || []).map(g => ({
+          canonical_id: g.canonical_id || '',
+          members: (g.member_ids || []).map(id => ({ id, name: titleOf(id), checked: true })),
+        }));
+        const adjustments = (d.adjustments || []).map(a => ({
+          memory_id: a.memory_id, title: titleOf(a.memory_id),
+          kind: a.kind, reason: a.reason,
+          evidence_ids: a.evidence_ids || [],
+          checked: true,
+        }));
+        if (!merges.length && !adjustments.length) {
+          // 无可整理项：只 toast 提示（3s 自动消失），不弹「确认整理」面板
+          toast.value = '暂无需要整理的记忆';
+          setTimeout(() => { toast.value = ''; }, 3000);
+          return;
+        }
+        memoryDraft.value = { merges, adjustments };
       } catch (e) { showError(e); }
     }
     function toggleMemoryMember(g, id) {
@@ -364,14 +368,20 @@ createApp({
     async function startConsolidate() {
       try {
         const d = await api('POST', '/api/topics/consolidate', {});
-        mergeDraft.value = (d.groups || []).map(g => ({
+        const groups = (d.groups || []).map(g => ({
           canonical_name: g.canonical_name || '',
           members: (g.member_ids || []).map(id => {
             const m = topics.value.find(t => t.id === id);
             return { id, name: m ? m.name : id, checked: true };
           }),
         }));
-        if (!mergeDraft.value.length) toast.value = '暂无需要合并的主题';
+        if (!groups.length) {
+          // 无可合并组：只 toast 提示（3s 自动消失），不弹「确认合并」面板
+          toast.value = '暂无需要合并的主题';
+          setTimeout(() => { toast.value = ''; }, 3000);
+          return;
+        }
+        mergeDraft.value = groups;
       } catch (e) { showError(e); }
     }
     // toggleMergeMember：勾选/取消某组成员（直接翻转 m.checked，Vue 深响应式自动重渲染）。
