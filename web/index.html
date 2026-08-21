@@ -113,11 +113,19 @@
             <div class="kv">
               <div>
                 <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
-                <b>{{ m.title }}</b>
+                <b v-if="!editingMem || editingMem.id !== m.id" @click="startEditMemory(m)" style="cursor:text">{{ m.title }}</b>
+                <input v-else class="txt" v-model="editingMem.title" style="display:inline-block;width:auto">
               </div>
               <button class="mini" @click="dismissMemory(m)" title="忽略此记忆">✕</button>
             </div>
-            <div style="margin:6px 0">{{ m.content }}</div>
+            <div v-if="editingMem && editingMem.id === m.id">
+              <textarea class="txt" v-model="editingMem.content" rows="3" style="margin:6px 0"></textarea>
+              <div style="display:flex; gap:8px; margin-bottom:6px">
+                <button class="primary" style="padding:4px 12px" @click="saveEditMemory(() => reloadSession(detail.session.id))">保存</button>
+                <button class="mini" @click="cancelEditMemory()">取消</button>
+              </div>
+            </div>
+            <div v-else style="margin:6px 0">{{ m.content }}</div>
             <div class="muted">
               重要度 {{ (m.importance ?? 0).toFixed(1) }} · 置信 {{ (m.confidence ?? 0).toFixed(2) }}
               <template v-if="topicChips(m).length">
@@ -234,9 +242,17 @@
       <div class="card" v-for="m in topicDetail.memories" :key="m.id">
         <div>
           <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
-          <b>{{ m.title }}</b>
+          <b v-if="!editingMem || editingMem.id !== m.id" @click="startEditMemory(m)" style="cursor:text">{{ m.title }}</b>
+          <input v-else class="txt" v-model="editingMem.title" style="display:inline-block;width:auto">
         </div>
-        <div style="margin:6px 0">{{ m.content }}</div>
+        <div v-if="editingMem && editingMem.id === m.id">
+          <textarea class="txt" v-model="editingMem.content" rows="3" style="margin:6px 0"></textarea>
+          <div style="display:flex; gap:8px; margin-bottom:6px">
+            <button class="primary" style="padding:4px 12px" @click="saveEditMemory(() => openTopic(topicDetail.topic.id))">保存</button>
+            <button class="mini" @click="cancelEditMemory()">取消</button>
+          </div>
+        </div>
+        <div v-else style="margin:6px 0">{{ m.content }}</div>
         <div class="muted">
           <span v-for="tp in topicChips(m)" :key="tp.id" class="badge" style="background:var(--accent-soft);color:#3730a3;margin-right:4px">{{ tp.name }}</span>
           {{ fmtTime(m.event_at) }}
@@ -322,6 +338,6 @@
   </div>
 </div>
 
-<script src="/app/app.cfa9896b.js"></script>
+<script src="/app/app.01a315a4.js"></script>
 </body>
 </html>

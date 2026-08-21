@@ -71,6 +71,7 @@ createApp({
       if (expandedId.value === id) {
         expandedId.value = null;
         detail.value = null;
+        editingMem.value = null;
         return;
       }
       try {
@@ -86,10 +87,25 @@ createApp({
     // 原始音频流式地址（ ServeAudio 端点）
     function audioUrl(id) { return '/api/sessions/' + id + '/audio'; }
     async function dismissMemory(m) {
+      editingMem.value = null;
       try {
         await api('PATCH', '/api/memories/' + m.id, { status: 'dismissed' });
         detail.value.memories = (detail.value.memories || []).filter(x => x.id !== m.id);
       } catch (e) { showError(e); }
+    }
+    // ---------- 记忆 inplace 编辑（复用 PATCH /api/memories/{id}） ----------
+    // editingMem = {id, title, content}；点 title/content 进入编辑、保存 PATCH、取消还原。
+    const editingMem = ref(null);
+    function startEditMemory(m) { editingMem.value = { id: m.id, title: m.title, content: m.content }; }
+    function cancelEditMemory() { editingMem.value = null; }
+    async function saveEditMemory(reload) {
+      const e = editingMem.value;
+      if (!e || !e.title.trim()) return; // 空 title 不发
+      try {
+        await api('PATCH', '/api/memories/' + e.id, { title: e.title.trim(), content: e.content });
+        editingMem.value = null;
+        if (reload) await reload();
+      } catch (e2) { showError(e2); }
     }
     async function retryJob(id) {
       try {
@@ -190,6 +206,7 @@ createApp({
     function closeTopicDetail() {
       topicDetail.value = null;
       renaming.value = null;
+      editingMem.value = null;
     }
     function startRename(t) { renaming.value = { id: t.id, name: t.name }; }
     async function commitRename() {
@@ -355,7 +372,7 @@ createApp({
     return {
       tab, toast, switchTab,
       fmtTime, fmtDue, typeMeta, statusText, spClass,
-      sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissMemory, retryJob,
+      sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissMemory, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
       loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, toggleMergeMember, applyMerge,
