@@ -95,7 +95,11 @@ createApp({
       try {
         await api('DELETE', '/api/sessions/' + s.id);
         deletingSessionId.value = null;
-        if (expandedId.value === s.id) { expandedId.value = null; detail.value = null; }
+        // 删的是当前展开的 session→清展开态 + 其上残留的编辑/删除态（与 toggleSession 折叠清理对齐）
+        if (expandedId.value === s.id) {
+          expandedId.value = null; detail.value = null;
+          editingMem.value = null; editingTodo.value = null; deletingTodoId.value = null;
+        }
         await loadSessions();
       } catch (e) { showError(e); }
     }
@@ -412,7 +416,7 @@ createApp({
     }
     // ---------- 待办 inplace 编辑 + 删除 ----------
     const editingTodo = ref(null);
-    function startEditTodo(t) { editingTodo.value = { id: t.id, title: t.title }; }
+    function startEditTodo(t) { deletingTodoId.value = null; editingTodo.value = { id: t.id, title: t.title }; }
     function cancelEditTodo() { editingTodo.value = null; }
     async function saveEditTodo(reload) {
       const e = editingTodo.value;
@@ -422,7 +426,7 @@ createApp({
     }
     // 2 步行内删除确认：deletingTodoId 存正待确认删除的 todo id
     const deletingTodoId = ref(null);
-    function askDeleteTodo(t) { deletingTodoId.value = t.id; }
+    function askDeleteTodo(t) { editingTodo.value = null; deletingTodoId.value = t.id; }
     function cancelDeleteTodo() { deletingTodoId.value = null; }
     async function confirmDeleteTodo(t, reload) {
       try { await api('DELETE', '/api/todos/' + t.id); deletingTodoId.value = null; if (reload) await reload(); }
