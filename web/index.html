@@ -82,9 +82,15 @@
         <div class="kv">
           <div>
             <b>{{ s.filename }}</b>
-            <div class="muted">{{ fmtTime(s.created_at) }} · {{ s.source === 'web_record' ? '录音' : '上传' }}</div>
+            <div v-if="s.asr_preview" class="muted">{{ s.asr_preview }}</div>
+            <div class="muted">{{ fmtTime(s.created_at) }} · {{ s.source === 'web_record' ? '录音' : '上传' }} · {{ s.memory_count }} 条记忆 · {{ s.todo_count }} 个待办</div>
           </div>
-          <span class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
+          <div style="display:flex; align-items:center; gap:6px" @click.stop>
+            <span class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
+            <button v-if="deletingSessionId !== s.id" class="mini" @click="askDeleteSession(s)">删除</button>
+            <button v-if="deletingSessionId === s.id" class="mini" style="background:#fee2e2;color:#991b1b" @click="confirmDeleteSession(s)">确认删除?</button>
+            <button v-if="deletingSessionId === s.id" class="mini" @click="cancelDeleteSession()">取消</button>
+          </div>
         </div>
       </div>
 
@@ -383,6 +389,6 @@
   </div>
 </div>
 
-<script src="/app/app.f9d56ced.js"></script>
+<script src="/app/app.c652b6a7.js"></script>
 </body>
 </html>

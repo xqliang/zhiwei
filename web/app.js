@@ -74,6 +74,7 @@ createApp({
         editingMem.value = null;       // T1 已有
         editingTodo.value = null;      // 新增
         deletingTodoId.value = null;  // 新增
+        deletingSessionId.value = null;  // T6: 折叠时清理删除态
         return;
       }
       try {
@@ -85,6 +86,18 @@ createApp({
     async function reloadSession(id) {
       try { detail.value = await api('GET', '/api/sessions/' + id); }
       catch (e) { showError(e); }
+    }
+    // ---------- session 删除（硬删级联，2 步确认） ----------
+    const deletingSessionId = ref(null);
+    function askDeleteSession(s) { deletingSessionId.value = s.id; }
+    function cancelDeleteSession() { deletingSessionId.value = null; }
+    async function confirmDeleteSession(s) {
+      try {
+        await api('DELETE', '/api/sessions/' + s.id);
+        deletingSessionId.value = null;
+        if (expandedId.value === s.id) { expandedId.value = null; detail.value = null; }
+        await loadSessions();
+      } catch (e) { showError(e); }
     }
     // 原始音频流式地址（ ServeAudio 端点）
     function audioUrl(id) { return '/api/sessions/' + id + '/audio'; }
@@ -427,7 +440,7 @@ createApp({
     // ---------- 标签页切换 ----------
     function switchTab(name) {
       tab.value = name;
-      if (name === 'timeline') loadSessions();
+      if (name === 'timeline') { deletingSessionId.value = null; loadSessions(); }
       if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; cancelManualMerge(); loadTopics(); }
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; loadTopics(); loadTodos(); }
     }
@@ -442,7 +455,7 @@ createApp({
     return {
       tab, toast, switchTab,
       fmtTime, fmtDue, typeMeta, statusText, spClass,
-      sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissMemory, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory,
+      sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissMemory, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, renaming,
       loadTopics, openTopic, closeTopicDetail, confirmTopic, dismissTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, toggleMergeMember, applyMerge, deletingTopicId, askDeleteTopic, cancelDeleteTopic, confirmDeleteTopic,
