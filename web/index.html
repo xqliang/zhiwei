@@ -114,7 +114,10 @@
 
         <!-- memory 卡片 -->
         <template v-if="detail.memories && detail.memories.length">
-          <div class="todo-group-title">提取的记忆</div>
+          <div class="kv" style="margin-top:6px">
+            <div class="todo-group-title" style="margin:0">提取的记忆</div>
+            <button class="mini" @click="startMemoryConsolidate">记忆整理</button>
+          </div>
           <div class="card" v-for="m in detail.memories" :key="m.id" style="margin:6px 0; position:relative">
             <div class="kv">
               <div>
@@ -145,6 +148,29 @@
             </div>
           </div>
         </template>
+
+        <!-- 记忆整理草稿（D2） -->
+        <div class="card" v-if="memoryDraft">
+          <div class="todo-group-title">记忆整理提议（编辑后确认）</div>
+          <div v-if="!memoryDraft.merges.length && !memoryDraft.adjustments.length" class="muted">暂无可整理项</div>
+          <div v-if="memoryDraft.merges.length" class="muted" style="margin-bottom:4px">合并组</div>
+          <div v-for="(g, gi) in memoryDraft.merges" :key="'mg'+gi" style="margin-bottom:12px; padding-bottom:10px; border-bottom:1px dashed var(--border)">
+            <select class="mini" v-model="g.canonical_id" style="margin-bottom:6px">
+              <option v-for="m in g.members" :key="m.id" :value="m.id">保留: {{ m.name }}</option>
+            </select>
+            <div v-for="m in g.members" :key="m.id" class="muted" style="margin:2px 0">
+              <label><input type="checkbox" :checked="m.checked" @change="toggleMemoryMember(g, m.id)"> {{ m.name }}</label>
+            </div>
+          </div>
+          <div v-if="memoryDraft.adjustments.length" class="muted" style="margin-bottom:4px">置信度调整</div>
+          <div v-for="(a, ai) in memoryDraft.adjustments" :key="'ma'+ai" class="muted" style="margin:2px 0">
+            <label><input type="checkbox" :checked="a.checked" @change="toggleMemoryAdjustment(a)"> {{ a.title }} · {{ a.kind }}<span v-if="a.reason"> — {{ a.reason }}</span></label>
+          </div>
+          <div style="display:flex; gap:8px; margin-top:8px">
+            <button class="primary" @click="applyMemoryConsolidation">确认整理</button>
+            <button class="mini" @click="memoryDraft = null">取消</button>
+          </div>
+        </div>
 
         <!-- todo 卡片（只读，操作去待办页） -->
         <template v-if="detail.todos && detail.todos.length">
@@ -389,6 +415,6 @@
   </div>
 </div>
 
-<script src="/app/app.0217419c.js"></script>
+<script src="/app/app.3de96b0f.js"></script>
 </body>
 </html>

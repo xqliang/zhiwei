@@ -63,6 +63,12 @@ func main() {
 		log.Fatal("读取合并 prompt 失败: ", err)
 	}
 
+	// memory 整理 prompt（版本化文件，MemoryHandler.Consolidate 用）
+	memoryConsolidateBytes, err := os.ReadFile("prompts/memory_consolidate_v1.md")
+	if err != nil {
+		log.Fatal("读取记忆整理 prompt 失败: ", err)
+	}
+
 	// pipeline 装配：ASR 用 StepFun realtime（见 asr-protocol-notes.md），
 	// LLM 走 Ark OpenAI 兼容接口（Tier 1 flash）
 	asr := provider.NewStepFunASR(cfg.StepFunASREndpoint, cfg.StepFunAPIKey)
@@ -93,7 +99,10 @@ func main() {
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos,
 	})
-	api.RegisterMemory(r, &api.MemoryHandler{Memories: memories, Topics: topics, MemoryTopics: memoryTopics})
+	api.RegisterMemory(r, &api.MemoryHandler{
+		Memories: memories, Topics: topics, MemoryTopics: memoryTopics,
+		LLM: llm, LLMModel: cfg.LLMFastModel, ConsolidatePrompt: string(memoryConsolidateBytes),
+	})
 	api.RegisterTodo(r, &api.TodoHandler{Todos: todos, TodoTopics: todoTopics, Topics: topics})
 	api.RegisterTopic(r, &api.TopicHandler{
 		Topics: topics, Memories: memories, Todos: todos,

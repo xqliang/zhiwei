@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"testing"
 
 	"zhiwei/internal/ids"
@@ -38,17 +39,17 @@ func newExtractDeps(t *testing.T, llm provider.LLMProvider) StageDeps {
 		t.Fatal(err)
 	}
 	return StageDeps{
-		Sessions:      &repo.SessionRepo{DB: db},
-		Transcripts:   &repo.TranscriptRepo{DB: db},
-		DB:            db,
-		Memories:      &repo.MemoryRepo{DB: db},
-		Todos:         &repo.TodoRepo{DB: db},
-		Topics:        &repo.TopicRepo{DB: db},
-		MemoryTopics:  &repo.MemoryTopicRepo{DB: db},
-		TodoTopics:    &repo.TodoTopicRepo{DB: db},
-		LLM:           llm,
-		LLMModel:      "fake-model",
-		Prompt:        "测试 system prompt",
+		Sessions:     &repo.SessionRepo{DB: db},
+		Transcripts:  &repo.TranscriptRepo{DB: db},
+		DB:           db,
+		Memories:     &repo.MemoryRepo{DB: db},
+		Todos:        &repo.TodoRepo{DB: db},
+		Topics:       &repo.TopicRepo{DB: db},
+		MemoryTopics: &repo.MemoryTopicRepo{DB: db},
+		TodoTopics:   &repo.TodoTopicRepo{DB: db},
+		LLM:          llm,
+		LLMModel:     "fake-model",
+		Prompt:       "测试 system prompt",
 		// PromptVersion 与生产对齐（cmd/zhiwei-server/main.go 用 extraction_v2.md），
 		// 避免 trace 里记的版本与线上不一致（评审 M3）。
 		PromptVersion: "extraction_v2",
@@ -78,6 +79,19 @@ WHERE user_id = 1 AND name IN (?, ?) AND status IN ('active','suggested')`,
 UPDATE todo SET status='dismissed'
 WHERE user_id = 1 AND title = ? AND status IN ('suggested','confirmed')`,
 		"给 Tom 发邮件"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 预清理：dismiss 其他 session 残留的同名 active memory
+	// （给 Tom 发邮件 / 学习 Rust / 给 Tom 发邮件(改名)）。
+	// D1 佐证去重按归一化标题跨 session 比对 active memory，残留的 active memory 会让
+	// 本 session 候选被佐证跳过、破坏既有断言（memory 数=2）；与上面 topic/todo 预清理同理。
+	// 「给 Tom 发邮件(改名)」专供 RerunPreservesUserLinks 漂移重跑：残留的改名 memory
+	// 会让漂移候选被佐证跳过、找不到「给 Tom 发邮件(改名)」memory。
+	if _, err := d.Memories.DB.ExecContext(ctx, `
+UPDATE memory SET status='dismissed'
+WHERE user_id = 1 AND title IN (?, ?, ?) AND status = 'active'`,
+		"给 Tom 发邮件", "学习 Rust", "给 Tom 发邮件(改名)"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -567,5 +581,96 @@ func TestStageExtractDedupTodoByTitle(t *testing.T) {
 	mems, _ := d.Memories.ListBySession(ctx, sidB)
 	if len(mems) != 2 {
 		t.Fatalf("session B memories = %d, want 2（去重不挡 memory）", len(mems))
+	}
+}
+
+// fakeCorroborateLLM 专供 D1 佐证去重测试：产出 1 条候选「学 Rust」(is_todo，标题归一后
+// ="学rust"，与预置 active memory「学Rust」撞) + 建议新主题「Rust 进阶（佐证fixture）」。
+// 独立于 fakeExtractLLM，避免污染其它 extract 测试。
+type fakeCorroborateLLM struct{}
+
+func (f *fakeCorroborateLLM) Chat(_ context.Context, _ provider.ChatRequest) (provider.ChatResponse, error) {
+	return provider.ChatResponse{Content: `{"candidates":[
+	  {"type":"fact","title":"学 Rust","content":"用户在学 Rust 打算三个月读完一本书",
+	   "epistemic_type":"observed","importance":0.7,"confidence":0.9,
+	   "is_todo":true,"todo_due":null,"topics":[{"suggested_name":"Rust 进阶（佐证fixture）"}],"block_index":1}
+	]}`, TotalTokens: 500}, nil
+}
+
+// TestStageExtractMemoryCorroboration 验证 D1：预置 active memory「学Rust」(confidence 0.80)，
+// 新 session 抽取候选「学 Rust」(归一后同为 学rust) → 不增 memory 行、旧 memory confidence=0.85、
+// 旧 memory 获候选 topic 关联；且佐证候选(is_todo)不产 todo（todo 守卫）。
+// 必须用不同 session 预置 old memory（本 session 旧 memory 已在 tx 内被 DeleteBySessionExt 删）。
+func TestStageExtractMemoryCorroboration(t *testing.T) {
+	llm := &fakeCorroborateLLM{}
+	d := newExtractDeps(t, llm)
+	sidB, _ := setupExtractFixture(t, &d) // session B：被抽取会话（含预清理）
+	ctx := context.Background()
+
+	// 预清理：脏库重跑时残留的 active「学Rust」记忆 / open「学 Rust」todo /
+	// 「Rust 进阶（佐证fixture）」topic 会让断言不稳，先统一 dismiss/delete。
+	if _, err := d.Memories.DB.ExecContext(ctx,
+		`UPDATE memory SET status='dismissed' WHERE user_id=1 AND title='学Rust' AND status='active'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Todos.DB.ExecContext(ctx,
+		`UPDATE todo SET status='dismissed' WHERE user_id=1 AND title='学 Rust' AND status IN ('suggested','confirmed')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Topics.DB.ExecContext(ctx,
+		`UPDATE topic SET status='dismissed' WHERE user_id=1 AND name='Rust 进阶（佐证fixture）' AND status IN ('active','suggested')`); err != nil {
+		t.Fatal(err)
+	}
+
+	// 独立 session A：预置 active memory「学Rust」(confidence 0.80)，不挂 topic。
+	// 必须用不同 session：本 session 旧 memory 已在 tx 内 DeleteBySessionExt 删，tx 内读不到。
+	sidA := ids.New()
+	if err := d.Sessions.Create(ctx, &repo.AudioSession{
+		ID: sidA, Source: "web_upload", Filename: "corr.wav",
+		StoragePath: "/tmp/corr.wav", Status: "processing",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldMem := &repo.Memory{
+		Type: "fact", Title: "学Rust", Content: "用户在学 Rust",
+		EpistemicType: "observed", Importance: 0.7, Confidence: 0.80,
+		SessionID: sidA, Status: "active",
+	}
+	if err := d.Memories.InsertExt(ctx, d.DB, []*repo.Memory{oldMem}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 跑 extract（session B）——候选「学 Rust」命中 old memory「学Rust」(归一 = 学rust)
+	handler := BuildStages(d)["extract"]
+	j := &repo.Job{SessionID: sidB, Stage: "extract", Status: "running"}
+	if err := handler(ctx, j, sidB); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	// 断言 1：session B 无新 memory 行（候选被佐证跳过，未插）
+	mems, _ := d.Memories.ListBySession(ctx, sidB)
+	if len(mems) != 0 {
+		t.Fatalf("session B memories = %d, want 0（候选佐证并入 old memory，不增行）", len(mems))
+	}
+	// 断言 2：old memory confidence 0.80 → 0.85（佐证 +0.05）
+	got, _ := d.Memories.Get(ctx, oldMem.ID)
+	if math.Abs(got.Confidence-0.85) > 0.001 {
+		t.Fatalf("old memory confidence = %v, want 0.85", got.Confidence)
+	}
+	// 断言 3：old memory 获候选的 topic 关联（Rust 进阶（佐证fixture））
+	links, _ := d.MemoryTopics.ListByMemoryIDs(ctx, []ids.ID{oldMem.ID})
+	hitTopic := false
+	for _, ti := range links[oldMem.ID] {
+		if ti.Name == "Rust 进阶（佐证fixture）" {
+			hitTopic = true
+		}
+	}
+	if !hitTopic {
+		t.Fatalf("old memory topics = %+v, want 含 Rust 进阶（佐证fixture）", links[oldMem.ID])
+	}
+	// 断言 4：佐证候选(is_todo)不产 todo（守卫 memories[i]==nil → continue）
+	todos, _ := d.Todos.ListBySession(ctx, sidB)
+	if len(todos) != 0 {
+		t.Fatalf("session B todos = %d, want 0（佐证跳过的候选不产 todo）", len(todos))
 	}
 }

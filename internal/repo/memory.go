@@ -52,14 +52,16 @@ type MemoryFilter struct {
 
 type MemoryRepo struct{ DB *sqlx.DB }
 
-// InsertExt 批量插入（ext 传 *sqlx.Tx 即加入事务）。ID 在此生成并回填。
+// InsertExt 批量插入（ext 传 *sqlx.Tx 即加入事务）。ID 在此生成（若调用方未预置）并回填。
 // 必须传 *Memory 指针切片：值拷贝切片收不到回填的 ID。
 func (r *MemoryRepo) InsertExt(ctx context.Context, ext ExecerContext, ms []*Memory) error {
 	if len(ms) == 0 {
 		return nil
 	}
 	for i := range ms {
-		ms[i].ID = ids.New()
+		if ms[i].ID == 0 { // 尊重调用方预置 id（D1 佐证去重需在插入前知道新记忆 id）
+			ms[i].ID = ids.New()
+		}
 		if ms[i].UserID == 0 {
 			ms[i].UserID = 1
 		}
@@ -77,6 +79,31 @@ VALUES (:id, :user_id, :type, :title, :content, :epistemic_type,
 // （extract stage 单事务提交用）。
 func (r *MemoryRepo) DeleteBySessionExt(ctx context.Context, ext ExecerContext, sessionID ids.ID) error {
 	_, err := ext.ExecContext(ctx, `DELETE FROM memory WHERE session_id = ?`, sessionID.Int64())
+	return err
+}
+
+// ListActiveTitlesExt 返回该用户全部 active memory 的 id 与标题（D1 佐证去重比对用）。
+// 事务内调用传 tx（能看到本事务内 DeleteBySessionExt 已删的本 session 旧 memory，
+// 避免重跑时本 session 旧记忆自去重导致幂等失败），事务外调用传 r.DB。
+// 与 TodoRepo.ListOpenTitlesExt 同构（T3）。
+func (r *MemoryRepo) ListActiveTitlesExt(ctx context.Context, q QueryerContext, userID int64) ([]struct {
+	ID    ids.ID `db:"id"`
+	Title string `db:"title"`
+}, error) {
+	var rows []struct {
+		ID    ids.ID `db:"id"`
+		Title string `db:"title"`
+	}
+	err := q.SelectContext(ctx, &rows,
+		`SELECT id, title FROM memory WHERE user_id = ? AND status = 'active'`, userID)
+	return rows, err
+}
+
+// BumpConfidenceExt 原子上调 memory 置信度（佐证 +delta，封顶 0.99）。
+// SQL 原子算术（LEAST），不读-改-写，满足并发安全约束。ext 传 tx 即加入事务。
+func (r *MemoryRepo) BumpConfidenceExt(ctx context.Context, ext ExecerContext, id ids.ID, delta float64) error {
+	_, err := ext.ExecContext(ctx,
+		`UPDATE memory SET confidence = LEAST(confidence + ?, 0.99) WHERE id = ?`, delta, id.Int64())
 	return err
 }
 
@@ -185,4 +212,114 @@ func (r *MemoryRepo) attachTopics(ctx context.Context, rows []MemoryRow) error {
 		rows[i].Topics = m[rows[i].ID]
 	}
 	return nil
+}
+
+// ListActive 返回该用户全部 active 记忆（排除 superseded/dismissed），按 event_at 倒序，
+// 供 D2 整理 LLM 输入。limit 上限保护（默认/上限 500）。
+func (r *MemoryRepo) ListActive(ctx context.Context, userID int64, limit int) ([]Memory, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	var rows []Memory
+	err := r.DB.SelectContext(ctx, &rows,
+		`SELECT * FROM memory WHERE user_id = ? AND status = 'active' ORDER BY event_at DESC LIMIT ?`,
+		userID, limit)
+	return rows, err
+}
+
+// ConsolidationReq 是 D2 整理落库请求（用户编辑后的 LLM 提议）。
+type ConsolidationReq struct {
+	Merges      []MemoryMerge      `json:"merges"`
+	Adjustments []MemoryAdjustment `json:"adjustments"`
+}
+
+// MemoryMerge：语义同一条事实的组。CanonicalID 保留 active，MemberIDs 并入后置 superseded。
+type MemoryMerge struct {
+	CanonicalID ids.ID   `json:"canonical_id"`
+	MemberIDs   []ids.ID `json:"member_ids"`
+}
+
+// MemoryAdjustment：每条记忆的关系判定 + 理由 + 证据 memory id。
+// Kind: corroborate(被佐证更可信)|contradict(被新信息否定)|outdated(被新信息取代应 superseded)。
+type MemoryAdjustment struct {
+	MemoryID    ids.ID   `json:"memory_id"`
+	Kind        string   `json:"kind"`
+	Reason      string   `json:"reason"`
+	EvidenceIDs []ids.ID `json:"evidence_ids"`
+}
+
+// ApplyConsolidation 单事务落库整理：先 merges（member 的 memory_topic 关联迁到 canonical、
+// 删 member 关联、member 置 superseded），后 adjustments（跳过已被 merge 置 superseded 的
+// member；对其余 active 按 kind 规则算 confidence，SQL 原子）。merges 优先避免重复处理。
+// 返回 (被 supersede 的 member 数, 应用的 confidence 调整数)。LLM 只判关系，confidence 数字
+// 由规则算（可审计可复现）。
+func (r *MemoryRepo) ApplyConsolidation(ctx context.Context, req ConsolidationReq) (merged, adjusted int, err error) {
+	tx, err := r.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 先 merges：记录被 supersede 的 member，adjustments 跳过它们
+	superseded := map[ids.ID]bool{}
+	for _, g := range req.Merges {
+		canon := g.CanonicalID
+		for _, mid := range g.MemberIDs {
+			if mid == canon {
+				continue
+			}
+			// member 的 memory_topic 关联迁到 canonical（INSERT IGNORE，PK 去重）
+			if _, err := tx.ExecContext(ctx,
+				`INSERT IGNORE INTO memory_topic (memory_id, topic_id, source)
+				 SELECT ?, topic_id, source FROM memory_topic WHERE memory_id = ?`,
+				canon.Int64(), mid.Int64()); err != nil {
+				return 0, 0, err
+			}
+			// 删 member 的 memory_topic 关联
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM memory_topic WHERE memory_id = ?`, mid.Int64()); err != nil {
+				return 0, 0, err
+			}
+			// member 置 superseded（行保留审计）
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE memory SET status = 'superseded' WHERE id = ?`, mid.Int64()); err != nil {
+				return 0, 0, err
+			}
+			superseded[mid] = true
+			merged++
+		}
+	}
+	// 后 adjustments：跳过已被 merge 置 superseded 的 member，对其余 active 按 kind 算 confidence
+	for _, a := range req.Adjustments {
+		if superseded[a.MemoryID] {
+			continue
+		}
+		switch a.Kind {
+		case "corroborate":
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE memory SET confidence = LEAST(confidence + 0.05, 0.99) WHERE id = ?`,
+				a.MemoryID.Int64()); err != nil {
+				return 0, 0, err
+			}
+		case "contradict":
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE memory SET confidence = GREATEST(confidence - 0.10, 0.10) WHERE id = ?`,
+				a.MemoryID.Int64()); err != nil {
+				return 0, 0, err
+			}
+		case "outdated":
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE memory SET status = 'superseded', confidence = GREATEST(confidence * 0.5, 0.05) WHERE id = ?`,
+				a.MemoryID.Int64()); err != nil {
+				return 0, 0, err
+			}
+		default:
+			continue // 未知 kind 跳过
+		}
+		adjusted++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return merged, adjusted, nil
 }

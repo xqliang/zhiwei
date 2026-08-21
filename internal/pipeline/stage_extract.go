@@ -154,9 +154,29 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 		return 0, false
 	}
 
-	// 4. memory + memory_topic(ai) + 重链 user
-	memories := make([]*repo.Memory, len(gated))
+	// 4. memory + memory_topic(ai) + 重链 user（含 D1 佐证去重）
+	// D1：跨 session 近重复 = 同一事实被再次提及 = 佐证。新候选若归一化标题命中
+	// 已有 active 记忆（或批内已加候选），不增行、上调 canonical 置信度(+0.05 封顶
+	// 0.99)、并把候选 topic 关联并到 canonical。佐证处理延迟到 kept 插入后——批内
+	// canonical 此刻才落库，先 bump 会命中 0 行。必须 tx 内读（ListActiveTitlesExt
+	// 传 tx）：本事务已 DeleteBySessionExt 删了本 session 旧 memory，tx 内读看不到它们，
+	// 避免重跑时本 session 旧记忆自去重致幂等失败（跨 session 旧记忆仍会命中→佐证，可接受）。
+	activeTitles, err := d.Memories.ListActiveTitlesExt(ctx, tx, userID)
+	if err != nil {
+		return fmt.Errorf("读 active memory 标题: %w", err)
+	}
+	memDupSet := map[string]ids.ID{} // normTitle → 已有/批内 canonical memory id
+	for _, at := range activeTitles {
+		memDupSet[repo.NormalizeTitle(at.Title)] = at.ID
+	}
+	memories := make([]*repo.Memory, len(gated)) // 按候选下标；佐证跳过位为 nil
 	resolvedTids := make([][]ids.ID, len(gated)) // 每候选 resolved topic ids（去重有序）
+	type corroboration struct {
+		canonID ids.ID
+		tids    []ids.ID
+	}
+	corroborations := make([]corroboration, 0) // 延迟到 kept 插入后处理
+	var kept []*repo.Memory
 	for i, c := range gated {
 		seen := map[ids.ID]bool{}
 		for _, ref := range refs[i] {
@@ -165,19 +185,47 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 				resolvedTids[i] = append(resolvedTids[i], id)
 			}
 		}
-		memories[i] = &repo.Memory{
+		nk := repo.NormalizeTitle(c.Title)
+		if canonID, hit := memDupSet[nk]; hit {
+			// 命中已有 active 记忆或批内已加候选：不增行，记录佐证（延迟处理）
+			corroborations = append(corroborations, corroboration{canonID: canonID, tids: resolvedTids[i]})
+			continue
+		}
+		// 未命中：建新 memory，预生成 id（供批内去重 dupSet 与延迟佐证引用；InsertExt 尊重非零 id）
+		m := &repo.Memory{
+			ID:   ids.New(),
 			Type: c.Type, Title: c.Title, Content: c.Content,
 			EpistemicType: c.EpistemicType,
-			Importance: c.Importance, Confidence: c.Confidence,
+			Importance:    c.Importance, Confidence: c.Confidence,
 			SessionID: sessionID, TranscriptSegmentIDs: ids.List(c.SegmentIDs),
 			EventAt: &c.EventAt, Status: "active",
 		}
+		memories[i] = m
+		kept = append(kept, m)
+		memDupSet[nk] = m.ID // 批内去重：后续同标题候选命中此 id
 	}
-	if err := d.Memories.InsertExt(ctx, tx, memories); err != nil {
+	if err := d.Memories.InsertExt(ctx, tx, kept); err != nil {
 		return fmt.Errorf("写 memory: %w", err)
+	}
+	// 佐证处理（kept 已插入，批内 canonical 现已存在；跨 session canonical 本就在库）：
+	// 上调 canonical 置信度 + 把候选 topic 关联并入 canonical（INSERT IGNORE，PK 去重）
+	for _, cor := range corroborations {
+		if err := d.Memories.BumpConfidenceExt(ctx, tx, cor.canonID, 0.05); err != nil {
+			return fmt.Errorf("佐证上调 memory %s: %w", cor.canonID, err)
+		}
+		var rows []*repo.MemoryTopicLink
+		for _, tid := range cor.tids {
+			rows = append(rows, &repo.MemoryTopicLink{MemoryID: cor.canonID, TopicID: tid, Source: "ai"})
+		}
+		if err := d.MemoryTopics.InsertExt(ctx, tx, rows); err != nil {
+			return fmt.Errorf("并入候选 topic 到 memory %s: %w", cor.canonID, err)
+		}
 	}
 	var memTopicRows []*repo.MemoryTopicLink
 	for i, c := range gated {
+		if memories[i] == nil {
+			continue // 佐证跳过的候选不产生常规 memory_topic 行（其 topic 已并入 canonical）
+		}
 		k := memory.NaturalKey(c.SegmentIDs, c.Title)
 		seen := map[ids.ID]bool{}
 		for _, tid := range resolvedTids[i] {
@@ -201,9 +249,9 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 	if err != nil {
 		return fmt.Errorf("读 open todo 标题: %w", err)
 	}
-	dupSet := map[string]bool{}
+	todoDupSet := map[string]bool{}
 	for _, ti := range openTitles {
-		dupSet[repo.NormalizeTitle(ti)] = true
+		todoDupSet[repo.NormalizeTitle(ti)] = true
 	}
 
 	// 5. todo + todo_topic(ai) + 重链 user
@@ -217,11 +265,14 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 		if !c.IsTodo || c.TodoStatus == "" {
 			continue
 		}
+		if memories[i] == nil {
+			continue // D1 佐证跳过的候选不产 todo（其语义由 canonical old memory 承载，spec D1.3 注4「可接受」）
+		}
 		nk := repo.NormalizeTitle(c.Title)
-		if dupSet[nk] {
+		if todoDupSet[nk] {
 			continue // 命中已有未关闭 todo，跳过（memory/关联仍由上文处理）
 		}
-		dupSet[nk] = true // 批内去重
+		todoDupSet[nk] = true // 批内去重
 		td := &repo.Todo{
 			Title: c.Title, SourceMemoryID: &memories[i].ID,
 			Status: c.TodoStatus, DueAt: c.TodoDue, Confidence: c.Confidence,
