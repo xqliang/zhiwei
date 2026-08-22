@@ -18,6 +18,8 @@ import (
 	"zhiwei/internal/pipeline"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/storage"
+	"zhiwei/internal/voiceprint"
 )
 
 // promptPath 是抽取 prompt 的版本化文件路径；版本号 = 去掉扩展名的文件名
@@ -35,6 +37,9 @@ func main() {
 	if cfg.StepFunAPIKey == "" {
 		log.Fatal("STEPFUN_API_KEY 未设置：ASR 不可用。请先 source .env（set -a; source .env; set +a）再启动")
 	}
+	if cfg.TOSAccessKey == "" || cfg.TOSSecretKey == "" {
+		log.Fatal("TOS_ACCESS_KEY/TOS_SECRET_KEY 未设置：StepFun 异步文件 ASR 需上传音频到 TOS 换公网 URL")
+	}
 	db, err := repo.NewDB(cfg.MySQLDSN)
 	if err != nil {
 		log.Fatal(err)
@@ -48,6 +53,7 @@ func main() {
 	topics := &repo.TopicRepo{DB: db}
 	memoryTopics := &repo.MemoryTopicRepo{DB: db}
 	todoTopics := &repo.TodoTopicRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
 
 	// 抽取 prompt（版本化文件，运行时读取；版本号见文件名与文件首行）
 	promptBytes, err := os.ReadFile(promptPath)
@@ -69,9 +75,19 @@ func main() {
 		log.Fatal("读取记忆整理 prompt 失败: ", err)
 	}
 
-	// pipeline 装配：ASR 用 StepFun realtime（见 asr-protocol-notes.md），
+	// pipeline 装配：ASR 用 StepFun 异步文件接口（原生时间戳+说话人分离，见 asr-protocol-notes.md），
+	// 音频经火山引擎 TOS 上传换 presigned 公网 URL 喂给 StepFun；
+	// speaker stage 调声纹 sidecar（WeSpeaker+FAISS）做 1:N 检索/登记。
 	// LLM 走 Ark OpenAI 兼容接口（Tier 1 flash）
-	asr := provider.NewStepFunASR(cfg.StepFunASREndpoint, cfg.StepFunAPIKey)
+	tosClient, err := storage.NewTOSClient(storage.TOSConfig{
+		AccessKey: cfg.TOSAccessKey, SecretKey: cfg.TOSSecretKey,
+		Region: cfg.TOSRegion, Bucket: cfg.TOSBucket, Endpoint: cfg.TOSEndpoint, KeyPrefix: cfg.TOSKeyPrefix,
+	})
+	if err != nil {
+		log.Fatal("TOS 客户端构造: ", err)
+	}
+	asr := provider.NewStepFunFileASR(cfg.StepFunASRBase, cfg.StepFunAPIKey, cfg.StepFunASRModel, tosClient, nil)
+	voiceprintCli := voiceprint.NewClient(cfg.VoiceprintSidecarURL)
 	llm := provider.NewArkLLM(cfg.ARKBaseURL, cfg.ARKAPIKey)
 	stages := pipeline.BuildStages(pipeline.StageDeps{
 		Sessions: sessions, Transcripts: transcripts, ASR: asr, DataDir: cfg.DataDir,
@@ -82,8 +98,9 @@ func main() {
 		PromptVersion: promptVersion,
 		ExtractWindow: cfg.ExtractWindow,
 		Gate:          memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
+		Voiceprint: voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
 	})
-	flow := pipeline.Flow{Stages: []string{"asr", "segment", "extract"}}
+	flow := pipeline.Flow{Stages: []string{"asr", "segment", "speaker", "extract"}}
 	pool := pipeline.NewPool(jobs, flow, stages)
 	pool.OnDone(func(ctx context.Context, sid ids.ID) {
 		_ = sessions.UpdateStatus(ctx, sid, "completed")

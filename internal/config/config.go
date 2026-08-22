@@ -28,6 +28,18 @@ type Config struct {
 	ExtractWindow   int     // 抽取窗口切分大小（对话块数），超过则分多次 LLM 调用
 	QualityMinConf  float64 // 质量闸门：候选最低置信度，低于丢弃
 	QualityTodoConf float64 // todo 直接入库为 confirmed 的置信度阈值，低于降级 suggested
+
+	// ---- speaker stage（说话人声纹）----
+	TOSAccessKey        string // 火山引擎 TOS AK（环境变量 TOS_ACCESS_KEY）
+	TOSSecretKey        string // 火山引擎 TOS SK（环境变量 TOS_SECRET_KEY）
+	TOSRegion           string // cn-shanghai
+	TOSBucket           string // user-growth
+	TOSEndpoint         string // tos-cn-shanghai.volces.com
+	TOSKeyPrefix        string // zhiwei/
+	StepFunASRBase      string // https://api.stepfun.com/v1（异步文件 ASR submit/query 基址）
+	StepFunASRModel     string // stepaudio-2.5-asr（ZW_STEPFUN_ASR_MODEL）
+	VoiceprintSidecarURL string // 声纹 sidecar 地址（http://127.0.0.1:8010）
+	VoiceprintThreshold  float64 // 1:N 余弦匹配阈值，低于则视为未命中→自动登记
 }
 
 func getenv(k, def string) string {
@@ -62,6 +74,18 @@ func Load() (*Config, error) {
 		ExtractWindow:   getenvInt("ZW_EXTRACT_WINDOW", 10),
 		QualityMinConf:  getenvFloat("ZW_QUALITY_MIN_CONF", 0.6),
 		QualityTodoConf: getenvFloat("ZW_QUALITY_TODO_CONF", 0.85),
+
+		// ---- speaker stage ----
+		TOSAccessKey:         os.Getenv("TOS_ACCESS_KEY"),
+		TOSSecretKey:         os.Getenv("TOS_SECRET_KEY"),
+		TOSRegion:            getenv("ZW_TOS_REGION", "cn-shanghai"),
+		TOSBucket:            getenv("ZW_TOS_BUCKET", "user-growth"),
+		TOSEndpoint:          getenv("ZW_TOS_ENDPOINT", "tos-cn-shanghai.volces.com"),
+		TOSKeyPrefix:         getenv("ZW_TOS_KEY_PREFIX", "zhiwei/"),
+		StepFunASRBase:       getenv("ZW_STEPFUN_ASR_BASE", "https://api.stepfun.com/v1"),
+		StepFunASRModel:      getenv("ZW_STEPFUN_ASR_MODEL", "stepaudio-2.5-asr"),
+		VoiceprintSidecarURL: getenv("ZW_VOICEPRINT_SIDECAR_URL", "http://127.0.0.1:8010"),
+		VoiceprintThreshold:  getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.5),
 	}, nil
 }
 
