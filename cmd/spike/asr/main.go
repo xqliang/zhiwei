@@ -1,130 +1,144 @@
-// spike/asr 验证 StepFun realtime 转写协议（手动运行，结论见 asr-protocol-notes.md）。
+// spike: 验证 StepFun 异步文件 ASR 端到端（TOS 上传→submit→轮询 query→解析 utterances）。
+//
+// 用法:
+//   STEPFUN_API_KEY=.. TOS_ACCESS_KEY=.. TOS_SECRET_KEY=.. go run ./cmd/spike/asr testdata/speech.wav
+//
+// 目的: 端到端验证 §2.1 的接口契约（result[].utterances[].{text,start_time,end_time,speaker.id}），
+//       确认 parseFileASRResult（internal/provider/asr.go）的解析字段与真实响应一致。
+// 自包含：内联 TOS 上传/presign/删除（用 Task 1 spike 验证过的真实 SDK API）。
 package main
 
 import (
-	"encoding/base64"
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
-	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/volcengine/ve-tos-golang-sdk/v2/tos"
+	"github.com/volcengine/ve-tos-golang-sdk/v2/tos/enum"
 )
 
-const endpoint = "wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime"
-
 func main() {
-	key := os.Getenv("STEPFUN_API_KEY")
-	if key == "" {
-		fmt.Println("STEPFUN_API_KEY 未设置（可从 .env source）")
+	if len(os.Args) < 2 {
+		fmt.Println("用法: STEPFUN_API_KEY=.. TOS_ACCESS_KEY=.. TOS_SECRET_KEY=.. go run ./cmd/spike/asr <wav>")
 		os.Exit(1)
 	}
-	audioPath := os.Args[1]
-	if audioPath == "" {
-		fmt.Println("usage: asr <audio.wav>")
+	apiKey := os.Getenv("STEPFUN_API_KEY")
+	ak, sk := os.Getenv("TOS_ACCESS_KEY"), os.Getenv("TOS_SECRET_KEY")
+	if apiKey == "" || ak == "" || sk == "" {
+		fmt.Println("缺 STEPFUN_API_KEY / TOS_ACCESS_KEY / TOS_SECRET_KEY")
 		os.Exit(1)
 	}
-	audio, err := os.ReadFile(audioPath)
+
+	ctx := context.Background()
+	tosURL := uploadAndPresign(ctx, ak, sk, os.Args[1])
+	fmt.Println("presigned:", tosURL)
+	defer cleanupTOS(ctx, ak, sk, tosKey) // tosKey 由 uploadAndPresign 设置（见下）
+
+	taskID, err := submit(ctx, apiKey, tosURL)
 	if err != nil {
-		fmt.Println("read:", err)
-		os.Exit(1)
+		panic(err)
 	}
-	raw := audio[44:] // 跳过 wav 头拿裸 pcm
+	fmt.Println("task:", taskID)
 
-	conn, _, err := websocket.DefaultDialer.Dial(endpoint,
-		map[string][]string{"Authorization": {"Bearer " + key}})
+	raw, err := poll(ctx, apiKey, taskID)
 	if err != nil {
-		fmt.Println("DIAL FAIL:", err)
-		os.Exit(1)
+		panic(err)
 	}
-	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+	fmt.Println("query raw:", string(raw))
+}
 
-	send := func(v any) {
-		b, _ := json.Marshal(v)
-		if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
-			fmt.Println("write err:", err)
-			os.Exit(1)
-		}
-	}
-	skip := func(want string) bool {
-		for {
-			_, msg, err := conn.ReadMessage()
-			if err != nil {
-				fmt.Println("read err:", err)
-				return false
-			}
-			var ev struct {
-				Type string `json:"type"`
-			}
-			_ = json.Unmarshal(msg, &ev)
-			if ev.Type == want {
-				return true
-			}
-			if ev.Type == "error" {
-				fmt.Println("ERROR:", string(msg))
-				return false
-			}
-		}
-	}
+var tosKey string
 
-	if !skip("session.created") {
-		os.Exit(1)
+func uploadAndPresign(ctx context.Context, ak, sk, localPath string) string {
+	endpoint, region, bucket := "tos-cn-shanghai.volces.com", "cn-shanghai", "user-growth"
+	tosKey = "zhiwei/spike-asr-" + fmt.Sprint(time.Now().UnixNano()) + ".wav"
+	client, err := tos.NewClientV2(endpoint, tos.WithRegion(region),
+		tos.WithCredentialsProvider(tos.NewStaticCredentialsProvider(ak, sk, "")))
+	if err != nil {
+		panic(err)
 	}
-	send(map[string]any{
-		"type": "session.update",
-		"session": map[string]any{
-			"modalities": []string{"text"},
-			"instructions": `你是逐字转写引擎。只输出音频中说话内容的原文，不回答、不确认、不翻译、不解释。` +
-				`多说话人时用 [说话人1] [说话人2] 前缀。`,
-			"input_audio_format": "pcm16",
-		},
+	if _, err := client.PutObjectFromFile(ctx, &tos.PutObjectFromFileInput{
+		PutObjectBasicInput: tos.PutObjectBasicInput{Bucket: bucket, Key: tosKey, ContentType: "audio/wav"},
+		FilePath:            localPath,
+	}); err != nil {
+		panic(fmt.Errorf("上传: %w", err))
+	}
+	out, err := client.PreSignedURL(&tos.PreSignedURLInput{
+		Bucket: bucket, Key: tosKey, HTTPMethod: enum.HttpMethodGet, Expires: 3600,
 	})
-	if !skip("session.updated") {
-		os.Exit(1)
+	if err != nil {
+		panic(fmt.Errorf("presign: %w", err))
 	}
-	// 100ms ≈ 3200 字节一片，模拟流式
-	const chunkBytes = 3200
-	for off := 0; off < len(raw); off += chunkBytes {
-		end := off + chunkBytes
-		if end > len(raw) {
-			end = len(raw)
-		}
-		send(map[string]any{
-			"type":  "input_audio_buffer.append",
-			"audio": base64.StdEncoding.EncodeToString(raw[off:end]),
-		})
-		time.Sleep(30 * time.Millisecond)
-	}
-	send(map[string]any{"type": "input_audio_buffer.commit"})
-	if !skip("input_audio_buffer.committed") {
-		os.Exit(1)
-	}
-	send(map[string]any{"type": "response.create"})
+	return out.SignedUrl
+}
 
-	var text strings.Builder
-	for {
-		_, msg, err := conn.ReadMessage()
+func cleanupTOS(ctx context.Context, ak, sk, _ string) {
+	endpoint, region, bucket := "tos-cn-shanghai.volces.com", "cn-shanghai", "user-growth"
+	client, _ := tos.NewClientV2(endpoint, tos.WithRegion(region),
+		tos.WithCredentialsProvider(tos.NewStaticCredentialsProvider(ak, sk, "")))
+	if client != nil {
+		_, _ = client.DeleteObjectV2(ctx, &tos.DeleteObjectV2Input{Bucket: bucket, Key: tosKey})
+	}
+}
+
+func submit(ctx context.Context, apiKey, audioURL string) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"audio":   map[string]any{"format": "wav", "channel": 1, "rate": 16000, "url": audioURL},
+		"request": map[string]any{"model_name": "stepaudio-2.5-asr", "show_utterances": true, "enable_speaker_info": true},
+	})
+	raw, err := post(ctx, apiKey, "https://api.stepfun.com/v1/audio/asr/file/submit", body)
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil || r.TaskID == "" {
+		return "", fmt.Errorf("submit 响应非法: %s", raw)
+	}
+	return r.TaskID, nil
+}
+
+func poll(ctx context.Context, apiKey, taskID string) ([]byte, error) {
+	for i := 0; i < 150; i++ { // 2s × 150 ≈ 5min
+		if i > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		body, _ := json.Marshal(map[string]string{"task_id": taskID})
+		raw, err := post(ctx, apiKey, "https://api.stepfun.com/v1/audio/asr/file/query", body)
 		if err != nil {
-			fmt.Println("read err:", err)
-			break
+			continue
 		}
-		var ev struct {
-			Type  string `json:"type"`
-			Delta string `json:"delta"`
+		var r struct {
+			Status string `json:"status"`
 		}
-		_ = json.Unmarshal(msg, &ev)
-		switch ev.Type {
-		case "response.audio_transcript.delta":
-			text.WriteString(ev.Delta)
-		case "response.done":
-			fmt.Println("=== 转写结果 ===")
-			fmt.Println(text.String())
-			return
-		case "error":
-			fmt.Println("ERROR EVENT:", string(msg))
-			os.Exit(1)
+		if err := json.Unmarshal(raw, &r); err != nil {
+			continue
+		}
+		fmt.Println("status:", r.Status)
+		if r.Status == "FAILED" {
+			return nil, fmt.Errorf("asr failed: %s", raw)
+		}
+		if r.Status != "PENDING" && r.Status != "RUNNING" {
+			return raw, nil
 		}
 	}
+	return nil, fmt.Errorf("超时（task=%s）", taskID)
+}
+
+func post(ctx context.Context, apiKey, url string, body []byte) ([]byte, error) {
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
