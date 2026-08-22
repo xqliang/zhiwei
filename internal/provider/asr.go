@@ -20,7 +20,7 @@ import (
 type TranscriptPiece struct {
 	SpeakerLabel string // ASR 标签（"1"/"2"/...），空表示未知/单人
 	Text         string
-	StartMS      int64 // 当前 StepFun 方案无时间戳，恒为 0
+	StartMS      int64 // 段起始毫秒。文件 ASR(stepaudio-2.5-asr)返回真实时间戳；旧 realtime 方案恒 0
 	EndMS        int64
 	Confidence   float64
 }
