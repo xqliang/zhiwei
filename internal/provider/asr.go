@@ -43,11 +43,15 @@ func NewStepFunASR(endpoint, apiKey string) *StepFunASR {
 	return &StepFunASR{Endpoint: endpoint, APIKey: apiKey}
 }
 
-// asrInstructions 转写指令。注意：不要用"你是XX引擎"式角色设定，
-// 实测会导致模型复读指令本身；任务式表述稳定（见 asr-protocol-notes.md）。
-const asrInstructions = `你的任务是语音转文字（ASR）。请把音频里从开头到结尾所有人说的话完整逐字转写出来，` +
-	`不要遗漏、不要总结、不要回答、不要解释。输出只有转写文本本身。` +
-	`多人说话时在每句话前加 [说话人1]、[说话人2] 标记。听不清的部分用 [听不清] 代替。`
+// asrInstructions 转写指令。任务式表述（非"你是XX引擎"角色设定——实测角色设定会让模型复读指令）。
+// 让模型按 [spkN][开始秒-结束秒]说话内容 模板输出：说话人按出场顺序标 spk0/spk1…，
+// 时间戳为秒（2 位小数），便于切片与声纹解析。配 ParseTimedSpeakerTranscript 解析。
+// 注：模型常省略时间段的第二层方括号（输出 [spk0]0.00-4.15内容），解析正则已兼容。
+const asrInstructions = `我有个录音，你帮我整理一下。主要就是把不同人的发言时间都给我找出来，告诉我谁在什么时候说了话。
+你需要按着说话人、时间戳的格式来排列结果。其中时间戳包括开始时间和结束时间，要注意开始时间和结束时间的单位为秒，可以精确到小数点后两位，说话人可以按着出场顺序标记成 spk0、spk1、spk2 等等来代替。
+可以参考下面的模板：
+[说话人][开始时间-结束时间]说话内容[说话人][开始时间-结束时间]说话内容...
+注意你只能按着模板输出结果，请勿输出其它无关的信息和内容。`
 
 // Transcribe 实现 ASRProvider：建会话 → 配置 → 分片喂数学频 → 收转写文本 → 解析说话人。
 func (p *StepFunASR) Transcribe(ctx context.Context, audioPath string) ([]TranscriptPiece, error) {
@@ -157,7 +161,7 @@ func (p *StepFunASR) Transcribe(ctx context.Context, audioPath string) ([]Transc
 		case "response.audio_transcript.delta":
 			text.WriteString(ev.Delta)
 		case "response.done":
-			return ParseSpeakerTranscript(text.String()), nil
+			return ParseTimedSpeakerTranscript(text.String()), nil
 		case "error":
 			return nil, fmt.Errorf("asr 服务端错误: %s", string(msg))
 		}
@@ -320,6 +324,51 @@ func (p *StepFunFileASR) do(ctx context.Context, method, url string, body []byte
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
+}
+
+// timedSegPattern 匹配模型按 prompt 输出的说话人时间段标记。
+// 兼容两种写法：[spk0]0.00-4.15（模型常省略时间段方括号）与 [spk0][0.00-4.15]。
+// 组：g1=spk 序号，g2=开始秒，g3=结束秒。
+var timedSegPattern = regexp.MustCompile(`\[spk(\d+)\]\[?(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\]?`)
+
+// ParseTimedSpeakerTranscript 把 realtime 模型按 prompt 输出的
+// [spkN][开始秒-结束秒]说话内容 文本解析成片段（纯函数，可单测）。
+// spk0 → SpeakerLabel "0"；秒（2 位小数）→ StartMS/EndMS（毫秒）；
+// 两个标记之间的文本即该段说话内容；无标记前缀的文本被忽略（模型应全程按模板输出）。
+func ParseTimedSpeakerTranscript(text string) []TranscriptPiece {
+	text = strings.TrimSpace(text)
+	matches := timedSegPattern.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	var out []TranscriptPiece
+	for i, m := range matches {
+		// m: [全匹配起止, g1起止, g2起止, g3起止]
+		spk := text[m[2]:m[3]]
+		startMS := secStrToMS(text[m[4]:m[5]])
+		endMS := secStrToMS(text[m[6]:m[7]])
+		contentStart := m[1] // 当前标记结束位置
+		var contentEnd int
+		if i+1 < len(matches) {
+			contentEnd = matches[i+1][0] // 下一个标记起点
+		} else {
+			contentEnd = len(text)
+		}
+		content := strings.TrimSpace(text[contentStart:contentEnd])
+		if content != "" {
+			out = append(out, TranscriptPiece{SpeakerLabel: spk, Text: content, StartMS: startMS, EndMS: endMS})
+		}
+	}
+	return out
+}
+
+// secStrToMS 把秒字符串（如 "4.15"）转毫秒（int64）。解析失败返回 0。
+func secStrToMS(s string) int64 {
+	var sec float64
+	if _, err := fmt.Sscanf(s, "%f", &sec); err != nil {
+		return 0
+	}
+	return int64(sec * 1000)
 }
 
 // fileASRQueryResponse 对应 StepFun 异步文件 ASR POST /v1/audio/asr/file/query 的响应。

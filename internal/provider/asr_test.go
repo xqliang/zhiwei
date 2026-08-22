@@ -94,6 +94,46 @@ func TestParseFileASRResultMalformed(t *testing.T) {
 	}
 }
 
+func TestParseTimedSpeakerTranscriptNoBrackets(t *testing.T) {
+	// 模型常省略时间段方括号：[spk0]0.00-4.15内容
+	text := "[spk0]0.00-4.15明天记得给汤姆发邮件。"
+	pieces := ParseTimedSpeakerTranscript(text)
+	if len(pieces) != 1 {
+		t.Fatalf("len=%d %+v", len(pieces), pieces)
+	}
+	if pieces[0].SpeakerLabel != "0" || pieces[0].StartMS != 0 || pieces[0].EndMS != 4150 {
+		t.Fatalf("p0=%+v", pieces[0])
+	}
+	if pieces[0].Text != "明天记得给汤姆发邮件。" {
+		t.Fatalf("text=%q", pieces[0].Text)
+	}
+}
+
+func TestParseTimedSpeakerTranscriptMultiSpeaker(t *testing.T) {
+	// 带方括号 + 多人：[spk0][0.00-2.50]你好[spk1][2.50-4.00]再见
+	text := "[spk0][0.00-2.50]你好[spk1][2.50-4.00]再见"
+	pieces := ParseTimedSpeakerTranscript(text)
+	if len(pieces) != 2 {
+		t.Fatalf("len=%d %+v", len(pieces), pieces)
+	}
+	if pieces[0].SpeakerLabel != "0" || pieces[0].StartMS != 0 || pieces[0].EndMS != 2500 || pieces[0].Text != "你好" {
+		t.Fatalf("p0=%+v", pieces[0])
+	}
+	if pieces[1].SpeakerLabel != "1" || pieces[1].StartMS != 2500 || pieces[1].EndMS != 4000 || pieces[1].Text != "再见" {
+		t.Fatalf("p1=%+v", pieces[1])
+	}
+}
+
+func TestParseTimedSpeakerTranscriptEmpty(t *testing.T) {
+	// 无标记 → nil（不 panic）
+	if got := ParseTimedSpeakerTranscript("今天天气不错"); got != nil {
+		t.Fatalf("want nil, got %+v", got)
+	}
+	if got := ParseTimedSpeakerTranscript(""); got != nil {
+		t.Fatalf("want nil, got %+v", got)
+	}
+}
+
 func TestStepFunFileASRTranscribe(t *testing.T) {
 	// 用 httptest 模拟 submit + query；TOS 用假 uploader 返回固定 URL。
 	tosUp := &stubTOS{url: "https://example.com/x.wav"}

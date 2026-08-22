@@ -37,9 +37,6 @@ func main() {
 	if cfg.StepFunAPIKey == "" {
 		log.Fatal("STEPFUN_API_KEY 未设置：ASR 不可用。请先 source .env（set -a; source .env; set +a）再启动")
 	}
-	if cfg.TOSAccessKey == "" || cfg.TOSSecretKey == "" {
-		log.Fatal("TOS_ACCESS_KEY/TOS_SECRET_KEY 未设置：StepFun 异步文件 ASR 需上传音频到 TOS 换公网 URL")
-	}
 	db, err := repo.NewDB(cfg.MySQLDSN)
 	if err != nil {
 		log.Fatal(err)
@@ -75,18 +72,26 @@ func main() {
 		log.Fatal("读取记忆整理 prompt 失败: ", err)
 	}
 
-	// pipeline 装配：ASR 用 StepFun 异步文件接口（原生时间戳+说话人分离，见 asr-protocol-notes.md），
-	// 音频经火山引擎 TOS 上传换 presigned 公网 URL 喂给 StepFun；
-	// speaker stage 调声纹 sidecar（WeSpeaker+FAISS）做 1:N 检索/登记。
+	// pipeline 装配：ASR 默认 realtime（Step Plan WSS + diarization prompt，免 TOS、配额可用）；
+	// ZW_ASR_PROVIDER=file 切回异步文件 ASR（原生 diarization+ms 时间戳，需 TOS 上传换公网 URL，受配额限制）。
 	// LLM 走 Ark OpenAI 兼容接口（Tier 1 flash）
-	tosClient, err := storage.NewTOSClient(storage.TOSConfig{
-		AccessKey: cfg.TOSAccessKey, SecretKey: cfg.TOSSecretKey,
-		Region: cfg.TOSRegion, Bucket: cfg.TOSBucket, Endpoint: cfg.TOSEndpoint, KeyPrefix: cfg.TOSKeyPrefix,
-	})
-	if err != nil {
-		log.Fatal("TOS 客户端构造: ", err)
+	var asr provider.ASRProvider
+	switch cfg.ASRProvider {
+	case "file":
+		if cfg.TOSAccessKey == "" || cfg.TOSSecretKey == "" {
+			log.Fatal("ASR_PROVIDER=file 需 TOS_ACCESS_KEY/TOS_SECRET_KEY 上传音频换公网 URL")
+		}
+		tosClient, err := storage.NewTOSClient(storage.TOSConfig{
+			AccessKey: cfg.TOSAccessKey, SecretKey: cfg.TOSSecretKey,
+			Region: cfg.TOSRegion, Bucket: cfg.TOSBucket, Endpoint: cfg.TOSEndpoint, KeyPrefix: cfg.TOSKeyPrefix,
+		})
+		if err != nil {
+			log.Fatal("TOS 客户端构造: ", err)
+		}
+		asr = provider.NewStepFunFileASR(cfg.StepFunASRBase, cfg.StepFunAPIKey, cfg.StepFunASRModel, tosClient, nil)
+	default:
+		asr = provider.NewStepFunASR(cfg.StepFunASREndpoint, cfg.StepFunAPIKey)
 	}
-	asr := provider.NewStepFunFileASR(cfg.StepFunASRBase, cfg.StepFunAPIKey, cfg.StepFunASRModel, tosClient, nil)
 	voiceprintCli := voiceprint.NewClient(cfg.VoiceprintSidecarURL)
 	llm := provider.NewArkLLM(cfg.ARKBaseURL, cfg.ARKAPIKey)
 	stages := pipeline.BuildStages(pipeline.StageDeps{
