@@ -1,0 +1,96 @@
+// Package voiceprint 封装声纹 sidecar 的 HTTP 调用。
+// sidecar 契约见 docs/superpowers/specs/2026-08-22-speaker-voiceprint-design.md §6.1。
+package voiceprint
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+
+	"zhiwei/internal/ids"
+)
+
+// Client 声纹 sidecar 客户端接口（pipeline/api 注入，测试可 mock）。
+type Client interface {
+	// Embed 把一段音频抽成 256 维声纹向量。
+	Embed(ctx context.Context, audioPath string) ([]float32, error)
+	// Search 用向量检索最相近的说话人；matched 表示 sidecar 是否找到 top-1，
+	// 不代表阈值通过 —— 阈值判定在 Go 侧 pipeline 用 distance 与配置比较后决定。
+	Search(ctx context.Context, vec []float32) (speakerID ids.ID, distance float64, matched bool, err error)
+	// Add 把向量登记到某个说话人名下（自动建档）。
+	Add(ctx context.Context, vec []float32, id ids.ID) error
+	// Remove 删除某个说话人的全部声纹（删除说话人时调用）。
+	Remove(ctx context.Context, id ids.ID) error
+}
+
+// httpClient 是 Client 的默认 HTTP 实现。
+type httpClient struct {
+	BaseURL string
+	hc      *http.Client
+}
+
+// NewClient 构造一个指向 sidecar BaseURL 的客户端，复用 http.DefaultClient。
+func NewClient(baseURL string) Client {
+	return &httpClient{BaseURL: baseURL, hc: http.DefaultClient}
+}
+
+// post 统一处理 JSON 编解码、请求发送与错误封装：
+// body 序列化为请求体，out 非空时把响应体反序列化进去；
+// HTTP >=300 视为错误并带上响应内容，便于排查 sidecar 侧问题。
+func (c *httpClient) post(ctx context.Context, path string, body any, out any) error {
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+path, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("voiceprint %s: http %d: %s", path, resp.StatusCode, raw)
+	}
+	if out != nil {
+		if err := json.Unmarshal(raw, out); err != nil {
+			return fmt.Errorf("voiceprint %s 解析: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func (c *httpClient) Embed(ctx context.Context, audioPath string) ([]float32, error) {
+	var out struct {
+		Vector []float32 `json:"vector"`
+	}
+	if err := c.post(ctx, "/embed", map[string]string{"audio_path": audioPath}, &out); err != nil {
+		return nil, err
+	}
+	return out.Vector, nil
+}
+
+func (c *httpClient) Search(ctx context.Context, vec []float32) (ids.ID, float64, bool, error) {
+	// 注意：speaker_id 用 int64 中转，绕过 ids.ID 的自定义 JSON（sidecar 返回裸数字）。
+	var out struct {
+		SpeakerID int64   `json:"speaker_id"`
+		Distance  float64 `json:"distance"`
+		Matched   bool    `json:"matched"`
+	}
+	if err := c.post(ctx, "/search", map[string][]float32{"vector": vec}, &out); err != nil {
+		return 0, 0, false, err
+	}
+	return ids.ID(out.SpeakerID), out.Distance, out.Matched, nil
+}
+
+func (c *httpClient) Add(ctx context.Context, vec []float32, id ids.ID) error {
+	return c.post(ctx, "/add", map[string]any{"vector": vec, "speaker_id": id.Int64()}, nil)
+}
+
+func (c *httpClient) Remove(ctx context.Context, id ids.ID) error {
+	return c.post(ctx, "/remove", map[string]int64{"speaker_id": id.Int64()}, nil)
+}
