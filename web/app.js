@@ -730,19 +730,23 @@ const app = createApp({
       try {
         await api('POST', '/api/speakers', fd);
         await loadAllSpeakers();
-        enrollOpen.value = false;
+        enrollOpen.value = false;     // 时间线面板的录入表单
+        showEnrollForm.value = false; // 声纹 tab 的录入表单（两处共用 submitEnroll，成功后一并收起）
         toast.value = '已录入说话人'; setTimeout(() => { toast.value = ''; }, 2000);
       } catch (e) { showError(e); }
       finally { enrolling.value = false; }
     }
-    // 改名：点 chip 的 ✎ 进入改名行；保存 PATCH /api/speakers/{id}，成功后重拉详情（面板名同步）+ 全量列表。
-    function startRenameSpeaker(sp) { renamingSpeaker.value = { id: sp.speaker_id, name: sp.name }; }
+    // 改名：点 chip/名字的 ✎ 进入改名行；保存 PATCH /api/speakers/{id}，成功后重拉详情（面板名同步）+ 全量列表。
+    // 说话人对象有两种来源：时间线面板的 detail.speakers 用 speaker_id 字段；声纹 tab 的 allSpeakers 用 id 字段。
+    // 用 `sp.speaker_id || sp.id` 兼容两者（两者都是同一个 speaker 主键，只是响应结构里的字段名不同）。
+    function startRenameSpeaker(sp) { renamingSpeaker.value = { id: sp.speaker_id || sp.id, name: sp.name }; }
     async function commitRenameSpeaker() {
       if (!renamingSpeaker.value || !renamingSpeaker.value.name.trim()) return; // 空名不发
       try {
         await api('PATCH', '/api/speakers/' + renamingSpeaker.value.id, { name: renamingSpeaker.value.name.trim() });
         renamingSpeaker.value = null;
-        await reloadSession(detail.value.session.id);
+        // 时间线面板内改名 → 重拉当前会话，同步转写段徽标名；声纹 tab 无展开会话（detail 为空），跳过重拉。
+        if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
         await loadAllSpeakers();
       } catch (e) { showError(e); }
     }
@@ -751,9 +755,10 @@ const app = createApp({
     async function askDeleteSpeaker(sp) {
       if (!confirm('删除说话人「' + sp.name + '」？关联的转写段将变为未解析。')) return;
       try {
-        await api('DELETE', '/api/speakers/' + sp.speaker_id);
+        await api('DELETE', '/api/speakers/' + (sp.speaker_id || sp.id));
         await loadAllSpeakers();
-        await reloadSession(detail.value.session.id);
+        // 时间线面板删除 → 重拉当前会话让相关段变「未解析」；声纹 tab 无展开会话（detail 为空），跳过。
+        if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
       } catch (e) { showError(e); }
     }
     // 换人：把某转写段改判为另一说话人（修正识别错误）。选「+ 新加…」则转去打开录入表单。
@@ -763,6 +768,101 @@ const app = createApp({
         await api('PATCH', '/api/sessions/' + detail.value.session.id + '/segments/' + sg.id + '/speaker', { speaker_id: val });
         await reloadSession(detail.value.session.id);
       } catch (e) { showError(e); }
+    }
+
+    // ---------- 声纹 tab（名册管理：列表 / 录入 / 改名 / 删除 + 点开看关联录音并按时间段播放） ----------
+    // 复用说话人面板既有能力：allSpeakers / enrollForm / enrolling / submitEnroll / onEnrollDrop、
+    // renamingSpeaker / startRenameSpeaker / commitRenameSpeaker、askDeleteSpeaker、loadAllSpeakers、speakerColor。
+    // 本 tab 独有的临时态集中在此：录入表单开合、当前展开的说话人、其片段列表与播放态。
+    const showEnrollForm = ref(false);    // 声纹 tab 的录入表单开合（与时间线面板的 enrollOpen 相互独立，避免跨 tab 串状态）
+    const expandedSpeakerId = ref(null);  // 当前展开「关联录音」的说话人 id（对应 allSpeakers 里的 sp.id）
+    const speakerSegments = ref([]);      // 当前展开说话人的跨 session 片段列表（GET /api/speakers/{id}/segments）
+    const speakerSegLoading = ref(false); // 片段拉取中（展开按钮上显 spinner）
+    const playingSegId = ref(null);       // 正在播放的 segment_id（对应「播放」按钮高亮）
+    const voiceAudioEl = ref(null);       // 展开区里的 <audio> 元素引用（在 v-for 内，取用见 voiceAudio()）
+
+    // 录入表单开合：已开则收起；打开时清空表单（每次都是干净状态，复用 enrollForm）。
+    // 只翻 showEnrollForm、不动 enrollOpen——否则切回时间线并展开会话时，录入表单会莫名展开。
+    function toggleEnrollForm() {
+      if (showEnrollForm.value) { showEnrollForm.value = false; return; }
+      enrollForm.name = ''; enrollForm.file = null;
+      showEnrollForm.value = true;
+    }
+
+    // Vue3 里放在 v-for 内的模板 ref 会被收集成「数组」；本区同一时刻只展开一个说话人（只挂一个 <audio>），
+    // 取数组首元素即可；同时兼容非数组（万一将来把 <audio> 挪出 v-for）。
+    function voiceAudio() {
+      const r = voiceAudioEl.value;
+      return Array.isArray(r) ? r[0] : r;
+    }
+
+    // 点开/收起某说话人的「关联录音」。展开时拉 GET /api/speakers/{id}/segments
+    //（后端已按录音时间倒序、段序升序返回）；再点同一个 = 收起并清空片段与播放态。
+    async function toggleSpeakerSegments(id) {
+      if (expandedSpeakerId.value === id) {
+        expandedSpeakerId.value = null; speakerSegments.value = []; playingSegId.value = null;
+        return;
+      }
+      expandedSpeakerId.value = id;
+      speakerSegLoading.value = true;
+      speakerSegments.value = [];
+      playingSegId.value = null;
+      try {
+        const d = await api('GET', '/api/speakers/' + id + '/segments');
+        speakerSegments.value = d.segments || [];
+      } catch (e) { showError(e); }
+      finally { speakerSegLoading.value = false; }
+    }
+
+    // 把片段按录音(session)分组，每组 {label, items}。后端已按 created_at DESC 排好，
+    // 这里保持「首次出现顺序」即为录音时间倒序；label = 文件名 · 录音时间。
+    const speakerSegmentsBySession = computed(() => {
+      const map = {}, order = [];
+      for (const seg of speakerSegments.value) {
+        const k = seg.session_id;
+        if (!map[k]) { map[k] = { label: (seg.filename || '录音') + ' · ' + fmtTime(seg.created_at), items: [] }; order.push(k); }
+        map[k].items.push(seg);
+      }
+      return order.map(k => map[k]);
+    });
+
+    // 播放某片段：共用展开区里的 <audio>（原生 HTMLAudioElement，成熟方案）。
+    // 同一 session 已加载 → 直接 seek 到 start_ms 播放；换 session 需先设 src，等 loadedmetadata
+    // 后再 seek+play（切源后立即 seek 会被浏览器忽略）。播到 end_ms 由 onVoiceAudioTimeUpdate 暂停。
+    function playSpeakerSegment(seg) {
+      const a = voiceAudio();
+      if (!a) return;
+      playingSegId.value = seg.segment_id;
+      const startSec = (seg.start_ms || 0) / 1000, endSec = (seg.end_ms || 0) / 1000;
+      const seekAndPlay = () => {
+        a.currentTime = startSec;
+        a.dataset.end = String(endSec); // timeupdate 到此秒即暂停，实现「只播这一段」
+        a.play().catch(() => {});       // 自动播放被拦时静默（用户已手动点，通常不会拦）
+      };
+      if (a.dataset.sid === String(seg.session_id)) {
+        seekAndPlay();
+      } else {
+        a.src = '/api/sessions/' + seg.session_id + '/audio';
+        a.dataset.sid = String(seg.session_id);
+        a.addEventListener('loadedmetadata', seekAndPlay, { once: true });
+      }
+      // 自然播放到文件结尾也复位高亮（正常会被 timeupdate 先在 end_ms 处 pause）
+      a.addEventListener('ended', () => { playingSegId.value = null; }, { once: true });
+    }
+
+    // <audio> 的 timeupdate 回调：播到当前片段 end_ms 即暂停并复位高亮。
+    function onVoiceAudioTimeUpdate() {
+      const a = voiceAudio();
+      if (!a || !a.dataset.end) return;
+      if (a.currentTime >= parseFloat(a.dataset.end)) { a.pause(); playingSegId.value = null; }
+    }
+
+    // 毫秒 → 时间标签：≥1 分钟显 "m:ss.sss"，不足 1 分钟显 "s.sss s"，用于展示片段起止时间。
+    function fmtSec(ms) {
+      const s = (ms || 0) / 1000;
+      const m = Math.floor(s / 60);
+      const r = (s - m * 60).toFixed(3);
+      return m > 0 ? `${m}:${r.padStart(6, '0')}` : `${r}s`;
     }
 
     // ---------- 重新提取（基于最新 ASR 重跑 segment→extract） ----------
@@ -839,6 +939,8 @@ const app = createApp({
       if (name === 'memories') { memSearch.value = ''; loadMemories(); }
       if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; dismissingTopicId.value = null; cancelManualMerge(); loadDismissedTopics(); loadTopics(); }
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; loadTopics(); loadTodos(); loadDismissedTodos(); }
+      // 声纹 tab：进入时复位本 tab 的临时态（收起录入表单/展开项/改名/播放）并拉全量名册。
+      if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; loadAllSpeakers(); }
     }
     loadSessions();
     // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
@@ -859,6 +961,7 @@ const app = createApp({
       speakerFilter, renamingSpeaker, enrollOpen, enrollForm, enrolling, allSpeakers,
       speakerColor, segSpeakerBg, toggleSpeakerFilter, openEnroll, onEnrollDrop, submitEnroll, loadAllSpeakers,
       startRenameSpeaker, commitRenameSpeaker, askDeleteSpeaker, reassignSegment,
+      showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
       reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, creating, toggleNewTopic, cancelNewTopic, renaming,

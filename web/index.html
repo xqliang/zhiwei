@@ -198,6 +198,7 @@
     <span class="brand">知微</span>
     <button :class="{active: tab==='timeline'}" @click="switchTab('timeline')">时间线</button>
     <button :class="{active: tab==='record'}" @click="switchTab('record')">录音</button>
+    <button :class="{active: tab==='voiceprint'}" @click="switchTab('voiceprint')">声纹</button>
     <button :class="{active: tab==='topics'}" @click="switchTab('topics')">主题</button>
     <button :class="{active: tab==='memories'}" @click="switchTab('memories')">记忆</button>
     <button :class="{active: tab==='todos'}" @click="switchTab('todos')">待办</button>
@@ -428,6 +429,79 @@
     <div v-if="uploadInfo" class="card" style="margin-top:12px">
       <div class="muted">{{ uploadInfo.filename }}</div>
       <span class="badge" :class="uploadInfo.status">{{ uploadInfo.text }}</span>
+    </div>
+  </div>
+
+  <!-- ============ 声纹 ============ -->
+  <!-- 声纹名册管理：列表 + 录入 + 改名 + 删除；点开某声纹看其跨录音的关联片段，按时间段播放。 -->
+  <div class="wrap" v-if="tab==='voiceprint'">
+    <div class="kv" style="margin-bottom:12px">
+      <b style="font-size:var(--fs-lg)">声纹</b>
+      <button class="btn primary" style="padding:7px 16px" @click="toggleEnrollForm">{{ showEnrollForm ? '收起' : '＋ 录入' }}</button>
+    </div>
+
+    <!-- 录入表单（复用 enrollForm / enrolling / submitEnroll / onEnrollDrop） -->
+    <div class="card" v-if="showEnrollForm">
+      <div class="kv" style="margin-bottom:12px"><b>录入声纹</b><button class="btn-link" @click="showEnrollForm=false">✕</button></div>
+      <label class="field-label">名称</label>
+      <input class="txt" v-model="enrollForm.name" placeholder="如：张三" style="margin-bottom:8px">
+      <label class="field-label">语音样本（拖拽 5-30s 干净人声 wav/mp3）</label>
+      <div @dragover.prevent @drop.prevent="onEnrollDrop" style="border:2px dashed var(--border-strong); border-radius:9px; padding:18px; text-align:center; color:var(--muted); margin-bottom:8px">
+        {{ enrollForm.file ? enrollForm.file.name : '拖拽音频到此处' }}
+      </div>
+      <div class="edit-actions">
+        <button class="btn primary" :disabled="!enrollForm.name.trim()||!enrollForm.file||enrolling" @click="submitEnroll">
+          <span v-if="enrolling" class="spinner"></span>{{ enrolling?'录入中…':'录入' }}
+        </button>
+        <button class="btn mini" @click="showEnrollForm=false">取消</button>
+      </div>
+    </div>
+
+    <div v-if="!allSpeakers.length" class="card empty">还没有声纹。点上方「录入」或上传录音后自动登记。</div>
+    <div class="card" v-for="(sp, idx) in allSpeakers" :key="sp.id">
+      <div class="kv">
+        <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
+          <span class="sp" :style="{background: speakerColor(idx).bg}" style="color:#fff">{{ idx+1 }}</span>
+          <template v-if="!renamingSpeaker || renamingSpeaker.id !== sp.id">
+            <b class="editable" @click="startRenameSpeaker(sp)" title="点击改名">{{ sp.name }}<span class="hint">✎</span></b>
+            <span class="muted">{{ sp.source==='enrolled' ? '手动录入' : '自动登记' }} · {{ sp.sample_count || 0 }} 样本</span>
+          </template>
+          <template v-else>
+            <input class="txt inline" v-model="renamingSpeaker.name" @keyup.enter="commitRenameSpeaker" @keyup.esc="renamingSpeaker=null">
+            <button class="btn primary" style="padding:6px 12px" @click="commitRenameSpeaker">保存</button>
+            <button class="btn mini" @click="renamingSpeaker=null">取消</button>
+          </template>
+        </div>
+        <div style="display:flex; gap:6px; flex-shrink:0">
+          <button class="btn mini" @click="toggleSpeakerSegments(sp.id)">
+            {{ expandedSpeakerId===sp.id ? '收起' : '关联录音 ▾' }}
+            <span v-if="expandedSpeakerId===sp.id && speakerSegLoading" class="spinner"></span>
+          </button>
+          <button class="btn mini" @click="askDeleteSpeaker(sp)">删除</button>
+        </div>
+      </div>
+
+      <!-- 展开：关联录音（按 session 分组）+ 按时间段播放 -->
+      <div v-if="expandedSpeakerId===sp.id" style="margin-top:10px">
+        <!-- 共用一个 <audio>：切片段时按需换 src / seek（详见 app.js playSpeakerSegment） -->
+        <audio ref="voiceAudioEl" controls preload="none" style="width:100%; margin-bottom:8px"
+               @timeupdate="onVoiceAudioTimeUpdate"></audio>
+        <div v-if="speakerSegLoading" class="muted">加载中…</div>
+        <div v-else-if="!speakerSegments.length" class="muted">该声纹暂无关联录音段。</div>
+        <div v-for="(g, gi) in speakerSegmentsBySession" :key="gi" style="margin-bottom:10px">
+          <div class="muted" style="font-weight:600">{{ g.label }} · {{ g.items.length }} 段</div>
+          <div v-for="seg in g.items" :key="seg.segment_id" class="seg">
+            <button class="btn mini" @click="playSpeakerSegment(seg)" style="flex-shrink:0"
+                    :style="playingSegId===seg.segment_id ? {background:'var(--accent)', color:'#fff', borderColor:'var(--accent)'} : {}">
+              {{ playingSegId===seg.segment_id ? '▶ 播放中' : '▶ 播放' }}
+            </button>
+            <div class="seg-text">
+              <div>{{ seg.text }}</div>
+              <div class="muted">{{ fmtSec(seg.start_ms) }} - {{ fmtSec(seg.end_ms) }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -740,6 +814,6 @@
   </div>
 </div>
 
-<script src="/app/app.af854c08.js"></script>
+<script src="/app/app.397d7a97.js"></script>
 </body>
 </html>
