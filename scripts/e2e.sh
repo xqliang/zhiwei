@@ -11,10 +11,13 @@ make compose-up
 sleep 3
 make migrate-up || true   # 已迁移则跳过
 
+echo "==> 启动声纹 sidecar（说话人解析需要；首次需建 venv 见 Makefile 注释）"
+make sidecar-start || echo "  (sidecar 起不来，speaker stage 会失败重试，转写仍可用)"
+
 echo "==> 启动 zhiwei-server"
 make build
 (set -a; source .env; set +a; ./bin/zhiwei-server & echo $! > /tmp/zhiwei-e2e.pid)
-trap 'kill "$(cat /tmp/zhiwei-e2e.pid)" 2>/dev/null || true' EXIT
+trap 'kill "$(cat /tmp/zhiwei-e2e.pid)" 2>/dev/null || true; make sidecar-stop >/dev/null 2>&1 || true' EXIT
 sleep 2
 
 echo "==> 健康检查"
@@ -41,7 +44,13 @@ for i in $(seq 1 60); do
     if ! echo "$MEMS" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('memories') else 1)"; then
       echo "FAIL: memories 为空（真实语音不应为空）"; exit 1
     fi
-    echo "PASS: pipeline 跑通，转写与记忆抽取产出正常"
+    # 说话人：speaker stage 应解析到说话人（speakers 列表非空）
+    SPK=$(curl -fsS "localhost:8080/api/sessions/$SESSION_ID/speakers")
+    echo "speakers: $(echo "$SPK" | head -c 500)"
+    if ! echo "$SPK" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('speakers') else 1)"; then
+      echo "FAIL: speakers 为空（speaker stage 未产出，检查 sidecar 是否运行）"; exit 1
+    fi
+    echo "PASS: pipeline 跑通，转写/记忆抽取/说话人解析产出正常"
     echo "$DETAIL" | python3 -m json.tool | head -30
     exit 0
   fi
