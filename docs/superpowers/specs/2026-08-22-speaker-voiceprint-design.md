@@ -281,3 +281,15 @@ PATCH  /api/sessions/{id}/segments/{segId}/speaker   换人 {speaker_id}（校�
 - **原始 ASR 详细视图**（前端）：`segmentView` 增 `SpeakerLabel`（ASR 原始 spk 标签，未聚类前的模型输出）字段，`GetSession` 填充；转写详情头部加「详细」按钮 toggle `rawAsrView`，展开只读视图逐段显示 `spk{speaker_label}` + `start_ms→end_ms`（`fmtSec` 毫秒→秒·3 位小数）+ 文本，便于排查 diarization 拆分根因。
 
 **重要前置条件**：聚类需真实 WeSpeaker 提取向量才真正生效——当前 `StubEmbedder` 随机/伪向量聚不出（同人会因向量不相似而仍被拆开）。realtime prompt 式 diarization 标签不稳是拆分根因；加载真实 WeSpeaker 后聚类兜底才见效。属手动 follow-up（同 §12/§13.5）。
+
+### 13.7 真实 WeSpeaker 加载（resnet34-LM 256 维，已落地）
+
+§13.5/§13.6 标注的「真实 WeSpeaker 加载」follow-up 已完成。`services/voiceprint/embedder.py` 的 `_WeSpeakerEmbedder` 用 wespeaker python 包加载 resnet34-LM（CnCeleb 预训练，`load_model('chinese')`，256 维），`load_embedder()` 在依赖缺失时仍回退 StubEmbedder（sidecar 不致起不来）。关键决策（踩坑后固化）：
+
+- **Python 3.12 + torch 2.13 / torchaudio 2.11**：科学栈 wheel 覆盖最稳（3.14 上 umap/torch 不全）。
+- **wespeaker 用 `--no-deps` 装**：其 `install_requires` 钉 `umap-learn==0.5.6` + `s3prl`——重且 s3prl 与 torchaudio 2.11 不兼容（`set_audio_backend` 已移除，eager import 即崩）。resnet34 走 fbank 前端、用不到 SSL/whisper/diar 前端，故这些可选依赖（s3prl/whisper/transformers/peft/umap/hdbscan）用 `services/voiceprint/_stubs/` 轻量 stub 包遮蔽（靠 `sidecar.sh`/`spike.py` 把 `_stubs` 前置到 `PYTHONPATH`，不动 site-packages、可复现）。
+- **提取走 soundfile → `extract_embedding_from_pcm`**，**不调 `torchaudio.load`**：torchaudio 2.11 的 `load` 改走 torchcodec（需 ffmpeg 系统库 `libavutil`，常缺且版本难匹配）；sidecar 收到的本就是 16k mono wav，`soundfile`(libsndfile) 直读为 `(1,samples)` float32 喂入即可。`chinese` 模型 `apply_vad=False`、确定性（同输入两次 max diff=0）。
+- **一键装配** `scripts/setup-voiceprint.sh`（建 venv + `pip install -r requirements.txt` + `pip install --no-deps git+wespeaker`）；`make spike-voiceprint` 验证（dim=256/norm=1.0/确定性）；sidecar `/health` 显 `model=_WeSpeakerEmbedder`、`/embed` 返回 256 维 L2 归一向量（端到端验证通过）。
+- **模型缓存**：首次 `load_model('chinese')` 从 ModelScope 下 CnCeleb resnet34 (~31MB) 到 `~/.wespeaker/chinese`，后续走缓存。可经 `ZW_WESPEAKER_MODEL` 切其他预训练（如 `'english'`=ResNet221_LM）。
+
+至此 §13.6 的「聚类需真实向量才生效」前置条件满足——speaker stage 的 session 内声纹聚类 + 跨 session 1:N 现在用真向量运行。仍为后续：匹配阈值 `0.5` 的 benchmark 实调（§12）、spikes/e2e 真跑集成。

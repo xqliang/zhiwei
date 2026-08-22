@@ -1,9 +1,23 @@
-fastapi
-uvicorn[standard]
-faiss-cpu
+# 声纹 sidecar 依赖（Python 3.12，CPU）。
+# 装法见 scripts/setup-voiceprint.sh（一键建 venv + 装）：
+#   bash scripts/setup-voiceprint.sh
+# wespeaker 本体用 --no-deps 单独装（不写进此文件，否则 pip resolve 会拉它 install_requires
+# 钉的 umap-learn==0.5.6 / s3prl 等——重且 s3prl 与 torchaudio 2.11 不兼容；resnet34 走
+# fbank 前端用不到那些 SSL/whisper/diar 前端，用 _stubs/ 遮蔽即可）。
+torch>=2.0
+torchaudio>=2.0
+fastapi          # sidecar HTTP 框架
+uvicorn[standard]  # sidecar ASGI server
 numpy
-# WeSpeaker 推理依赖：spike.py 验证确切加载方式后固定（ONNX Runtime 是候选之一）。
-onnxruntime
+soundfile      # 读 wav→PCM 喂 extract_embedding_from_pcm，绕开 torchaudio.load(2.11 需 torchcodec+ffmpeg 系统库)
+scipy
+kaldiio
+pyyaml
+tqdm
+silero-vad     # wespeaker.cli.speaker 顶部 import（VAD 路径；chinese 模型 apply_vad=False，实际不调）
+onnxruntime    # wespeaker.diar.extract_emb 顶部 import（diarization 路径用，embedding 不走）
+packaging      # silero-vad 依赖
+requests       # wespeaker.cli.hub 下模型用
 # 测试用
 httpx
 pytest

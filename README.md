@@ -31,7 +31,10 @@ make compose-up
 # 2. 建表
 make migrate-up
 
-# 3. 起声纹 sidecar（说话人识别需要；首次需建 venv，见 Makefile 注释）
+# 3. 起声纹 sidecar（说话人识别需要）
+#    首次：建 venv + 装依赖（torch/wespeaker 等，需 python3.12）：
+bash scripts/setup-voiceprint.sh
+#    日常：
 make sidecar-start
 
 # 4. 起服务（会读取 .env 里的密钥）
