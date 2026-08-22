@@ -12,15 +12,18 @@ import (
 	"zhiwei/internal/voiceprint"
 )
 
-// fakeVoiceprint 实现 voiceprint.Client，可控 matched/matchID，记录 Add 调用。
+// fakeVoiceprint 实现 voiceprint.Client，可控 matched/matchID，记录 Add 调用 + 各方法调用计数。
 type fakeVoiceprint struct {
-	matched bool
-	matchID ids.ID
-	added   []ids.ID
-	embedOK bool
+	matched     bool
+	matchID     ids.ID
+	added       []ids.ID
+	embedOK     bool
+	embedCalls  int
+	searchCalls int
 }
 
 func (f *fakeVoiceprint) Embed(_ context.Context, _ string) ([]float32, error) {
+	f.embedCalls++
 	// 返回非零向量（同组聚合后仍稳定；fake Search 不看内容）
 	v := make([]float32, 256)
 	for i := range v {
@@ -29,6 +32,7 @@ func (f *fakeVoiceprint) Embed(_ context.Context, _ string) ([]float32, error) {
 	return v, nil
 }
 func (f *fakeVoiceprint) Search(_ context.Context, _ []float32) (ids.ID, float64, bool, error) {
+	f.searchCalls++
 	return f.matchID, 0.9, f.matched, nil
 }
 func (f *fakeVoiceprint) Add(_ context.Context, _ []float32, id ids.ID) error {
@@ -139,6 +143,47 @@ func TestStageSpeakerMatchesExisting(t *testing.T) {
 	for _, s := range segs {
 		if s.SpeakerID == nil || *s.SpeakerID != sp.ID {
 			t.Fatalf("段 %d 未回填到命中 speaker: %+v", s.SequenceNo, s.SpeakerID)
+		}
+	}
+}
+
+// TestStageSpeakerIdempotentSkip 验证幂等：段已全部解析到说话人后，重跑（如 reextract）
+// 不再调 sidecar（Embed/Search/Add 计数为 0）、不覆盖既有 speaker_id。
+// 对应 reextract 的 segment→speaker→extract 链路：speaker stage 对已处理 session 是 no-op。
+func TestStageSpeakerIdempotentSkip(t *testing.T) {
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	ctx := context.Background()
+	// 先跑一遍（全部未命中→自动登记），让所有段都拿到 speaker_id
+	first := &fakeVoiceprint{matched: false}
+	d1 := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: first, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d1, sid, tr); err != nil {
+		t.Fatalf("首次 stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SpeakerID == nil {
+			t.Fatalf("首次后段 %d 仍无 speaker_id", s.SequenceNo)
+		}
+	}
+	firstAssigned := map[ids.ID]bool{}
+	for _, s := range segs {
+		firstAssigned[*s.SpeakerID] = true
+	}
+
+	// 重跑：fake 若被调则计数；幂等应全部跳过
+	second := &fakeVoiceprint{matched: true, matchID: ids.New()} // 即便配成"命中别的人"也不应被调
+	d2 := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: second, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d2, sid, tr); err != nil {
+		t.Fatalf("重跑 stage: %v", err)
+	}
+	if second.embedCalls != 0 || second.searchCalls != 0 || len(second.added) != 0 {
+		t.Fatalf("重跑应 no-op，实际 embed=%d search=%d add=%d", second.embedCalls, second.searchCalls, len(second.added))
+	}
+	// speaker_id 不变
+	segs2, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs2 {
+		if s.SpeakerID == nil || !firstAssigned[*s.SpeakerID] {
+			t.Fatalf("重跑后段 %d speaker_id 被改: %+v", s.SequenceNo, s.SpeakerID)
 		}
 	}
 }

@@ -129,11 +129,12 @@ func (r *TranscriptRepo) RecomputeFullText(ctx context.Context, transcriptID ids
 	return r.SetFullText(ctx, transcriptID, sb.String(), conf)
 }
 
-// SetSegmentSpeaker 按 speaker_label 批量回填本 transcript 内所有段的 speaker_id。
+// SetSegmentSpeaker 按 speaker_label 批量回填本 transcript 内段的 speaker_id。
 // 带 transcript_id 作用域防跨会话；单条 UPDATE 原子写，并发安全。rows=0 静默。
+// 仅回填 speaker_id IS NULL 的段，保留用户已手动换人（SetSegmentSpeakerByID）的纠正，不被重跑覆盖。
 func (r *TranscriptRepo) SetSegmentSpeaker(ctx context.Context, transcriptID ids.ID, speakerLabel string, speakerID ids.ID) error {
 	_, err := r.DB.ExecContext(ctx,
-		`UPDATE transcript_segment SET speaker_id = ? WHERE transcript_id = ? AND speaker_label = ?`,
+		`UPDATE transcript_segment SET speaker_id = ? WHERE transcript_id = ? AND speaker_label = ? AND speaker_id IS NULL`,
 		speakerID.Int64(), transcriptID.Int64(), speakerLabel)
 	return err
 }

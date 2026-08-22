@@ -197,9 +197,10 @@ func (h *QueryHandler) PatchTranscript(w http.ResponseWriter, r *http.Request) {
 
 // Reextract 基于当前（可能已编辑的）ASR 重新抽取记忆/待办：
 // 在 segment stage 建一个 pending job，pool 领取后重算 full_text（segment）→
+// speaker（幂等：段已解析则 no-op，不覆盖手动换人、不依赖 sidecar）→
 // 重新抽取（extract，对本 session 幂等：删旧 memory/todo 再重插）→ done。
 // SetJobID 把 session 指向新 job，前端轮询 GET /api/sessions/{id} 的 job.status 可见进度。
-// 必须已有 transcript（无转写的 session 无法跑 segment→extract）。
+// 必须已有 transcript（无转写的 session 无法跑 segment→speaker→extract）。
 func (h *QueryHandler) Reextract(w http.ResponseWriter, r *http.Request) {
 	sid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {

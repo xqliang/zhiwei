@@ -45,6 +45,19 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 
 	for _, label := range order {
 		members := groups[label]
+		// 幂等：组内所有段均已解析到说话人（首次处理完，或用户已手动换人）→ 跳过该组。
+		// 这样 reextract（Flow: segment→speaker→extract）重跑时 speaker stage 是 no-op：
+		// 不重复调 sidecar、不覆盖手动纠正、sidecar 离线也不阻断 reextract。
+		allAssigned := len(members) > 0
+		for _, s := range members {
+			if s.SpeakerID == nil {
+				allAssigned = false
+				break
+			}
+		}
+		if allAssigned {
+			continue
+		}
 		vecs := make([][]float32, 0, len(members))
 		for _, s := range members {
 			slicePath := filepath.Join(sliceDir, fmt.Sprintf("seg-%d.wav", s.SequenceNo))
@@ -98,8 +111,9 @@ func stageSpeaker(d StageDeps) Handler {
 	}
 }
 
-// sliceAudio 用 ffmpeg 从 transcoded wav 按毫秒切出片段。源是 16k mono s16 PCM，
-// -ss/-to 在 PCM 上是样本级精确，-c copy 不重编码、最快。
+// sliceAudio 用 ffmpeg 从 transcoded wav 按毫秒切出片段。源是 16k mono s16 PCM；
+// -ss/-to 定位起止（-to 是绝对时间，非相对），-c copy 不重编码、最快。
+// 注：-c copy 在 WAV 上是包粒度，边界可能偏几十毫秒，对声纹聚合无影响；需样本级精度时改重编码。
 func sliceAudio(src, dst string, startMS, endMS int64) error {
 	args := []string{"-y",
 		"-ss", fmt.Sprintf("%.3f", float64(startMS)/1000),

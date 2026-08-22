@@ -70,6 +70,9 @@ func (h *SpeakerHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := ids.New()
 	src := filepath.Join(dir, sid.String()+".wav")
+	wav16 := filepath.Join(dir, sid.String()+"-16k.wav")
+	defer os.Remove(src) // 临时文件：成功/失败都清理（data/enroll 不残留）
+	defer os.Remove(wav16)
 	out, err := os.Create(src)
 	if err != nil {
 		http.Error(w, "文件创建失败", http.StatusInternalServerError)
@@ -82,7 +85,6 @@ func (h *SpeakerHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out.Close()
-	wav16 := filepath.Join(dir, sid.String()+"-16k.wav")
 	if err := transcodeEnroll(src, wav16); err != nil {
 		http.Error(w, "转码失败: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -97,9 +99,13 @@ func (h *SpeakerHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "登记失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_ = h.Voiceprint.Add(r.Context(), vec, sp.ID)
-	_ = os.Remove(src)
-	_ = os.Remove(wav16)
+	// 写 FAISS 索引；失败则回滚刚建的 speaker 行，避免"名册有但索引无"的孤儿
+	// （1:N 永不命中，用户以为录入成功实则无效）。与 stage 的自动登记路径保持一致（那里 Add 失败即报错）。
+	if err := h.Voiceprint.Add(r.Context(), vec, sp.ID); err != nil {
+		_ = h.Speakers.Delete(r.Context(), sp.ID)
+		http.Error(w, "声纹索引写入失败，请重试", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, sp)
 }
 
