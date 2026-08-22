@@ -107,6 +107,93 @@ func TestSessionsAndDetail(t *testing.T) {
 	}
 }
 
+// TestGetSessionSpeakerEnrichment 验证详情接口的说话人富化：
+// 段已解析到登记说话人 → segment 带 speaker_id + 登记名（非回退 "说话人 N"），
+// 顶层 speakers 列表含该说话人。
+func TestGetSessionSpeakerEnrichment(t *testing.T) {
+	_ = ids.Init(1)
+	db, err := repo.NewDB(repo.TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	jobs := &repo.JobRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	memories := &repo.MemoryRepo{DB: db}
+	todos := &repo.TodoRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "spk.wav",
+		StoragePath: "/tmp/spk.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	conf := 0.9
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1",
+			Text: "你好", StartMS: 0, EndMS: 1000, Confidence: &conf},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 登记 1 个说话人并回填到 label "1" 的段
+	sp := &repo.Speaker{Name: "张三", Source: "enrolled"}
+	if err := speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.SetSegmentSpeaker(ctx, tr.ID, "1", sp.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	r := chi.NewRouter()
+	RegisterQuery(r, &QueryHandler{
+		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
+		Memories: memories, Todos: todos, Speakers: speakers,
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{sp.ID.String(), "张三", `"speakers"`, `"speaker_id"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body 缺少 %s: %s", want, body)
+		}
+	}
+	// 已解析到登记名，不应回退成 "说话人 1"
+	if strings.Contains(body, "说话人 1") {
+		t.Fatalf("应显示登记名而非回退: %s", body)
+	}
+
+	// 解析 speakers 列表，确认含张三 + color_index
+	var detail struct {
+		Speakers []struct {
+			Name       string `json:"name"`
+			ColorIndex int    `json:"color_index"`
+		} `json:"speakers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	found := false
+	for _, s := range detail.Speakers {
+		if s.Name == "张三" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("speakers 列表无张三: %+v", detail.Speakers)
+	}
+}
+
 // ServeAudio 流式返回原始音频文件，支持点击播放
 func TestServeAudio(t *testing.T) {
 	db, err := repo.NewDB(repo.TestDSN(t))

@@ -17,8 +17,9 @@ type QueryHandler struct {
 	Sessions    *repo.SessionRepo
 	Jobs        *repo.JobRepo
 	Transcripts *repo.TranscriptRepo
-	Memories    *repo.MemoryRepo // Sprint 2：详情附带 memory 卡片
-	Todos       *repo.TodoRepo   // Sprint 2：详情附带 todo 卡片
+	Memories    *repo.MemoryRepo  // Sprint 2：详情附带 memory 卡片
+	Todos       *repo.TodoRepo    // Sprint 2：详情附带 todo 卡片
+	Speakers    *repo.SpeakerRepo // speaker stage：详情附带段说话人 + speakers 列表
 }
 
 // RegisterQuery 挂载查询路由。
@@ -78,11 +79,12 @@ FROM audio_session s ORDER BY s.id DESC LIMIT ?`, limit)
 }
 
 type segmentView struct {
-	ID      string `json:"id"`
-	Speaker string `json:"speaker"`
-	Text    string `json:"text"`
-	StartMS int64  `json:"start_ms"`
-	EndMS   int64  `json:"end_ms"`
+	ID        string `json:"id"`
+	Speaker   string `json:"speaker"`              // 显示名：解析到用登记名，否则 "说话人 N"
+	SpeakerID string `json:"speaker_id,omitempty"` // 解析到的已登记说话人 id（未解析则空）
+	Text      string `json:"text"`
+	StartMS   int64  `json:"start_ms"`
+	EndMS     int64  `json:"end_ms"`
 }
 
 func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
@@ -99,15 +101,32 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"session": s}
 	if tr, err := h.Transcripts.GetBySession(r.Context(), sid); err == nil {
 		segs, _ := h.Transcripts.ListSegments(r.Context(), tr.ID)
+		// 已解析说话人 id→name 映射，避免逐段 N+1 查 speaker；sis 同时是面板用的说话人列表。
+		sis, _ := h.Transcripts.ListSpeakersForTranscript(r.Context(), tr.ID)
+		spMap := make(map[ids.ID]string, len(sis))
+		for i := range sis {
+			sis[i].ColorIndex = i // 按转写出现序号着色
+			spMap[sis[i].SpeakerID] = sis[i].Name
+		}
 		views := make([]segmentView, len(segs))
 		for i, sg := range segs {
 			views[i] = segmentView{
-				ID: sg.ID.String(), Speaker: speakerLabelName(sg.SpeakerLabel), Text: sg.Text,
-				StartMS: sg.StartMS, EndMS: sg.EndMS,
+				ID: sg.ID.String(), Text: sg.Text, StartMS: sg.StartMS, EndMS: sg.EndMS,
+			}
+			if sg.SpeakerID != nil {
+				views[i].SpeakerID = sg.SpeakerID.String()
+				if name, ok := spMap[*sg.SpeakerID]; ok {
+					views[i].Speaker = name // 解析到登记名
+				} else {
+					views[i].Speaker = speakerLabelName(sg.SpeakerLabel) // speaker_id 已设但名册缺失→回退
+				}
+			} else {
+				views[i].Speaker = speakerLabelName(sg.SpeakerLabel) // 未解析→"说话人 N"
 			}
 		}
 		resp["transcript"] = tr
 		resp["segments"] = views
+		resp["speakers"] = sis
 	}
 	// Sprint 2：详情附带 memory/todo 卡片（repo 为空则跳过，兼容旧装配）
 	if h.Memories != nil {
