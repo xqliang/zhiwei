@@ -128,3 +128,43 @@ func (r *TranscriptRepo) RecomputeFullText(ctx context.Context, transcriptID ids
 	}
 	return r.SetFullText(ctx, transcriptID, sb.String(), conf)
 }
+
+// SetSegmentSpeaker 按 speaker_label 批量回填本 transcript 内所有段的 speaker_id。
+// 带 transcript_id 作用域防跨会话；单条 UPDATE 原子写，并发安全。rows=0 静默。
+func (r *TranscriptRepo) SetSegmentSpeaker(ctx context.Context, transcriptID ids.ID, speakerLabel string, speakerID ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ? WHERE transcript_id = ? AND speaker_label = ?`,
+		speakerID.Int64(), transcriptID.Int64(), speakerLabel)
+	return err
+}
+
+// SetSegmentSpeakerByID 单段换人（前端"换人"下拉用）。带 transcript_id 作用域防跨会话误写。
+func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID, segID, speakerID ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ? WHERE id = ? AND transcript_id = ?`,
+		speakerID.Int64(), segID.Int64(), transcriptID.Int64())
+	return err
+}
+
+// ListSpeakersForTranscript 本 transcript 解析到的说话人聚合（说话人面板用）。
+// 按 sequence_no 升序的首段定序，保证面板说话人顺序与转写一致。
+func (r *TranscriptRepo) ListSpeakersForTranscript(ctx context.Context, transcriptID ids.ID) ([]SpeakerInSegment, error) {
+	var list []SpeakerInSegment
+	err := r.DB.SelectContext(ctx, &list, `
+SELECT s.id AS speaker_id, s.name, s.source, COUNT(seg.id) AS segment_count
+FROM transcript_segment seg
+JOIN speaker s ON s.id = seg.speaker_id
+WHERE seg.transcript_id = ? AND seg.speaker_id IS NOT NULL
+GROUP BY s.id, s.name, s.source
+ORDER BY MIN(seg.sequence_no)`, transcriptID.Int64())
+	return list, err
+}
+
+// SpeakerInSegment 面板用的说话人聚合视图（非表）。ColorIndex 由 API 层按序号填充。
+type SpeakerInSegment struct {
+	SpeakerID    ids.ID `db:"speaker_id" json:"speaker_id"`
+	Name         string `db:"name" json:"name"`
+	Source       string `db:"source" json:"source"`
+	SegmentCount int    `db:"segment_count" json:"segment_count"`
+	ColorIndex   int    `db:"-" json:"color_index"`
+}

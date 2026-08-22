@@ -16,6 +16,7 @@ import (
 	"zhiwei/internal/memory"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/voiceprint"
 )
 
 // StageDeps 是 stage 的依赖集合（接口化便于测试注入）。
@@ -31,13 +32,18 @@ type StageDeps struct {
 	Todos         *repo.TodoRepo
 	Topics        *repo.TopicRepo
 	MemoryTopics  *repo.MemoryTopicRepo // 多对多关联表 DAO（commit 写关联 + 重链）
-	TodoTopics    *repo.TodoTopicRepo  // 多对多关联表 DAO（commit 写关联 + 重链）
+	TodoTopics    *repo.TodoTopicRepo   // 多对多关联表 DAO（commit 写关联 + 重链）
 	LLM           provider.LLMProvider
 	LLMModel      string            // Tier 1 flash 模型名
 	Prompt        string            // prompts/extraction_v2.md 内容（system prompt）
 	PromptVersion string            // prompt 文件名版本，如 extraction_v2（写 trace 用）
 	ExtractWindow int               // 窗口切分大小（块数），0 = 用默认
 	Gate          memory.GateConfig // 质量闸门阈值
+
+	// ---- speaker stage ----
+	Voiceprint          voiceprint.Client
+	Speakers            *repo.SpeakerRepo
+	VoiceprintThreshold float64 // ZW_VOICEPRINT_THRESHOLD，0 表示用默认 0.5
 }
 
 // BuildStages 返回 stage 名 -> handler 的映射，供 Pool 装配。
@@ -45,6 +51,7 @@ func BuildStages(d StageDeps) map[string]Handler {
 	return map[string]Handler{
 		"asr":     stageASR(d),
 		"segment": stageSegment(d),
+		"speaker": stageSpeaker(d),
 		"extract": stageExtract(d),
 	}
 }
