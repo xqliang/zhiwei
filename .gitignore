@@ -11,3 +11,8 @@ web/app.*.js
 /tos
 /llm
 /embed
+# 声纹 sidecar 的本地测试 venv（py3.14 + fastapi/numpy），勿提交
+services/voiceprint/.venv/
+# Python 字节码缓存（sidecar 引入 Python 后新增）
+__pycache__/
+*.pyc
