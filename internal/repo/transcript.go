@@ -22,15 +22,19 @@ type Transcript struct {
 }
 
 type TranscriptSegment struct {
-	ID           ids.ID    `db:"id" json:"id"`
-	TranscriptID ids.ID    `db:"transcript_id" json:"transcript_id"`
-	SequenceNo   int       `db:"sequence_no" json:"sequence_no"`
-	SpeakerLabel string    `db:"speaker_label" json:"speaker_label"`
-	Text         string    `db:"text" json:"text"`
-	StartMS      int64     `db:"start_ms" json:"start_ms"`
-	EndMS        int64     `db:"end_ms" json:"end_ms"`
-	Confidence   *float64  `db:"confidence" json:"confidence"`
-	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	ID           ids.ID `db:"id" json:"id"`
+	TranscriptID ids.ID `db:"transcript_id" json:"transcript_id"`
+	SequenceNo   int    `db:"sequence_no" json:"sequence_no"`
+	SpeakerLabel string `db:"speaker_label" json:"speaker_label"`
+	// SpeakerID 解析到的已登记说话人（speaker stage 回填，此前为 NULL）。
+	// 000004 迁移给 transcript_segment 加了 speaker_id 列，NewDB 走 sqlx safe 模式
+	// （无对应字段的列会扫描报错），故此处同步加字段，保 SELECT * 可扫描。
+	SpeakerID  *ids.ID   `db:"speaker_id" json:"speaker_id,omitempty"`
+	Text       string    `db:"text" json:"text"`
+	StartMS    int64     `db:"start_ms" json:"start_ms"`
+	EndMS      int64     `db:"end_ms" json:"end_ms"`
+	Confidence *float64  `db:"confidence" json:"confidence"`
+	CreatedAt  time.Time `db:"created_at" json:"created_at"`
 }
 
 type TranscriptRepo struct{ DB *sqlx.DB }
