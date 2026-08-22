@@ -261,6 +261,42 @@
         <!-- 就地展开的转写详情 -->
         <div v-if="expandedId===s.id" class="card detail" style="margin-top:-2px">
           <audio :src="audioUrl(s.id)" controls preload="none" style="width:100%; margin:6px 0 10px"></audio>
+          <!-- 说话人面板：chip 可点=按该说话人过滤转写段；✎ 改名，✕ 删除；「+ 新加说话人」开录入表单 -->
+          <div class="speaker-row" style="margin:6px 0 10px; display:flex; flex-wrap:wrap; gap:6px; align-items:center">
+            <span class="muted" style="margin-right:4px">说话人</span>
+            <span v-for="(sp, i) in detail.speakers" :key="sp.speaker_id"
+                  class="chip" :style="{background: speakerColor(i).bg, color: speakerColor(i).fg}"
+                  style="cursor:pointer" @click="toggleSpeakerFilter(sp.speaker_id)"
+                  :title="sp.source==='auto' ? '自动登记' : '手动录入'">
+              {{ sp.name }}
+              <button class="chip-x" @click.stop="startRenameSpeaker(sp)" title="改名">✎</button>
+              <button class="chip-x" @click.stop="askDeleteSpeaker(sp)" title="删除">✕</button>
+            </span>
+            <label class="chip-add" v-if="!enrollOpen" @click="openEnroll">+ 新加说话人</label>
+            <span v-if="speakerFilter" class="chip" style="cursor:pointer; opacity:.8" @click="speakerFilter=null">显示全部 ✕</span>
+          </div>
+          <!-- 改名行（就地一行输入，回车/保存提交） -->
+          <div v-if="renamingSpeaker" class="edit-form" style="margin:0 0 8px">
+            <input class="txt inline" v-model="renamingSpeaker.name" @keyup.enter="commitRenameSpeaker">
+            <button class="btn primary" style="padding:6px 12px; margin-left:6px" @click="commitRenameSpeaker">保存</button>
+            <button class="btn mini" @click="renamingSpeaker=null">取消</button>
+          </div>
+          <!-- 录入表单（名称 + 拖拽语音样本，multipart 上传） -->
+          <div class="card sunken" v-if="enrollOpen" style="margin-bottom:10px">
+            <div class="kv"><b>录入说话人</b><button class="btn-link" @click="enrollOpen=false">✕</button></div>
+            <label class="field-label">名称</label>
+            <input class="txt" v-model="enrollForm.name" placeholder="如：张三" style="margin-bottom:8px">
+            <label class="field-label">语音样本（拖拽 5-30s 干净人声）</label>
+            <div @dragover.prevent @drop.prevent="onEnrollDrop" style="border:2px dashed var(--border-strong); border-radius:9px; padding:18px; margin-bottom:8px; text-align:center; color:var(--muted)">
+              {{ enrollForm.file ? enrollForm.file.name : '拖拽 wav/mp3 到此处' }}
+            </div>
+            <div class="edit-actions">
+              <button class="btn primary" :disabled="!enrollForm.name.trim()||!enrollForm.file||enrolling" @click="submitEnroll">
+                <span v-if="enrolling" class="spinner"></span>{{ enrolling?'录入中…':'录入' }}
+              </button>
+              <button class="btn mini" @click="enrollOpen=false">取消</button>
+            </div>
+          </div>
           <div class="kv" style="margin-bottom:6px">
             <b>转写详情</b>
             <div style="display:flex; gap:6px; align-items:center">
@@ -273,8 +309,14 @@
             <span class="muted">{{ detail.job.last_error }}</span>
             <button class="btn primary" style="padding:4px 12px" @click="retryJob(detail.job.id)">重跑</button>
           </div>
-          <div v-for="(sg, i) in detail.segments" :key="i" class="seg">
-            <span class="sp" :class="spClass(sg.speaker)">{{ sg.speaker }}</span>
+          <div v-for="(sg, i) in detail.segments" :key="i" class="seg" v-show="!speakerFilter || sg.speaker_id===speakerFilter">
+            <select class="sp" :class="spClass(sg.speaker)" :style="{background: segSpeakerBg(sg)}"
+                    @change="reassignSegment(sg, $event.target.value); $event.target.value=sg.speaker_id||''"
+                    style="border:none; cursor:pointer" title="点击可改判此段说话人">
+              <option :value="sg.speaker_id || ''">{{ sg.speaker }}</option>
+              <option v-for="sp in allSpeakers" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
+              <option value="__new">+ 新加…</option>
+            </select>
             <div class="seg-text">
               <div v-if="!segEditing(sg)" class="editable" @click="startEditSeg(sg)" title="点击编辑转写文本">{{ sg.text }}<span class="hint">✎ 编辑</span></div>
               <div v-else class="edit-form" style="margin:0">
@@ -698,6 +740,6 @@
   </div>
 </div>
 
-<script src="/app/app.7896e8d1.js"></script>
+<script src="/app/app.af854c08.js"></script>
 </body>
 </html>

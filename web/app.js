@@ -1,6 +1,6 @@
 // 知微 Web 前端（Vue 3 CDN，无构建）。
 // 标签页：时间线 / 录音 / Topics / 待办（问知微、今日留待后续 Sprint）。
-const { createApp, ref, computed, onUnmounted } = Vue;
+const { createApp, ref, reactive, computed, onUnmounted } = Vue;
 
 // memory 类型 → 中文标签与颜色（卡片徽标用）
 const TYPE_META = {
@@ -27,7 +27,11 @@ const app = createApp({
     }
     async function api(method, url, body) {
       const opt = { method };
-      if (body !== undefined) {
+      if (body instanceof FormData) {
+        // FormData（录入说话人上传语音样本）：不手动设 Content-Type，
+        // 交给浏览器自动带上含 boundary 的 multipart/form-data 头，否则后端解析不到文件。
+        opt.body = body;
+      } else if (body !== undefined) {
         opt.headers = { 'Content-Type': 'application/json' };
         opt.body = JSON.stringify(body);
       }
@@ -676,6 +680,91 @@ const app = createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 说话人面板（过滤 / 改名 / 删除 / 换人 / 录入） ----------
+    // detail.speakers 来自 GetSession（本会话出现过的说话人：speaker_id/name/source/segment_count/color_index）；
+    // allSpeakers 是全量已登记说话人（换人下拉数据源，GET /api/speakers，字段用 id/name）。
+    const speakerFilter = ref(null);      // 非空=只显示该 speaker_id 的转写段
+    const renamingSpeaker = ref(null);    // {id,name}：改名进行中（就地一行输入）
+    const enrollOpen = ref(false);        // 录入表单是否展开
+    const enrollForm = reactive({ name: '', file: null }); // 录入表单：名称 + 语音样本文件
+    const enrolling = ref(false);         // 录入提交中（按钮 loading + 禁用防重复提交）
+    const allSpeakers = ref([]);          // 全量已登记说话人（换人下拉选项）
+
+    // 说话人配色板：面板 chip 与转写段徽标都按「在 detail.speakers 里的下标」取色，
+    // 保证同一个人在面板和转写里颜色一致（8 色循环，超出取模复用）。
+    const SPEAKER_PALETTE = [
+      { bg: '#4338ca', fg: '#fff' }, { bg: '#0e7490', fg: '#fff' }, { bg: '#b45309', fg: '#fff' },
+      { bg: '#6d28d9', fg: '#fff' }, { bg: '#047857', fg: '#fff' }, { bg: '#be123c', fg: '#fff' },
+      { bg: '#1e40af', fg: '#fff' }, { bg: '#9d174d', fg: '#fff' },
+    ];
+    function speakerColor(i) { return SPEAKER_PALETTE[i % SPEAKER_PALETTE.length]; }
+    // segSpeakerBg：按转写段 speaker_id 在 detail.speakers 里的下标取背景色；
+    // 未解析（无 speaker_id 或在面板列表里找不到）→ 灰（与 --muted 同色）。
+    function segSpeakerBg(sg) {
+      if (sg.speaker_id && detail.value && detail.value.speakers) {
+        const idx = detail.value.speakers.findIndex(s => s.speaker_id === sg.speaker_id);
+        if (idx >= 0) return SPEAKER_PALETTE[idx % SPEAKER_PALETTE.length].bg;
+      }
+      return '#9a9388'; // 未解析 → 灰
+    }
+    // 点面板 chip：切换成只看该说话人的转写段；再点同一个 = 取消过滤（回到全部）。
+    function toggleSpeakerFilter(id) { speakerFilter.value = speakerFilter.value === id ? null : id; }
+
+    // 打开录入表单并清空（每次打开都是干净状态）
+    function openEnroll() { enrollOpen.value = true; enrollForm.name = ''; enrollForm.file = null; }
+    // 拖拽落文件到录入区（与录音页 onDrop 同思路，取第一个文件）
+    function onEnrollDrop(e) { if (e.dataTransfer.files.length) enrollForm.file = e.dataTransfer.files[0]; }
+    // 拉全量已登记说话人（换人下拉的数据源）；失败静默——它只是下拉选项，不该打断主流程。
+    async function loadAllSpeakers() {
+      try { const d = await api('GET', '/api/speakers'); allSpeakers.value = d.speakers || []; }
+      catch (e) { /* 下拉数据源，失败静默 */ }
+    }
+    // 录入新说话人：multipart 上传（file + name）。成功后刷新 allSpeakers（新人立即可在换人下拉选到）并 toast。
+    // 不重拉当前会话——新登记的人此刻在本会话还没有任何转写段，面板（按段计数）本就不会显示他。
+    async function submitEnroll() {
+      if (enrolling.value) return; // 防重复提交
+      const fd = new FormData();
+      fd.append('file', enrollForm.file);
+      fd.append('name', enrollForm.name);
+      enrolling.value = true;
+      try {
+        await api('POST', '/api/speakers', fd);
+        await loadAllSpeakers();
+        enrollOpen.value = false;
+        toast.value = '已录入说话人'; setTimeout(() => { toast.value = ''; }, 2000);
+      } catch (e) { showError(e); }
+      finally { enrolling.value = false; }
+    }
+    // 改名：点 chip 的 ✎ 进入改名行；保存 PATCH /api/speakers/{id}，成功后重拉详情（面板名同步）+ 全量列表。
+    function startRenameSpeaker(sp) { renamingSpeaker.value = { id: sp.speaker_id, name: sp.name }; }
+    async function commitRenameSpeaker() {
+      if (!renamingSpeaker.value || !renamingSpeaker.value.name.trim()) return; // 空名不发
+      try {
+        await api('PATCH', '/api/speakers/' + renamingSpeaker.value.id, { name: renamingSpeaker.value.name.trim() });
+        renamingSpeaker.value = null;
+        await reloadSession(detail.value.session.id);
+        await loadAllSpeakers();
+      } catch (e) { showError(e); }
+    }
+    // 删除说话人：用原生 confirm 做二次确认（chip 空间紧凑，不适合像列表那样铺开行内两步确认；
+    // 且原生对话框是成熟方案）。后端 DELETE 会把关联段的 speaker_id 置空 → 这些段变「未解析」。
+    async function askDeleteSpeaker(sp) {
+      if (!confirm('删除说话人「' + sp.name + '」？关联的转写段将变为未解析。')) return;
+      try {
+        await api('DELETE', '/api/speakers/' + sp.speaker_id);
+        await loadAllSpeakers();
+        await reloadSession(detail.value.session.id);
+      } catch (e) { showError(e); }
+    }
+    // 换人：把某转写段改判为另一说话人（修正识别错误）。选「+ 新加…」则转去打开录入表单。
+    async function reassignSegment(sg, val) {
+      if (val === '__new') { openEnroll(); return; }
+      try {
+        await api('PATCH', '/api/sessions/' + detail.value.session.id + '/segments/' + sg.id + '/speaker', { speaker_id: val });
+        await reloadSession(detail.value.session.id);
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 重新提取（基于最新 ASR 重跑 segment→extract） ----------
     // 点卡片「重新提取」→ 2 步确认 → 若有未保存转写先存盘 → POST reextract 建任务
     // → 轮询 job 状态 → 完成后刷新列表+详情。2 步确认提示会覆盖旧记忆/待办。
@@ -746,7 +835,7 @@ const app = createApp({
     // ---------- 标签页切换 ----------
     function switchTab(name) {
       tab.value = name;
-      if (name === 'timeline') { deletingSessionId.value = null; reextractConfirmId.value = null; segDraft.value = {}; loadSessions(); }
+      if (name === 'timeline') { deletingSessionId.value = null; reextractConfirmId.value = null; segDraft.value = {}; loadSessions(); loadAllSpeakers(); }
       if (name === 'memories') { memSearch.value = ''; loadMemories(); }
       if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; dismissingTopicId.value = null; cancelManualMerge(); loadDismissedTopics(); loadTopics(); }
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; loadTopics(); loadTodos(); loadDismissedTodos(); }
@@ -756,6 +845,8 @@ const app = createApp({
     // 原先只在 switchTab('topics'/'todos') 触发——首屏 timeline 下拉为空。
     // mount 时一并拉一次，保证首屏就有可选项（评审 M1）。
     loadTopics();
+    // 换人下拉（转写段 <select>）的数据源，首屏 timeline 即可用。
+    loadAllSpeakers();
 
     onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); clearTimeout(reextractPollTimer); });
 
@@ -765,6 +856,9 @@ const app = createApp({
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissingMemId, askDismissMem, cancelDismissMem, confirmDismissMem, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
       tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay,
       segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript,
+      speakerFilter, renamingSpeaker, enrollOpen, enrollForm, enrolling, allSpeakers,
+      speakerColor, segSpeakerBg, toggleSpeakerFilter, openEnroll, onEnrollDrop, submitEnroll, loadAllSpeakers,
+      startRenameSpeaker, commitRenameSpeaker, askDeleteSpeaker, reassignSegment,
       reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, creating, toggleNewTopic, cancelNewTopic, renaming,
