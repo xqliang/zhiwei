@@ -32,6 +32,7 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Post("/api/speakers", h.Enroll)
 	r.Patch("/api/speakers/{id}", h.Rename)
 	r.Delete("/api/speakers/{id}", h.Delete)
+	r.Post("/api/speakers/merge", h.Merge)           // 声纹页「手动合并」：多说话人并入一个目标
 	r.Get("/api/speakers/{id}/segments", h.Segments) // 该说话人跨 session 出现的片段（声纹 tab 点开看关联录音）
 	r.Get("/api/sessions/{sid}/speakers", h.SessionSpeakers)
 	r.Patch("/api/sessions/{sid}/segments/{seg}/speaker", h.ReassignSegment)
@@ -172,6 +173,51 @@ func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	_, _ = h.Speakers.DB.ExecContext(r.Context(),
 		`UPDATE transcript_segment SET speaker_id = NULL WHERE speaker_id = ?`, id.Int64())
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// Merge 把多个说话人并入一个目标（声纹页「手动合并」：纠正 ASR 把同人拆成多个说话人）。
+// 源说话人的全部转写段（跨所有 session）改指目标 → 删源行 + sidecar 移除源向量。
+// 目标向量不动（MVP 不重算，沿用其既有声纹；与 stage「已命中不增量更新」一致）。
+func (h *SpeakerHandler) Merge(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SourceIDs []string `json:"source_ids"`
+		TargetID  string   `json:"target_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	targetID, err := ids.ParseID(req.TargetID)
+	if err != nil {
+		http.Error(w, "invalid target_id", http.StatusBadRequest)
+		return
+	}
+	srcIDs := make([]ids.ID, 0, len(req.SourceIDs))
+	for _, s := range req.SourceIDs {
+		id, err := ids.ParseID(s)
+		if err != nil {
+			http.Error(w, "invalid source_id: "+s, http.StatusBadRequest)
+			return
+		}
+		if id == targetID {
+			continue // 源含目标则跳过（目标自身不能并入自己）
+		}
+		srcIDs = append(srcIDs, id)
+	}
+	if len(srcIDs) == 0 {
+		http.Error(w, "无可合并的源（source_ids 不能为空或只含 target）", http.StatusBadRequest)
+		return
+	}
+	// 先 sidecar 移除源向量（段此时还没改指，移除不影响读名）；DB 段改指 + 删源事务。
+	for _, sid := range srcIDs {
+		_ = h.Voiceprint.Remove(r.Context(), sid)
+	}
+	merged, err := h.Speakers.MergeInto(r.Context(), targetID, srcIDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "merged_segments": merged, "removed_speakers": len(srcIDs)})
 }
 
 // SessionSpeakers 本 session 解析到的说话人（面板用）。color_index 按序号填。

@@ -267,7 +267,7 @@
 
         <!-- 就地展开的转写详情 -->
         <div v-if="expandedId===s.id" class="card detail" style="margin-top:-2px">
-          <audio :src="audioUrl(s.id)" controls preload="none" style="width:100%; margin:6px 0 10px"></audio>
+          <audio ref="sessionAudioEl" :src="audioUrl(s.id)" controls preload="none" style="width:100%; margin:6px 0 10px" @timeupdate="onTimelineAudioTimeUpdate"></audio>
           <!-- 说话人面板：chip 可点=按该说话人过滤转写段；✎ 改名，✕ 删除；「+ 新加说话人」开录入表单 -->
           <div class="speaker-row" style="margin:6px 0 10px; display:flex; flex-wrap:wrap; gap:6px; align-items:center">
             <span class="muted" style="margin-right:4px">说话人</span>
@@ -306,9 +306,21 @@
           </div>
           <div class="kv" style="margin-bottom:6px">
             <b>转写详情</b>
-            <div style="display:flex; gap:6px; align-items:center">
+            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap">
               <button v-if="segDirty" class="btn primary" style="padding:6px 14px" @click="saveTranscript(s)">保存转写修改</button>
-              <button class="btn-link" @click="rawAsrView=!rawAsrView" :title="rawAsrView?'收起原始 ASR 视图':'查看 ASR 原始结果（spk 标签 + 时间戳 + 文本）'">{{ rawAsrView ? '收起' : '详细' }}</button>
+              <button class="btn-link" @click="toggleRawAsr()" :title="rawAsrView?'收起原始 ASR 视图':'查看 ASR 原始结果（spk 标签 + 时间戳 + 文本）'">{{ rawAsrView ? '收起' : '详细' }}</button>
+              <template v-if="!mergeMode">
+                <button class="btn-link" @click="enterMergeMode()" title="选择多段拆开的发言合并到同一说话人（纠正 ASR 拆分）">合并</button>
+              </template>
+              <template v-else>
+                <span class="muted">已选 {{ mergeCount }} 段 →</span>
+                <select class="mini" v-model="mergeTarget" title="选择归到的目标说话人">
+                  <option :value="null" disabled>目标说话人…</option>
+                  <option v-for="sp in allSpeakers" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
+                </select>
+                <button class="btn mini primary" :disabled="mergeCount<2 || !mergeTarget" @click="confirmMerge(s)">确认合并</button>
+                <button class="btn mini" @click="cancelMerge()">取消</button>
+              </template>
               <button class="btn-link" @click="toggleSession(s.id)">✕ 关闭</button>
             </div>
           </div>
@@ -320,6 +332,7 @@
           <!-- 转写段：正常视图(可编辑/换人) vs 原始 ASR 视图(只读，spk 标签+时间戳+文本，排查 diarization 拆分) -->
           <template v-if="!rawAsrView">
           <div v-for="(sg, i) in detail.segments" :key="i" class="seg" v-show="!speakerFilter || sg.speaker_id===speakerFilter">
+            <input v-if="mergeMode" type="checkbox" :checked="!!mergeSelected[sg.id]" @change="toggleMergeSelect(sg)" style="margin-top:5px; flex-shrink:0" title="选择此段参与合并">
             <select class="sp" :class="spClass(sg.speaker)" :style="{background: segSpeakerBg(sg)}"
                     @change="reassignSegment(sg, $event.target.value); $event.target.value=sg.speaker_id||''"
                     style="border:none; cursor:pointer" title="点击可改判此段说话人">
@@ -327,6 +340,7 @@
               <option v-for="sp in allSpeakers" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
               <option value="__new">+ 新加…</option>
             </select>
+            <button class="btn mini seg-play" @click="toggleTimelineSegPlay(sg)" style="padding:2px 8px; flex-shrink:0" :title="tlPlayingSegId===sg.id?'播放中，点暂停':'播放此段音频'">{{ tlPlayingSegId===sg.id ? '⏸' : '▶' }}</button>
             <div class="seg-text">
               <div v-if="!segEditing(sg)" class="editable" @click="startEditSeg(sg)" title="点击编辑转写文本">{{ sg.text }}<span class="hint">✎ 编辑</span></div>
               <div v-else class="edit-form" style="margin:0">
@@ -455,7 +469,11 @@
   <div class="wrap" v-if="tab==='voiceprint'">
     <div class="kv" style="margin-bottom:12px">
       <b style="font-size:var(--fs-lg)">声纹</b>
-      <button class="btn primary" style="padding:7px 16px" @click="toggleEnrollForm">{{ showEnrollForm ? '收起' : '＋ 录入' }}</button>
+      <div style="display:flex; gap:6px">
+        <button v-if="!spMergeMode" class="btn primary" style="padding:7px 16px" @click="toggleEnrollForm">{{ showEnrollForm ? '收起' : '＋ 录入' }}</button>
+        <button v-if="!spMergeMode" class="btn mini" @click="startSpMerge" title="选择多个说话人合并到一个（纠正同人被拆成多个说话人）">手动合并</button>
+        <button v-else class="btn warn" @click="cancelSpMerge">取消合并</button>
+      </div>
     </div>
 
     <!-- 录入表单（复用 enrollForm / enrolling / submitEnroll / onEnrollDrop） -->
@@ -488,6 +506,7 @@
     <div class="card" v-for="(sp, idx) in allSpeakers" :key="sp.id">
       <div class="kv">
         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
+          <input v-if="spMergeMode" type="checkbox" :checked="spMergeSelected.includes(sp.id)" @change="toggleSpSelect(sp)" style="margin:0; flex-shrink:0" title="选择参与合并">
           <span class="sp" :style="{background: speakerColor(idx).bg}" style="color:#fff">{{ idx+1 }}</span>
           <template v-if="!renamingSpeaker || renamingSpeaker.id !== sp.id">
             <b class="editable" @click="startRenameSpeaker(sp)" title="点击改名">{{ sp.name }}<span class="hint">✎</span></b>
@@ -499,7 +518,7 @@
             <button class="btn mini" @click="renamingSpeaker=null">取消</button>
           </template>
         </div>
-        <div style="display:flex; gap:6px; flex-shrink:0">
+        <div v-if="!spMergeMode" style="display:flex; gap:6px; flex-shrink:0">
           <button class="btn mini" @click="toggleSpeakerSegments(sp.id)">
             {{ expandedSpeakerId===sp.id ? '收起' : '关联录音 ▾' }}
             <span v-if="expandedSpeakerId===sp.id && speakerSegLoading" class="spinner"></span>
@@ -527,6 +546,25 @@
               <div class="muted">{{ fmtSec(seg.start_ms) }} - {{ fmtSec(seg.end_ms) }}</div>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+    <!-- 手动合并确认条（参考主题页手动合并的 sticky 底栏）：选模式 → 开始合并 → 选目标 → 确认 -->
+    <div class="card" v-if="spMergeMode" style="position:sticky; bottom:0">
+      <div class="kv">
+        <div class="muted">已选 {{ spMergeSelected.length }} 个说话人</div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <template v-if="!spMergeConfirming">
+            <button class="btn primary" style="padding:7px 14px" :disabled="spMergeSelected.length < 2" @click="startSpConfirm">开始合并</button>
+          </template>
+          <template v-else>
+            <span class="muted">保留目标：</span>
+            <select class="mini" v-model="spMergeTarget">
+              <option v-for="id in spMergeSelected" :key="id" :value="id">{{ (allSpeakers.find(s => s.id === id) || {}).name || id }}</option>
+            </select>
+            <button class="btn primary" style="padding:7px 14px" @click="applySpMerge">确认合并</button>
+          </template>
+          <button class="btn mini" @click="cancelSpMerge">取消</button>
         </div>
       </div>
     </div>
@@ -841,6 +879,6 @@
   </div>
 </div>
 
-<script src="/app/app.6698317a.js"></script>
+<script src="/app/app.5790bec8.js"></script>
 </body>
 </html>

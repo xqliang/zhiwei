@@ -671,6 +671,63 @@ const app = createApp({
     // 原始 ASR 视图开关：true 时转写段以只读方式展示 ASR 原始 spk 标签 + 毫秒时间戳 + 文本，
     // 便于排查「同人被拆成 spk0/spk1」类 diarization 问题（speaker stage 会用声纹聚类兜底合并）。
     const rawAsrView = ref(false);
+    // 切换函数（与 toggleSpeakerFilter/toggleEnrollForm 一致用函数式，避免内联赋值在某些 Vue 编译路径下不触发响应）
+    function toggleRawAsr() { rawAsrView.value = !rawAsrView.value; }
+
+    // ---------- timeline 转写段：逐段播放 + 多段合并(归到同一说话人) ----------
+    // 逐段播放复用详情区顶部那个 <audio :src="audioUrl(s.id)">（ref=sessionAudioEl）：
+    // 点某段 ▶ → seek 到 start_ms 播放，timeupdate 到 end_ms 暂停（同声纹 tab playSpeakerSegment 思路）。
+    const sessionAudioEl = ref(null);   // 详情区 <audio> 元素引用
+    const tlPlayingSegId = ref(null);   // 正在播放的段 id（▶→⏸ 高亮）
+    // 切换某段播放：正在播此段且未暂停→暂停；否则从该段 start_ms 起播。
+    function toggleTimelineSegPlay(sg) {
+      const a = sessionAudioEl.value;
+      if (tlPlayingSegId.value === sg.id && a && !a.paused) { a.pause(); tlPlayingSegId.value = null; return; }
+      playTimelineSeg(sg);
+    }
+    function playTimelineSeg(sg) {
+      const a = sessionAudioEl.value; if (!a) return;
+      const startSec = (sg.start_ms || 0) / 1000, endSec = (sg.end_ms || 0) / 1000;
+      const go = () => {
+        a.currentTime = startSec;
+        a.dataset.end = String(endSec); // timeupdate 到此秒暂停 → 只播这一段
+        a.play().catch(() => {});
+        tlPlayingSegId.value = sg.id;
+      };
+      // preload="none"：首次未加载 → 先 play 触发加载，等 loadedmetadata 再 seek（切源后立即 seek 会被忽略）
+      if (a.readyState >= 1) go();
+      else { a.addEventListener('loadedmetadata', go, { once: true }); a.play().catch(() => {}); }
+      a.addEventListener('ended', () => { tlPlayingSegId.value = null; }, { once: true });
+    }
+    // <audio> 的 timeupdate：播到当前段 end_ms 即暂停并复位高亮。
+    function onTimelineAudioTimeUpdate() {
+      const a = sessionAudioEl.value;
+      if (!a || !a.dataset.end) return;
+      if (a.currentTime >= parseFloat(a.dataset.end)) { a.pause(); tlPlayingSegId.value = null; }
+    }
+
+    // 合并模式：选多段「拆开」的转写 → 一起 PATCH 归到同一说话人（同人统一，纠正 ASR 把一人拆成多 spk）。
+    // 复用既有 PATCH /api/sessions/{id}/segments/{segId}/speaker（逐段循环，无需新端点）。
+    const mergeMode = ref(false);
+    const mergeSelected = reactive({});  // { [segId]: true }
+    const mergeCount = computed(() => Object.keys(mergeSelected).filter(k => mergeSelected[k]).length);
+    const mergeTarget = ref(null);      // 确认合并时归到的目标 speaker_id
+    function enterMergeMode() { rawAsrView.value = false; mergeMode.value = true; for (const k in mergeSelected) delete mergeSelected[k]; mergeTarget.value = null; }
+    function cancelMerge() { mergeMode.value = false; for (const k in mergeSelected) delete mergeSelected[k]; mergeTarget.value = null; }
+    function toggleMergeSelect(sg) { if (mergeSelected[sg.id]) delete mergeSelected[sg.id]; else mergeSelected[sg.id] = true; }
+    async function confirmMerge(s) {
+      const ids = Object.keys(mergeSelected).filter(k => mergeSelected[k]);
+      if (ids.length < 2 || !mergeTarget.value) return;
+      try {
+        for (const id of ids) {
+          await api('PATCH', '/api/sessions/' + s.id + '/segments/' + id + '/speaker', { speaker_id: mergeTarget.value });
+        }
+        cancelMerge();
+        await reloadSession(s.id);
+        toast.value = '已合并 ' + ids.length + ' 段到同一说话人'; setTimeout(() => { toast.value = ''; }, 2000);
+      } catch (e) { showError(e); }
+    }
+
     async function saveTranscript(s) {
       const draft = segDraft.value;
       const segs = Object.keys(draft).map(id => ({ id, text: draft[id] }));
@@ -893,6 +950,40 @@ const app = createApp({
       return m > 0 ? `${m}:${r.padStart(6, '0')}` : `${r}s`;
     }
 
+    // 声纹 tab 手动合并说话人（参考主题页手动合并：选择模式 + 底部确认条）。
+    // 选多个说话人 → 选一个作目标(保留) → 其余源的段改指目标、源删除。
+    // 纠正 ASR 把同人拆成多个说话人；对应后端 POST /api/speakers/merge。
+    const spMergeMode = ref(false);
+    const spMergeSelected = ref([]);    // 勾选的 speaker id
+    const spMergeConfirming = ref(false); // 已点开始合并→选目标阶段
+    const spMergeTarget = ref(null);     // 选作目标(保留)的 speaker id
+    function startSpMerge() { spMergeMode.value = true; spMergeSelected.value = []; spMergeConfirming.value = false; spMergeTarget.value = null; }
+    function cancelSpMerge() { spMergeMode.value = false; spMergeSelected.value = []; spMergeConfirming.value = false; spMergeTarget.value = null; }
+    function toggleSpSelect(sp) {
+      const i = spMergeSelected.value.indexOf(sp.id);
+      if (i >= 0) { spMergeSelected.value.splice(i, 1); if (spMergeTarget.value === sp.id) spMergeTarget.value = null; }
+      else spMergeSelected.value.push(sp.id);
+    }
+    // 开始合并：进入选目标阶段，默认目标=首个选中
+    function startSpConfirm() {
+      spMergeConfirming.value = true;
+      spMergeTarget.value = spMergeSelected.value[0] || null;
+    }
+    async function applySpMerge() {
+      if (spMergeSelected.value.length < 2) { toast.value = '至少选 2 个说话人'; return; }
+      if (!spMergeTarget.value) { toast.value = '请选择保留的目标说话人'; return; }
+      const sources = spMergeSelected.value.filter(id => id !== spMergeTarget.value);
+      if (!sources.length) { toast.value = '目标之外还需至少 1 个源'; return; }
+      try {
+        await api('POST', '/api/speakers/merge', { source_ids: sources, target_id: spMergeTarget.value });
+        cancelSpMerge();
+        await loadAllSpeakers();
+        // 合并影响当前展开会话的说话人/段 → 重拉同步（声纹 tab 无展开会话则 detail 为空，跳过）
+        if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
+        toast.value = '已合并 ' + sources.length + ' 个说话人到目标'; setTimeout(() => { toast.value = ''; }, 2000);
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 重新提取（基于最新 ASR 重跑 segment→extract） ----------
     // 点卡片「重新提取」→ 2 步确认 → 若有未保存转写先存盘 → POST reextract 建任务
     // → 轮询 job 状态 → 完成后刷新列表+详情。2 步确认提示会覆盖旧记忆/待办。
@@ -985,12 +1076,15 @@ const app = createApp({
       fmtTime, fmtDue, typeMeta, statusText, todoStatusText, spClass,
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissingMemId, askDismissMem, cancelDismissMem, confirmDismissMem, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
       tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay,
-      segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript, rawAsrView,
+      segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript, rawAsrView, toggleRawAsr,
+      sessionAudioEl, tlPlayingSegId, toggleTimelineSegPlay, onTimelineAudioTimeUpdate,
+      mergeMode, mergeSelected, mergeCount, mergeTarget, enterMergeMode, cancelMerge, toggleMergeSelect, confirmMerge,
       speakerFilter, renamingSpeaker, enrollOpen, enrollForm, enrolling, allSpeakers,
       speakerColor, segSpeakerBg, toggleSpeakerFilter, openEnroll, onEnrollDrop, submitEnroll, loadAllSpeakers,
       startEnrollRec, stopEnrollRec, enrollRecording, enrollRecSeconds, enrollPromptText,
       startRenameSpeaker, commitRenameSpeaker, askDeleteSpeaker, reassignSegment,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
+      spMergeMode, spMergeSelected, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
       reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       topics, topicDetail, showNewTopic, newTopic, creating, toggleNewTopic, cancelNewTopic, renaming,

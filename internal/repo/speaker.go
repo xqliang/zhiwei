@@ -78,3 +78,40 @@ func (r *SpeakerRepo) Delete(ctx context.Context, id ids.ID) error {
 	_, err := r.DB.ExecContext(ctx, `DELETE FROM speaker WHERE id = ?`, id.Int64())
 	return err
 }
+
+// MergeInto 把若干源说话人并入目标：先把各源关联的转写段 speaker_id 改指向目标
+// （跨所有 session，无 transcript 作用域——说话人级合并），再删源说话人行。
+// 源==目标的项跳过。单事务保证「段改指 + 删源」原子，中途失败不留半合并。
+// 用于声纹页「手动合并」纠正 ASR 把同人拆成多个说话人。返回改指的段数。
+func (r *SpeakerRepo) MergeInto(ctx context.Context, targetID ids.ID, sourceIDs []ids.ID) (int, error) {
+	if len(sourceIDs) == 0 {
+		return 0, nil
+	}
+	tx, err := r.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() // Commit 成功后为 no-op；失败回滚不留半合并
+	merged := 0
+	for _, src := range sourceIDs {
+		if src == targetID {
+			continue
+		}
+		res, err := tx.ExecContext(ctx,
+			`UPDATE transcript_segment SET speaker_id = ? WHERE speaker_id = ?`,
+			targetID.Int64(), src.Int64())
+		if err != nil {
+			return merged, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			merged += int(n)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM speaker WHERE id = ?`, src.Int64()); err != nil {
+			return merged, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return merged, err
+	}
+	return merged, nil
+}
