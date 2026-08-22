@@ -668,6 +668,9 @@ const app = createApp({
     function startEditSeg(sg) { segDraft.value[sg.id] = sg.text; }
     function cancelEditSeg(sg) { delete segDraft.value[sg.id]; }
     const segDirty = computed(() => Object.keys(segDraft.value).length > 0);
+    // 原始 ASR 视图开关：true 时转写段以只读方式展示 ASR 原始 spk 标签 + 毫秒时间戳 + 文本，
+    // 便于排查「同人被拆成 spk0/spk1」类 diarization 问题（speaker stage 会用声纹聚类兜底合并）。
+    const rawAsrView = ref(false);
     async function saveTranscript(s) {
       const draft = segDraft.value;
       const segs = Object.keys(draft).map(id => ({ id, text: draft[id] }));
@@ -982,7 +985,7 @@ const app = createApp({
       fmtTime, fmtDue, typeMeta, statusText, todoStatusText, spClass,
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissingMemId, askDismissMem, cancelDismissMem, confirmDismissMem, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
       tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay,
-      segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript,
+      segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript, rawAsrView,
       speakerFilter, renamingSpeaker, enrollOpen, enrollForm, enrolling, allSpeakers,
       speakerColor, segSpeakerBg, toggleSpeakerFilter, openEnroll, onEnrollDrop, submitEnroll, loadAllSpeakers,
       startEnrollRec, stopEnrollRec, enrollRecording, enrollRecSeconds, enrollPromptText,

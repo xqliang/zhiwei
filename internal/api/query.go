@@ -79,12 +79,13 @@ FROM audio_session s ORDER BY s.id DESC LIMIT ?`, limit)
 }
 
 type segmentView struct {
-	ID        string `json:"id"`
-	Speaker   string `json:"speaker"`              // 显示名：解析到用登记名，否则 "说话人 N"
-	SpeakerID string `json:"speaker_id,omitempty"` // 解析到的已登记说话人 id（未解析则空）
-	Text      string `json:"text"`
-	StartMS   int64  `json:"start_ms"`
-	EndMS     int64  `json:"end_ms"`
+	ID           string `json:"id"`
+	Speaker      string `json:"speaker"`                 // 显示名：解析到用登记名，否则 "说话人 N"
+	SpeakerID    string `json:"speaker_id,omitempty"`    // 解析到的已登记说话人 id（未解析则空）
+	SpeakerLabel string `json:"speaker_label,omitempty"` // ASR 原始标签（spk0/spk1…，「原始 ASR」视图用）
+	Text         string `json:"text"`
+	StartMS      int64  `json:"start_ms"`
+	EndMS        int64  `json:"end_ms"`
 }
 
 func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +113,7 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 		for i, sg := range segs {
 			views[i] = segmentView{
 				ID: sg.ID.String(), Text: sg.Text, StartMS: sg.StartMS, EndMS: sg.EndMS,
+				SpeakerLabel: sg.SpeakerLabel,
 			}
 			if sg.SpeakerID != nil {
 				views[i].SpeakerID = sg.SpeakerID.String()

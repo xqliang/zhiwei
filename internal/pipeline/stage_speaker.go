@@ -18,6 +18,12 @@ import (
 )
 
 // runSpeakerStage 是 speaker stage 的可测核心（避开 pool），由 stageSpeaker 包装成 Handler。
+//
+// 流程：按 ASR speaker_label 分组 → 逐段切片提向 → 组代表声纹 →
+// 【session 内聚类】把声纹相近（同人）的不同 ASR 标签合并成一个说话人
+// （realtime prompt 式 diarization 可能把一人标成 spk0/spk1，用 WeSpeaker 兜底合并）→
+// 每个聚类做跨 session 1:N 检索/登记 → 回填组内段 speaker_id（仅填 NULL，保留手动纠正）。
+// 注：聚类需真实 WeSpeaker 才生效——StubEmbedder 的随机向量不会聚拢。
 func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *repo.Transcript) error {
 	segs, err := d.Transcripts.ListSegments(ctx, tr.ID)
 	if err != nil {
@@ -43,11 +49,15 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		threshold = 0.5
 	}
 
+	// 1) 逐组切片+提向，跳过已全部解析的组（幂等：reextract 不重复调 sidecar、不覆盖手动纠正）。
+	type groupRep struct {
+		label string
+		rep   []float32
+		vecN  int // 该组有效向量数（用于 sample_count）
+	}
+	var reps []groupRep
 	for _, label := range order {
 		members := groups[label]
-		// 幂等：组内所有段均已解析到说话人（首次处理完，或用户已手动换人）→ 跳过该组。
-		// 这样 reextract（Flow: segment→speaker→extract）重跑时 speaker stage 是 no-op：
-		// 不重复调 sidecar、不覆盖手动纠正、sidecar 离线也不阻断 reextract。
 		allAssigned := len(members) > 0
 		for _, s := range members {
 			if s.SpeakerID == nil {
@@ -73,7 +83,52 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		if len(vecs) == 0 {
 			continue
 		}
-		rep := aggregateEmbeddings(vecs)
+		reps = append(reps, groupRep{label: label, rep: aggregateEmbeddings(vecs), vecN: len(vecs)})
+	}
+	if len(reps) == 0 {
+		return nil
+	}
+
+	// 2) session 内聚类：声纹相近（cosine≥阈值）的不同 ASR 标签合并为同人。
+	// 贪心合并（每 session 说话人数极少，O(n³) 可接受）。
+	clusterOf := make([]int, len(reps))
+	for i := range clusterOf {
+		clusterOf[i] = i
+	}
+	for i := 0; i < len(reps); i++ {
+		for j := i + 1; j < len(reps); j++ {
+			if clusterOf[i] == clusterOf[j] {
+				continue
+			}
+			if cosineVec(reps[i].rep, reps[j].rep) >= threshold {
+				old := clusterOf[j]
+				for k := range clusterOf {
+					if clusterOf[k] == old {
+						clusterOf[k] = clusterOf[i]
+					}
+				}
+			}
+		}
+	}
+
+	// 3) 每个聚类：聚代表声纹 → 跨 session 1:N 检索/登记 → 回填组内未解析段。
+	seen := make(map[int]bool)
+	for i := range reps {
+		if seen[clusterOf[i]] {
+			continue
+		}
+		seen[clusterOf[i]] = true
+		var memberReps [][]float32
+		var memberVecN int
+		var labels []string
+		for j := range reps {
+			if clusterOf[j] == clusterOf[i] {
+				memberReps = append(memberReps, reps[j].rep)
+				memberVecN += reps[j].vecN
+				labels = append(labels, reps[j].label)
+			}
+		}
+		rep := aggregateEmbeddings(memberReps) // 同人代表 = 各组代表再聚合
 		matchID, dist, matched, err := d.Voiceprint.Search(ctx, rep)
 		if err != nil {
 			return fmt.Errorf("voiceprint search: %w", err)
@@ -84,7 +139,7 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 			speakerID = matchID
 		} else {
 			// 自动登记：name=说话人{5位随机串}，向量 BLOB 灾备
-			sp := &repo.Speaker{Name: "说话人" + rand5(), Source: "auto", Embedding: float32Blob(rep), SampleCount: len(vecs)}
+			sp := &repo.Speaker{Name: "说话人" + rand5(), Source: "auto", Embedding: float32Blob(rep), SampleCount: memberVecN}
 			if err := d.Speakers.Create(ctx, sp); err != nil {
 				return fmt.Errorf("登记 speaker: %w", err)
 			}
@@ -93,11 +148,26 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 			}
 			speakerID = sp.ID
 		}
-		if err := d.Transcripts.SetSegmentSpeaker(ctx, tr.ID, label, speakerID); err != nil {
-			return fmt.Errorf("回填 speaker_id: %w", err)
+		for _, label := range labels {
+			if err := d.Transcripts.SetSegmentSpeaker(ctx, tr.ID, label, speakerID); err != nil {
+				return fmt.Errorf("回填 speaker_id: %w", err)
+			}
 		}
 	}
 	return nil
+}
+
+// cosineVec 两个 L2 归一化向量的余弦相似度（= 内积）。用于 session 内聚类合并同人。
+func cosineVec(a, b []float32) float64 {
+	var s float64
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		s += float64(a[i]) * float64(b[i])
+	}
+	return s
 }
 
 // stageSpeaker 是 pool 用的 Handler 包装。

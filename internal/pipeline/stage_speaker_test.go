@@ -18,16 +18,20 @@ type fakeVoiceprint struct {
 	matchID     ids.ID
 	added       []ids.ID
 	embedOK     bool
+	sameVec     bool // true→各段返回相同向量(测同人聚类)；false→逐段正交(测独立登记)
 	embedCalls  int
 	searchCalls int
 }
 
 func (f *fakeVoiceprint) Embed(_ context.Context, _ string) ([]float32, error) {
 	f.embedCalls++
-	// 返回非零向量（同组聚合后仍稳定；fake Search 不看内容）
 	v := make([]float32, 256)
-	for i := range v {
-		v[i] = 0.1
+	if f.sameVec {
+		// 常量向量：各段声纹相同 → 同人不同 ASR 标签会被聚类合并（测同人合并）
+		v[0] = 1.0
+	} else {
+		// 逐段正交 one-hot：不同段不同向量 → 不同组不会被误聚类（测独立登记）
+		v[(f.embedCalls-1)%256] = 1.0
 	}
 	return v, nil
 }
@@ -185,5 +189,32 @@ func TestStageSpeakerIdempotentSkip(t *testing.T) {
 		if s.SpeakerID == nil || !firstAssigned[*s.SpeakerID] {
 			t.Fatalf("重跑后段 %d speaker_id 被改: %+v", s.SequenceNo, s.SpeakerID)
 		}
+	}
+}
+
+// TestStageSpeakerClustersSamePerson 验证 session 内聚类：realtime prompt 式 diarization 可能
+// 把同一人标成 spk0/spk1，stage 用声纹相似度兜底合并——fake 让两组返回相同向量（同人），
+// 应聚成 1 个 speaker（只登记 1 次，3 段都归到同一个人），而非拆成 2 个。
+// 注：真实场景需 WeSpeaker 真向量才生效，StubEmbedder 随机向量聚不出；本测用可控向量验证聚类逻辑本身。
+func TestStageSpeakerClustersSamePerson(t *testing.T) {
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	fv := &fakeVoiceprint{matched: false, sameVec: true} // 各段同向量 → 两组同人 → 聚类合并
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(context.Background(), d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 1 { // 2 个 ASR 标签同人 → 聚成 1 个 → 只登记 1 次
+		t.Fatalf("同人合并应只登记 1 个，实际 %d", len(fv.added))
+	}
+	segs, _ := transcripts.ListSegments(context.Background(), tr.ID)
+	speakerIDs := map[ids.ID]bool{}
+	for _, s := range segs {
+		if s.SpeakerID == nil {
+			t.Fatalf("段 %d 未回填 speaker_id", s.SequenceNo)
+		}
+		speakerIDs[*s.SpeakerID] = true
+	}
+	if len(speakerIDs) != 1 { // 3 段都归到同一个人
+		t.Fatalf("同人合并后 3 段应归到 1 个 speaker，实际 %d", len(speakerIDs))
 	}
 }

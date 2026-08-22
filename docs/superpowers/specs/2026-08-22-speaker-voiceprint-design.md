@@ -48,6 +48,8 @@ WeSpeaker + FAISS 是 Python 生态，后端是 Go。采用 Python FastAPI sidec
 
 ASR 原生 diarization 的 `spk_N` 已完成「session 内」的说话人聚类。因此解析粒度 = 按 `spk_N` 标签分组，每组聚一个代表声纹做「跨 session」1:N。WeSpeaker 只负责跨 session 身份匹配，不做 session 内二次聚类。
 
+> **2026-08-22 修订（见 §13.6）**：上段假设 ASR 原生 diarization 准确。realtime prompt 式 diarization 不稳，会把同一人标成不同 `spk_N`；已加 **session 内声纹聚类**兜底合并同人标签（§13.6），不再「不做 session 内二次聚类」。需真实 WeSpeaker 向量才生效。
+
 ## 3. 架构与数据流
 
 ```
@@ -270,3 +272,12 @@ PATCH  /api/sessions/{id}/segments/{segId}/speaker   换人 {speaker_id}（校�
 ### 13.5 实现状态
 
 全部落地、构建绿、相关单测/集成测试通过。增量提交：`6e9dfc9`（segments 端点）、`0143bcd`（realtime+prompt ASR）、`d87809f`（声纹 tab）、`39e82dc`（docs）、`3b73b54`（麦克风录入）。评审抓出的 Important 项（reextract 重跑 speaker stage 覆盖手动换人、Enroll 吞 Add 错误）已修+补 `TestStageSpeakerIdempotentSkip`（commit `c2846d7`）。真实 WeSpeaker 加载 / 阈值 benchmark / spikes+e2e 真跑 仍为手动 follow-up。
+
+### 13.6 同人合并（session 内聚类）+ 原始 ASR 详细视图
+
+用户反馈：realtime prompt 式 diarization 把同一人标成多个 `spk_N`（时间线被拆开）。两处修复：
+
+- **session 内声纹聚类**（`stage_speaker.go` `runSpeakerStage` 重构）：原流程「按 spk 分组→每组各自 1:N 登记」会在 ASR 拆错时重复登记同人。改为「逐组切片提向→组代表声纹→**session 内按余弦相似度 ≥ 阈值聚类合并同人 spk 标签**（贪心并查，每 session 说话人数极少 O(n³) 可接受）→每聚类聚代表→跨 session 1:N/登记→回填该聚类所有组段」。加 `cosineVec`（L2 归一向量内积=余弦）。幂等性不变（组内全解析仍跳过）、`SetSegmentSpeaker` 仍只填 NULL。补 `TestStageSpeakerClustersSamePerson`（fake 同向量→2 标签聚成 1 speaker），既有 3 测改用逐段正交 one-hot 向量避免被误聚类。
+- **原始 ASR 详细视图**（前端）：`segmentView` 增 `SpeakerLabel`（ASR 原始 spk 标签，未聚类前的模型输出）字段，`GetSession` 填充；转写详情头部加「详细」按钮 toggle `rawAsrView`，展开只读视图逐段显示 `spk{speaker_label}` + `start_ms→end_ms`（`fmtSec` 毫秒→秒·3 位小数）+ 文本，便于排查 diarization 拆分根因。
+
+**重要前置条件**：聚类需真实 WeSpeaker 提取向量才真正生效——当前 `StubEmbedder` 随机/伪向量聚不出（同人会因向量不相似而仍被拆开）。realtime prompt 式 diarization 标签不稳是拆分根因；加载真实 WeSpeaker 后聚类兜底才见效。属手动 follow-up（同 §12/§13.5）。

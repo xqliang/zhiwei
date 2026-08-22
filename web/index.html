@@ -111,6 +111,12 @@
   .seg-text { flex: 1; min-width: 0; }
   textarea.seg-edit { width: 100%; margin: 0; font-size: var(--fs-base); line-height: 1.6; resize: vertical; }
 
+  /* 原始 ASR 视图：spk 标签 + 时间戳 + 文本，只读，用于排查 diarization 把同人拆成 spk0/spk1 */
+  .seg.raw-asr { flex-wrap: wrap; align-items: baseline; }
+  .raw-asr .raw-spk { font-size: var(--fs-xs); font-weight: 600; color: var(--muted); background: var(--surface-sunken); border-radius: 6px; padding: 2px 8px; white-space: nowrap; flex-shrink: 0; }
+  .raw-asr .raw-time { font-size: var(--fs-xs); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .raw-asr .raw-text { flex: 1; min-width: 0; }
+
   /* 按钮：全局不换行 + focus 环 + 按下反馈 */
   button { font-family: inherit; white-space: nowrap; }
   .btn { display: inline-flex; align-items: center; gap: 6px; border: none; border-radius: 9px; cursor: pointer; font-size: var(--fs-sm); font-weight: 500; transition: background .15s, color .15s, filter .12s, transform .04s; white-space: nowrap; }
@@ -302,6 +308,7 @@
             <b>转写详情</b>
             <div style="display:flex; gap:6px; align-items:center">
               <button v-if="segDirty" class="btn primary" style="padding:6px 14px" @click="saveTranscript(s)">保存转写修改</button>
+              <button class="btn-link" @click="rawAsrView=!rawAsrView" :title="rawAsrView?'收起原始 ASR 视图':'查看 ASR 原始结果（spk 标签 + 时间戳 + 文本）'">{{ rawAsrView ? '收起' : '详细' }}</button>
               <button class="btn-link" @click="toggleSession(s.id)">✕ 关闭</button>
             </div>
           </div>
@@ -310,6 +317,8 @@
             <span class="muted">{{ detail.job.last_error }}</span>
             <button class="btn primary" style="padding:4px 12px" @click="retryJob(detail.job.id)">重跑</button>
           </div>
+          <!-- 转写段：正常视图(可编辑/换人) vs 原始 ASR 视图(只读，spk 标签+时间戳+文本，排查 diarization 拆分) -->
+          <template v-if="!rawAsrView">
           <div v-for="(sg, i) in detail.segments" :key="i" class="seg" v-show="!speakerFilter || sg.speaker_id===speakerFilter">
             <select class="sp" :class="spClass(sg.speaker)" :style="{background: segSpeakerBg(sg)}"
                     @change="reassignSegment(sg, $event.target.value); $event.target.value=sg.speaker_id||''"
@@ -329,6 +338,15 @@
             </div>
           </div>
           <div v-if="segDirty" class="muted" style="margin-top:4px">有未保存的转写修改，点上方「保存转写修改」生效后即可「重新提取」。</div>
+          </template>
+          <template v-else>
+          <div class="muted" style="margin:4px 0 6px; font-size:var(--fs-xs)">原始 ASR 结果：spk 标签为模型/接口原始输出，同人可能被拆成 spk0/spk1（speaker stage 会用声纹聚类合并同人）</div>
+          <div v-for="(sg, i) in detail.segments" :key="'r'+i" class="seg raw-asr">
+            <span class="raw-spk">spk{{ sg.speaker_label || '—' }}</span>
+            <span class="raw-time">{{ fmtSec(sg.start_ms) }} – {{ fmtSec(sg.end_ms) }}</span>
+            <span class="raw-text">{{ sg.text }}</span>
+          </div>
+          </template>
 
           <!-- memory 卡片 -->
           <template v-if="detail.memories && detail.memories.length">
