@@ -1,5 +1,20 @@
 # ASR 实测协议笔记（2026-08-18）
 
+## 2026-08-22 续：默认切回 realtime + diarization prompt（文件 ASR 配额受限）
+
+异步文件 ASR 落地后实测：`/v1/audio/asr/file/submit` 返回 `quota_exceeded`（账号配额耗尽）；
+`/step_plan/v1/audio/asr/file/submit` 返回 404（文件 ASR 端点不在 Step Plan 下，文档"Step Plan 仅 SSE 调 ASR"印证）。
+故默认 ASR 切回 **realtime `stepaudio-2.5-realtime`（Step Plan WSS）+ diarization prompt**（`ZW_ASR_PROVIDER=realtime`，默认）：
+
+- 端点：`wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime`（与 Sprint 0 旧 realtime 同端点，Step Plan 配额可用）
+- 指令：让模型按 `[spkN][开始秒-结束秒]说话内容` 模板输出（秒·2 位小数，spk0/spk1 按出场顺序）。
+- 解析：`provider.ParseTimedSpeakerTranscript` 把 `[spk0]0.00-4.15内容` 切片（兼容模型省略时间段方括号），spk→label、秒→ms。
+- spike（`cmd/spike/asr-realtime`）验证：输出 `[spk0]0.00-4.15明天记得给汤姆发邮件…`，配额不冲突。
+- **免 TOS**（base64 pcm 直传 WSS），故 realtime 模式下 ASR 不需 TOS 凭据。
+
+权衡：realtime 的时间戳与说话人标签是模型 prompt 生成（非原生 diarization/时间戳），精度依赖模型，
+不如文件 ASR 的原生 ms 时间戳 + spk_N diarization 准。文件 ASR 配额恢复后可 `ZW_ASR_PROVIDER=file` 切回（更准）。
+
 ## 2026-08-22 更新：改用异步文件 ASR（说话人声纹功能）
 
 说话人识别功能需要「每段时间戳 + 说话人标签」，realtime 协议均无原生时间戳/说话人分离。

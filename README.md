@@ -17,7 +17,8 @@ AI 全时生活记忆与个人智能体的云端服务。当前为 **Sprint 0-1*
 - 环境变量：
   - `ARK_API_KEY`（必填，火山方舟，LLM 用）
   - `STEPFUN_API_KEY`（ASR 用，可放 `.env` 文件，已被 gitignore）
-  - `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`（必填，火山引擎 TOS 对象存储，ASR 文件接口需上传音频换公网 URL；可放 `.env`）
+  - `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`（`ZW_ASR_PROVIDER=file` 时必填，火山引擎 TOS 对象存储，文件 ASR 需上传音频换公网 URL；可放 `.env`）
+  - `ZW_ASR_PROVIDER`（`realtime` 默认｜`file`；realtime 走 Step Plan WSS + diarization prompt 免 TOS，文件 ASR 原生 diarization+ms 时间戳更准但受配额限制）
   - `ZW_VOICEPRINT_SIDECAR_URL`（声纹 sidecar 地址，默认 `http://127.0.0.1:8010`）
   - `ZW_VOICEPRINT_THRESHOLD`（1:N 余弦匹配阈值，默认 `0.5`，需用真实录音 benchmark 实调）
 
