@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -125,5 +126,58 @@ func TestSpeakerEnroll(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("未找到录入的说话人: %+v", list)
+	}
+}
+
+// TestSpeakerSegments 验证 GET /api/speakers/{id}/segments 返回该说话人跨 session 的片段
+// （含 session_id/filename/created_at + 段文本与 start/end ms，供声纹 tab 点开播放）。
+func TestSpeakerSegments(t *testing.T) {
+	r, speakers, transcripts, _ := setupSpeakerAPI(t)
+	ctx := context.Background()
+	sp := &repo.Speaker{Name: "王五", Source: "enrolled"}
+	if err := speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	sessions := &repo.SessionRepo{DB: transcripts.DB}
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "mtg.wav",
+		StoragePath: "/tmp/mtg.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	conf := 0.9
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{{
+		TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1",
+		Text: "你好世界", StartMS: 1200, EndMS: 3400, Confidence: &conf,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.SetSegmentSpeaker(ctx, tr.ID, "1", sp.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/speakers/"+sp.ID.String()+"/segments", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Segments []repo.SpeakerSegmentOccurrence `json:"segments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Segments) != 1 {
+		t.Fatalf("len=%d", len(resp.Segments))
+	}
+	got := resp.Segments[0]
+	if got.SessionID != sid || got.Text != "你好世界" ||
+		got.StartMS != 1200 || got.EndMS != 3400 || got.Filename != "mtg.wav" {
+		t.Fatalf("occurrence mismatch: %+v", got)
 	}
 }

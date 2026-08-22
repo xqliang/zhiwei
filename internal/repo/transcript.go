@@ -169,3 +169,32 @@ type SpeakerInSegment struct {
 	SegmentCount int    `db:"segment_count" json:"segment_count"`
 	ColorIndex   int    `db:"-" json:"color_index"`
 }
+
+// ListSegmentsBySpeaker 跨 session 取该说话人出现的所有片段（声纹 tab「点开看关联录音」用）。
+// JOIN transcript→audio_session 拿 session_id/filename/created_at（音频经
+// GET /api/sessions/{session_id}/audio 播放，不外泄 storage_path）。
+// 按录音时间倒序、段序升序，便于前端按录音分组展示。
+func (r *TranscriptRepo) ListSegmentsBySpeaker(ctx context.Context, speakerID ids.ID) ([]SpeakerSegmentOccurrence, error) {
+	var list []SpeakerSegmentOccurrence
+	err := r.DB.SelectContext(ctx, &list, `
+SELECT seg.id AS segment_id, tr.session_id, seg.text, seg.start_ms, seg.end_ms, seg.sequence_no,
+       s.filename, s.created_at
+FROM transcript_segment seg
+JOIN transcript tr ON tr.id = seg.transcript_id
+JOIN audio_session s ON s.id = tr.session_id
+WHERE seg.speaker_id = ?
+ORDER BY s.created_at DESC, seg.sequence_no`, speakerID.Int64())
+	return list, err
+}
+
+// SpeakerSegmentOccurrence 一个说话人片段的跨 session 出现记录（声纹 tab 用）。
+type SpeakerSegmentOccurrence struct {
+	SegmentID  ids.ID    `db:"segment_id" json:"segment_id"`
+	SessionID  ids.ID    `db:"session_id" json:"session_id"`
+	Text       string    `db:"text" json:"text"`
+	StartMS    int64     `db:"start_ms" json:"start_ms"`
+	EndMS      int64     `db:"end_ms" json:"end_ms"`
+	SequenceNo int       `db:"sequence_no" json:"sequence_no"`
+	Filename   string    `db:"filename" json:"filename"`
+	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+}

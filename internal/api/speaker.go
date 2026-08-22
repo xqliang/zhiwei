@@ -32,6 +32,7 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Post("/api/speakers", h.Enroll)
 	r.Patch("/api/speakers/{id}", h.Rename)
 	r.Delete("/api/speakers/{id}", h.Delete)
+	r.Get("/api/speakers/{id}/segments", h.Segments) // 该说话人跨 session 出现的片段（声纹 tab 点开看关联录音）
 	r.Get("/api/sessions/{sid}/speakers", h.SessionSpeakers)
 	r.Patch("/api/sessions/{sid}/segments/{seg}/speaker", h.ReassignSegment)
 }
@@ -44,6 +45,23 @@ func (h *SpeakerHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"speakers": list})
+}
+
+// Segments 该说话人出现的所有片段（跨 session，声纹 tab「点开看关联录音」用）。
+// 每条含 session_id/filename/created_at（音频经 GET /api/sessions/{session_id}/audio 播放）
+// + 段文本与 start_ms/end_ms（前端按时间段定位播放）。
+func (h *SpeakerHandler) Segments(w http.ResponseWriter, r *http.Request) {
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	list, err := h.Transcripts.ListSegmentsBySpeaker(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"segments": list})
 }
 
 // Enroll 录入：收音频样本 + 名 → 转码 wav16k → sidecar /embed → 登记(enrolled) + /add。
