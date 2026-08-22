@@ -2687,3 +2687,35 @@ git commit -m "test(e2e): 校验 segment speaker_id"
 - **类型一致**：`SpeakerRepo`、`voiceprint.Client`、`SpeakerInSegment`、`segmentView`、`StageDeps` 字段跨任务一致；`ids.ID`/`ids.ParseID` 用法与现有一致。✓
 - **占位符**：TOS/WeSpeaker 真实字段名显式由 spike(Task 1/2) 验证后固化，非臆造；`math.Float32bits` 等已在对应 Task 标注落地替换。✓
 - **遗留**：Task 11/13 的 `mathFloat32bits`/`sqrtF32`/`asUnsafePointer` 自造 helper 必须在落地时换为 `math.Float32bits`/`math.Sqrt`（Task Step 8/6 已指示）。
+
+---
+
+## Phase 8 补遗：增量需求（落地后追加，2026-08-22 续）
+
+原 18 任务全部落地 + 最终评审通过后，用户追加 4 项需求 + 一个线上问题，均已实现。对应设计补遗见 spec §13。
+
+### Task 19：ASR 默认切 realtime + diarization prompt（`0143bcd`）
+
+线上文件 ASR `quota_exceeded`、`/step_plan/v1/audio/asr/file/submit` 404。改默认 ASR 为 realtime `stepaudio-2.5-realtime`（Step Plan WSS）+ diarization prompt：
+- `internal/provider/asr.go`：`asrInstructions` 换成用户 prompt（`[spkN][开始秒-结束秒]内容`，秒·2 位小数）；新增 `ParseTimedSpeakerTranscript`（兼容模型省略时间段方括号，spk→label、秒→ms）+ 3 单测；`StepFunASR.Transcribe` 改用它。
+- `internal/config/config.go` + `cmd/zhiwei-server/main.go`：`ASRProvider`（`realtime` 默认｜`file`）开关，realtime 免 TOS、file 需 TOS。
+- `cmd/spike/asr-realtime`：验证 spike（输出 `[spk0]0.00-4.15...`，配额可用）。
+
+### Task 20：声纹 tab 前端管理页（`d87809f`）
+
+新增「声纹」tab：名册列表（色块 chip + 名 + 来源 + 样本数）、`＋录入`、行内 ✎ 改名、✕ 删除、卡片展开关联录音 + 按时间段播放。复用 Task 16 既有 speaker 绑定。适配点：`sp.id` vs `sp.speaker_id` 字段差异（`||` 兜底）、`detail` null 守卫、v-for 内 `voiceAudioEl` ref 数组归一化。
+
+### Task 21：声纹关联录音端点（`6e9dfc9`）
+
+后端 `GET /api/speakers/{id}/segments` + `TranscriptRepo.ListSegmentsBySpeaker`（跨 session 片段，含 session_id/filename/created_at + 段文本与 start_ms/end_ms）。`TestSpeakerSegments` 覆盖。
+
+### Task 22：麦克风直录 + 提示文字照念（`3b73b54`）
+
+录入表单加 `🎤 麦克风录入`（独立 MediaRecorder，录完 webm → `enrollForm.file` → 原 enroll 路径）+ 样本提示文字。拖拽备选保留。
+
+### 评审修复（`c2846d7`）
+
+最终 code review 抓出两个 Important，已修+补测试：
+- **reextract 回归**：Flow 改 `segment→speaker→extract` 后 reextract 会重跑 speaker stage，bulk 覆盖手动换人 + sidecar 离线则 reextract 失败。修：speaker stage 幂等（组内段已全解析则跳过 no-op、不调 sidecar、不覆盖）；`SetSegmentSpeaker` 加 `AND speaker_id IS NULL`（只填空、保留手动纠正）；`TestStageSpeakerIdempotentSkip` 验证。更新 Reextract stale 注释。
+- **Enroll 吞 Add 错误**：`Enroll` 检查 sidecar `/add` 错误→500 + 回滚刚建的 speaker 行（避免"名册有但索引无"孤儿）；defer 清理临时文件。
+- Minor：sliceAudio 注释措辞、StubEmbedder 用 hashlib 跨进程稳定。

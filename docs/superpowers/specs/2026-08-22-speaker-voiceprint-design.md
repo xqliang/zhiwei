@@ -238,3 +238,35 @@ PATCH  /api/sessions/{id}/segments/{segId}/speaker   换人 {speaker_id}（校�
 - 自动登记按 ASR `spk_N` 分组，依赖 ASR diarization 准确率；若 ASR 把同人标成不同 `spk_N`，会重复登记（后续可用 WeSpeaker 二次聚类兜底）。
 - TOS presigned URL TTL 1h，长音频（>1h 处理）极端情况下可能过期，重试会重新上传+submit，可接受。
 - 录入仅文件上传；录音录入（复用 record tab 的 MediaRecorder）为后续增强。
+
+## 13. 补遗：增量需求（2026-08-22 续，落地后追加）
+
+原 spec/plan 落地后，用户提出 4 项增量需求 + 一个线上问题，均已实现。本节补充记录，与上文不冲突处以上文为准。
+
+### 13.1 ASR 默认切 realtime + diarization prompt（文件 ASR 配额受限）
+
+线上实测：异步文件 ASR `POST /v1/audio/asr/file/submit` 返回 `quota_exceeded`（账号配额耗尽）；加 Step Plan 前缀 `/step_plan/v1/audio/asr/file/submit` 返回 404（文件 ASR 端点不在 Step Plan 下）。故默认 ASR 由文件接口切回 **realtime `stepaudio-2.5-realtime`（Step Plan WSS）+ diarization prompt**：
+
+- 端点 `wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime`，配额可用、与文件 ASR 不冲突。
+- 指令让模型按 `[spkN][开始秒-结束秒]说话内容` 模板输出（秒·2 位小数，spk0/spk1 按出场顺序）。
+- `provider.ParseTimedSpeakerTranscript` 解析（兼容模型省略时间段第二层方括号，输出 `[spk0]0.00-4.15内容`），spk→`SpeakerLabel`、秒→`StartMS/EndMS`。
+- **免 TOS**（base64 pcm 直传 WSS），realtime 模式下 ASR 不需 TOS 凭据。
+- config 增 `ASRProvider`（`realtime` 默认｜`file` 可切回，原生 diarization+ms 时间戳更准但受配额限制）。main 按开关装配：realtime 免 TOS；file 需 TOS。
+- 权衡：realtime 的时间戳与说话人标签为模型 prompt 生成（非原生），精度依赖模型，不如文件 ASR 准。文件 ASR 配额恢复后可 `ZW_ASR_PROVIDER=file` 切回。
+
+### 13.2 声纹 tab（说话人名册管理页）
+
+新增前端「声纹」tab（nav，紧邻录音），管理全部说话人：列表（色块 chip + 名 + 来源徽标「手动录入/自动登记」+ 样本数）、`＋录入`、行内 ✎ 改名、✕ 删除。复用 `GET/POST/PATCH/DELETE /api/speakers` 与 Task 16 的 `allSpeakers`/`enrollForm`/`submitEnroll`/`startRenameSpeaker`/`commitRenameSpeaker`/`askDeleteSpeaker` 绑定。
+
+### 13.3 每个声纹点开关联录音 + 按时间段播放
+
+- 后端新增 `GET /api/speakers/{id}/segments` → `TranscriptRepo.ListSpeakersBySpeaker` 跨 session 取该说话人片段（JOIN transcript→audio_session），每条含 `session_id/filename/created_at` + 段文本与 `start_ms/end_ms`。音频经 `GET /api/sessions/{session_id}/audio` 播放，不外泄 `storage_path`。
+- 前端：声纹卡片可展开 → 按录音分组列片段 → 每片「▶ 播放」按钮。共享 `<audio>` 元素：`playSpeakerSegment` 设 src（跨录音切源时等 `loadedmetadata` 再 seek）、seek 到 `start_ms/1000`、播放，`onVoiceAudioTimeUpdate` 在 `currentTime ≥ end_ms/1000` 时暂停。同录音片段复用已加载音频（只 seek）。
+
+### 13.4 录入支持麦克风直录 + 提示文字照念
+
+录入表单（声纹 tab + 时间线面板）加 `🎤 麦克风录入`：独立 `MediaRecorder`（不与录音 tab 的 `recorder` 冲突），录完产 webm `File` → `enrollForm.file` → 走原 `POST /api/speakers` 路径（后端 ffmpeg 转 wav16k）。表单显示一段样本提示文字（约 15s 自然语速）供照着念，便于录到足够人声。拖拽文件作备选保留。（§12 末「录音录入为后续增强」已完成。）
+
+### 13.5 实现状态
+
+全部落地、构建绿、相关单测/集成测试通过。增量提交：`6e9dfc9`（segments 端点）、`0143bcd`（realtime+prompt ASR）、`d87809f`（声纹 tab）、`39e82dc`（docs）、`3b73b54`（麦克风录入）。评审抓出的 Important 项（reextract 重跑 speaker stage 覆盖手动换人、Enroll 吞 Add 错误）已修+补 `TestStageSpeakerIdempotentSkip`（commit `c2846d7`）。真实 WeSpeaker 加载 / 阈值 benchmark / spikes+e2e 真跑 仍为手动 follow-up。
