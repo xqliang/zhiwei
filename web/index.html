@@ -341,8 +341,14 @@
               <option value="__new">+ 新加…</option>
             </select>
             <button class="btn mini seg-play" @click="toggleTimelineSegPlay(sg)" style="padding:2px 8px; flex-shrink:0" :title="tlPlayingSegId===sg.id?'播放中，点暂停':'播放此段音频'">{{ tlPlayingSegId===sg.id ? '⏸' : '▶' }}</button>
+            <button v-if="!mergeMode && segEnrollId!==sg.id" class="btn mini" :disabled="!canEnrollSeg(sg)" @click="startSegEnroll(sg)" style="padding:2px 8px; flex-shrink:0" :title="canEnrollSeg(sg) ? '用此段音频录入声纹' : ('时长 ' + (segDurMs(sg)/1000).toFixed(1) + 's 不足，至少需 ' + (MIN_ENROLL_MS/1000) + 's')">录入</button>
             <div class="seg-text">
-              <div v-if="!segEditing(sg)" class="editable" @click="startEditSeg(sg)" title="点击编辑转写文本">{{ sg.text }}<span class="hint">✎ 编辑</span></div>
+              <div v-if="segEnrollId===sg.id" class="edit-form" style="margin:0">
+                <input class="txt inline" v-model="segEnrollName" placeholder="说话人名（必填）" @keyup.enter="confirmSegEnroll(s, sg)" @keyup.esc="cancelSegEnroll()">
+                <button class="btn mini" @click="confirmSegEnroll(s, sg)">录入</button>
+                <button class="btn mini" @click="cancelSegEnroll()">取消</button>
+              </div>
+              <div v-else-if="!segEditing(sg)" class="editable" @click="startEditSeg(sg)" title="点击编辑转写文本">{{ sg.text }}<span class="hint">✎ 编辑</span></div>
               <div v-else class="edit-form" style="margin:0">
                 <textarea class="txt seg-edit" v-model="segDraft[sg.id]" rows="2"></textarea>
                 <div class="edit-actions">
@@ -879,6 +885,6 @@
   </div>
 </div>
 
-<script src="/app/app.5790bec8.js"></script>
+<script src="/app/app.64895e86.js"></script>
 </body>
 </html>

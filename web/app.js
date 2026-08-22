@@ -677,16 +677,18 @@ const app = createApp({
     // ---------- timeline 转写段：逐段播放 + 多段合并(归到同一说话人) ----------
     // 逐段播放复用详情区顶部那个 <audio :src="audioUrl(s.id)">（ref=sessionAudioEl）：
     // 点某段 ▶ → seek 到 start_ms 播放，timeupdate 到 end_ms 暂停（同声纹 tab playSpeakerSegment 思路）。
-    const sessionAudioEl = ref(null);   // 详情区 <audio> 元素引用
+    const sessionAudioEl = ref(null);   // 详情区 <audio> 元素引用（在 v-for 内，Vue 收集成数组，见 tlAudio）
     const tlPlayingSegId = ref(null);   // 正在播放的段 id（▶→⏸ 高亮）
+    // 取详情区 <audio>：ref 在 v-for(会话列表) 内会被 Vue 收集成数组，取首元素（同声纹 tab voiceAudio）。
+    function tlAudio() { const r = sessionAudioEl.value; return Array.isArray(r) ? r[0] : r; }
     // 切换某段播放：正在播此段且未暂停→暂停；否则从该段 start_ms 起播。
     function toggleTimelineSegPlay(sg) {
-      const a = sessionAudioEl.value;
+      const a = tlAudio();
       if (tlPlayingSegId.value === sg.id && a && !a.paused) { a.pause(); tlPlayingSegId.value = null; return; }
       playTimelineSeg(sg);
     }
     function playTimelineSeg(sg) {
-      const a = sessionAudioEl.value; if (!a) return;
+      const a = tlAudio(); if (!a) return;
       const startSec = (sg.start_ms || 0) / 1000, endSec = (sg.end_ms || 0) / 1000;
       const go = () => {
         a.currentTime = startSec;
@@ -701,7 +703,7 @@ const app = createApp({
     }
     // <audio> 的 timeupdate：播到当前段 end_ms 即暂停并复位高亮。
     function onTimelineAudioTimeUpdate() {
-      const a = sessionAudioEl.value;
+      const a = tlAudio();
       if (!a || !a.dataset.end) return;
       if (a.currentTime >= parseFloat(a.dataset.end)) { a.pause(); tlPlayingSegId.value = null; }
     }
@@ -719,12 +721,32 @@ const app = createApp({
       const ids = Object.keys(mergeSelected).filter(k => mergeSelected[k]);
       if (ids.length < 2 || !mergeTarget.value) return;
       try {
-        for (const id of ids) {
-          await api('PATCH', '/api/sessions/' + s.id + '/segments/' + id + '/speaker', { speaker_id: mergeTarget.value });
-        }
+        // 段合并成一条（text 拼接+[min,max]时间+目标说话人，删其余段），非批量改判
+        await api('POST', '/api/sessions/' + s.id + '/segments/merge', { segment_ids: ids, speaker_id: mergeTarget.value });
         cancelMerge();
         await reloadSession(s.id);
-        toast.value = '已合并 ' + ids.length + ' 段到同一说话人'; setTimeout(() => { toast.value = ''; }, 2000);
+        toast.value = '已合并 ' + ids.length + ' 段为一条'; setTimeout(() => { toast.value = ''; }, 2000);
+      } catch (e) { showError(e); }
+    }
+
+    // ---------- 从转写段音频录入声纹（timeline「用此段录音纹」） ----------
+    // 用某段对应时间段的音频算声纹录入新说话人（后端切 transcoded wav 切片提向，受最小时长约束）。
+    // 前端最小时长与后端默认 3000ms 对齐（后端为权威校验，前端仅做禁用提示）。
+    const MIN_ENROLL_MS = 3000;
+    const segEnrollId = ref(null);   // 正在录入的段 id
+    const segEnrollName = ref('');  // 录入名输入
+    function segDurMs(sg) { return (sg.end_ms || 0) - (sg.start_ms || 0); }
+    function canEnrollSeg(sg) { return segDurMs(sg) >= MIN_ENROLL_MS; }
+    function startSegEnroll(sg) { segEnrollId.value = sg.id; segEnrollName.value = ''; }
+    function cancelSegEnroll() { segEnrollId.value = null; segEnrollName.value = ''; }
+    async function confirmSegEnroll(s, sg) {
+      if (!segEnrollName.value.trim()) return;
+      try {
+        await api('POST', '/api/sessions/' + s.id + '/segments/' + sg.id + '/enroll', { name: segEnrollName.value.trim() });
+        cancelSegEnroll();
+        await loadAllSpeakers(); // 新说话人立即可在换人下拉选到
+        await reloadSession(s.id);
+        toast.value = '已从该段录入说话人'; setTimeout(() => { toast.value = ''; }, 2000);
       } catch (e) { showError(e); }
     }
 
@@ -1079,6 +1101,7 @@ const app = createApp({
       segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript, rawAsrView, toggleRawAsr,
       sessionAudioEl, tlPlayingSegId, toggleTimelineSegPlay, onTimelineAudioTimeUpdate,
       mergeMode, mergeSelected, mergeCount, mergeTarget, enterMergeMode, cancelMerge, toggleMergeSelect, confirmMerge,
+      MIN_ENROLL_MS, segEnrollId, segEnrollName, segDurMs, canEnrollSeg, startSegEnroll, cancelSegEnroll, confirmSegEnroll,
       speakerFilter, renamingSpeaker, enrollOpen, enrollForm, enrolling, allSpeakers,
       speakerColor, segSpeakerBg, toggleSpeakerFilter, openEnroll, onEnrollDrop, submitEnroll, loadAllSpeakers,
       startEnrollRec, stopEnrollRec, enrollRecording, enrollRecSeconds, enrollPromptText,

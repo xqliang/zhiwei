@@ -41,6 +41,7 @@ type Config struct {
 	ASRProvider          string  // realtime | file（ZW_ASR_PROVIDER，默认 realtime：文件 ASR 配额受限时用 realtime+prompt）
 	VoiceprintSidecarURL string  // 声纹 sidecar 地址（http://127.0.0.1:8010）
 	VoiceprintThreshold  float64 // 1:N 余弦匹配阈值，低于则视为未命中→自动登记
+	EnrollMinDurationMS  int64   // 从转写段音频录入声纹的最小时长（毫秒，默认 3000=3s；WeSpeaker LM 对 >3s 更稳）
 }
 
 func getenv(k, def string) string {
@@ -88,6 +89,7 @@ func Load() (*Config, error) {
 		ASRProvider:          getenv("ZW_ASR_PROVIDER", "realtime"),
 		VoiceprintSidecarURL: getenv("ZW_VOICEPRINT_SIDECAR_URL", "http://127.0.0.1:8010"),
 		VoiceprintThreshold:  getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.5),
+		EnrollMinDurationMS:  int64(getenvInt("ZW_ENROLL_MIN_DURATION_MS", 3000)),
 	}, nil
 }
 

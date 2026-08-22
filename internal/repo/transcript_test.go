@@ -169,3 +169,59 @@ func TestSetSegmentSpeaker(t *testing.T) {
 		t.Fatalf("聚合视图错误: %+v", list)
 	}
 }
+
+// TestTranscriptMergeSegments 覆盖 timeline「合并连续同人段成一条」repo 层：
+// 建 3 段(前2段同人连续)，合并前 2 段 → keeper 文本=拼接、时间=[min,max]、speaker_id=target，
+// 第 2 段删除，第 3 段保留。对应后端 POST /sessions/{id}/segments/merge。未设 TEST_MYSQL_DSN 跳过。
+func TestTranscriptMergeSegments(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tr := &TranscriptRepo{DB: db}
+	speakers := &SpeakerRepo{DB: db}
+
+	sid := ids.New()
+	if err := (&SessionRepo{DB: db}).Create(ctx, &AudioSession{
+		ID: sid, Source: "test", Filename: "m.wav", StoragePath: "/tmp/m.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := &Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := tr.Create(ctx, tc); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.InsertSegments(ctx, []TranscriptSegment{
+		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "0", Text: "前半", StartMS: 0, EndMS: 1500},
+		{TranscriptID: tc.ID, SequenceNo: 2, SpeakerLabel: "0", Text: "后半", StartMS: 1500, EndMS: 3000},
+		{TranscriptID: tc.ID, SequenceNo: 3, SpeakerLabel: "1", Text: "他人", StartMS: 3000, EndMS: 4000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := tr.ListSegments(ctx, tc.ID)
+	sp := &Speaker{Name: "目标"}
+	if err := speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	// 合并 seg[0]+seg[1] → keeper=seg[0]
+	if err := tr.MergeSegments(ctx, tc.ID, segs[0].ID, []ids.ID{segs[1].ID}, "前半后半", 0, 3000, sp.ID); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	after, _ := tr.ListSegments(ctx, tc.ID)
+	if len(after) != 2 {
+		t.Fatalf("合并后应剩 2 段，实际 %d", len(after))
+	}
+	// keeper(序号最小) 文本拼接 + 时间 [0,3000] + speaker_id=target
+	merged := after[0]
+	if merged.Text != "前半后半" || merged.StartMS != 0 || merged.EndMS != 3000 {
+		t.Fatalf("keeper 合并异常: text=%q [%d,%d]", merged.Text, merged.StartMS, merged.EndMS)
+	}
+	if merged.SpeakerID == nil || *merged.SpeakerID != sp.ID {
+		t.Fatalf("keeper speaker_id 未设为目标: %+v", merged.SpeakerID)
+	}
+	// 第 3 段保留不变
+	if after[1].Text != "他人" {
+		t.Fatalf("未参与合并的第3段应保留: %q", after[1].Text)
+	}
+}

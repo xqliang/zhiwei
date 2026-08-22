@@ -293,3 +293,11 @@ PATCH  /api/sessions/{id}/segments/{segId}/speaker   换人 {speaker_id}（校�
 - **模型缓存**：首次 `load_model('chinese')` 从 ModelScope 下 CnCeleb resnet34 (~31MB) 到 `~/.wespeaker/chinese`，后续走缓存。可经 `ZW_WESPEAKER_MODEL` 切其他预训练（如 `'english'`=ResNet221_LM）。
 
 至此 §13.6 的「聚类需真实向量才生效」前置条件满足——speaker stage 的 session 内声纹聚类 + 跨 session 1:N 现在用真向量运行。仍为后续：匹配阈值 `0.5` 的 benchmark 实调（§12）、spikes/e2e 真跑集成。
+
+### 13.8 timeline 段合并成一条 + 从段音频录入声纹 + 播放 bug 修
+
+用户连提三需求（落地于一次提交）：
+
+- **timeline「合并」语义改为段合并成一条**（修正 §13.6 的批量改判理解）：选中连续同人段 → 后端 `POST /api/sessions/{sid}/segments/merge {segment_ids, speaker_id}` 按 sequence_no 顺序拼文本、时间取 `[min start, max end]`、speaker_id=target，删其余段（repo `MergeSegments` 单事务）+ 重算全文。前端 `confirmMerge` 改调该端点。8 段合并 2→1 验证通过（拼接文本 + 跨段时间）。
+- **从转写段音频录入声纹**（timeline「录入」按钮）：`POST /api/sessions/{sid}/segments/{seg}/enroll {name}` 切 `transcoded/{sid}.wav` 的 `[start_ms,end_ms]` → sidecar /embed → 登记(enrolled)+/add。**最小时长闸门** `ZW_ENROLL_MIN_DURATION_MS`（默认 3000ms）——短于则 400 拒（前端按钮 disabled + 提示）。前端 `MIN_ENROLL_MS` 与后端默认对齐。只创建说话人、不改判段（改判可能误拆已聚类说话人，留给下拉/手动合并）。3.7s 段录入成功、1.9s 段被拒验证通过。
+- **timeline 段播放 bug 修**：`<audio ref="sessionAudioEl">` 在 timeline 会话列表 `v-for` 内，Vue 3 把字符串 ref 收集成数组，`sessionAudioEl.value` 是数组而非元素 → `addEventListener is not a function`。加 `tlAudio()` helper（`Array.isArray ? r[0] : r`，同声纹 tab `voiceAudio()`）取首元素。

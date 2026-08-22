@@ -77,6 +77,14 @@ func (r *TranscriptRepo) ListSegments(ctx context.Context, transcriptID ids.ID) 
 	return list, err
 }
 
+// GetSegment 按 id 读单段转写段（从转写段音频录入声纹时取 start/end_ms 用）。
+// 不存在返回 sql.ErrNoRows。不带 transcript 作用域——调用方自行校验归属。
+func (r *TranscriptRepo) GetSegment(ctx context.Context, segID ids.ID) (*TranscriptSegment, error) {
+	var s TranscriptSegment
+	err := r.DB.GetContext(ctx, &s, `SELECT * FROM transcript_segment WHERE id = ?`, segID.Int64())
+	return &s, err
+}
+
 func (r *TranscriptRepo) SetFullText(ctx context.Context, id ids.ID, full string, conf float64) error {
 	_, err := r.DB.ExecContext(ctx,
 		`UPDATE transcript SET full_text = ?, confidence = ? WHERE id = ?`, full, conf, id.Int64())
@@ -127,6 +135,38 @@ func (r *TranscriptRepo) RecomputeFullText(ctx context.Context, transcriptID ids
 		conf = sumConf / n
 	}
 	return r.SetFullText(ctx, transcriptID, sb.String(), conf)
+}
+
+// MergeSegments 把若干连续段合并成一条：保留 keeper，其 text=各段按序拼接、
+// start_ms=min、end_ms=max、speaker_id=target；其余段删除。单事务原子（中途失败不留半合并）。
+// 用于 timeline「合并连续同人段成一条」（纠正 ASR 把同人连续发言拆成多段）。调用方负责
+// 已按 sequence_no 排好序 + 算好拼接文本/时间，并保证 keeper ∈ 待合并段集合。
+func (r *TranscriptRepo) MergeSegments(ctx context.Context, transcriptID, keeperID ids.ID, otherIDs []ids.ID, text string, startMS, endMS int64, speakerID ids.ID) error {
+	tx, err := r.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // Commit 成功后为 no-op；失败回滚
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE transcript_segment SET text = ?, start_ms = ?, end_ms = ?, speaker_id = ? WHERE id = ? AND transcript_id = ?`,
+		text, startMS, endMS, speakerID.Int64(), keeperID.Int64(), transcriptID.Int64()); err != nil {
+		return err
+	}
+	if len(otherIDs) > 0 {
+		ids := make([]int64, len(otherIDs))
+		for i, id := range otherIDs {
+			ids[i] = id.Int64()
+		}
+		q, args, err := sqlx.In(`DELETE FROM transcript_segment WHERE id IN (?) AND transcript_id = ?`, ids, transcriptID.Int64())
+		if err != nil {
+			return err
+		}
+		// MySQL 占位符即 ?，sqlx.In 已展开为 IN (?,?,...)，无需 Rebind
+		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // SetSegmentSpeaker 按 speaker_label 批量回填本 transcript 内段的 speaker_id。

@@ -20,10 +20,11 @@ import (
 
 // SpeakerHandler 说话人名册 + 录入 + 换人。
 type SpeakerHandler struct {
-	Speakers    *repo.SpeakerRepo
-	Transcripts *repo.TranscriptRepo
-	Voiceprint  voiceprint.Client
-	DataDir     string
+	Speakers            *repo.SpeakerRepo
+	Transcripts         *repo.TranscriptRepo
+	Voiceprint          voiceprint.Client
+	DataDir             string
+	EnrollMinDurationMS int64 // 从转写段音频录入声纹的最小时长（ms，0→兜底 3000）
 }
 
 // RegisterSpeaker 挂载说话人相关路由。
@@ -36,6 +37,8 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Get("/api/speakers/{id}/segments", h.Segments) // 该说话人跨 session 出现的片段（声纹 tab 点开看关联录音）
 	r.Get("/api/sessions/{sid}/speakers", h.SessionSpeakers)
 	r.Patch("/api/sessions/{sid}/segments/{seg}/speaker", h.ReassignSegment)
+	r.Post("/api/sessions/{sid}/segments/{seg}/enroll", h.EnrollFromSegment) // timeline「用此段录音纹」：从转写段音频录入新说话人
+	r.Post("/api/sessions/{sid}/segments/merge", h.MergeSegments)            // timeline「合并连续同人段成一条」
 }
 
 // List 全部 active 说话人（管理页/换人下拉用）。
@@ -277,6 +280,182 @@ func (h *SpeakerHandler) ReassignSegment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// EnrollFromSegment timeline「用此段录音纹」：用某转写段对应时间段的音频录入新说话人。
+// 切 transcoded/{sid}.wav 的 [start_ms,end_ms] → sidecar /embed → 登记(enrolled) + /add。
+// 时长 < EnrollMinDurationMS 拒绝（声纹需足够时长才稳，WeSpeaker LM 对 >3s 更准）。
+// 只创建说话人、不改判段——改判可能误拆已聚类说话人，留给下拉/手动合并；返回新 speaker。
+func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Request) {
+	sid, err := ids.ParseID(chi.URLParam(r, "sid"))
+	if err != nil {
+		http.Error(w, "invalid sid", http.StatusBadRequest)
+		return
+	}
+	segID, err := ids.ParseID(chi.URLParam(r, "seg"))
+	if err != nil {
+		http.Error(w, "invalid seg id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		http.Error(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+	// 校验段属于该会话的 transcript（防跨会话误用）
+	tr, err := h.Transcripts.GetBySession(r.Context(), sid)
+	if err != nil {
+		http.Error(w, "无转写", http.StatusNotFound)
+		return
+	}
+	seg, err := h.Transcripts.GetSegment(r.Context(), segID)
+	if err != nil {
+		http.Error(w, "转写段不存在", http.StatusNotFound)
+		return
+	}
+	if seg.TranscriptID != tr.ID {
+		http.Error(w, "段不属于该会话", http.StatusBadRequest)
+		return
+	}
+	min := h.EnrollMinDurationMS
+	if min == 0 {
+		min = 3000 // 兜底，与 config 默认一致
+	}
+	if dur := seg.EndMS - seg.StartMS; dur < min {
+		http.Error(w, fmt.Sprintf("时长 %.1fs 不足，录入声纹至少需 %.0fs", float64(dur)/1000, float64(min)/1000),
+			http.StatusBadRequest)
+		return
+	}
+	wavPath := filepath.Join(h.DataDir, "transcoded", sid.String()+".wav")
+	if _, err := os.Stat(wavPath); err != nil {
+		http.Error(w, "转码音频未找到（需先完成 ASR）", http.StatusNotFound)
+		return
+	}
+	tmpDir := filepath.Join(h.DataDir, "enroll")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		http.Error(w, "存储目录创建失败", http.StatusInternalServerError)
+		return
+	}
+	slice := filepath.Join(tmpDir, segID.String()+"-seg.wav")
+	defer os.Remove(slice)
+	if err := sliceWavForEnroll(wavPath, slice, seg.StartMS, seg.EndMS); err != nil {
+		http.Error(w, "切片失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	vec, err := h.Voiceprint.Embed(r.Context(), slice)
+	if err != nil || len(vec) != 256 {
+		http.Error(w, "声纹提取失败", http.StatusInternalServerError)
+		return
+	}
+	sp := &repo.Speaker{Name: req.Name, Source: "enrolled", Embedding: float32BlobAPI(vec), SampleCount: 1}
+	if err := h.Speakers.Create(r.Context(), sp); err != nil {
+		http.Error(w, "登记失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// 写 FAISS 索引；失败回滚 speaker 行，避免孤儿（与 Enroll 一致）
+	if err := h.Voiceprint.Add(r.Context(), vec, sp.ID); err != nil {
+		_ = h.Speakers.Delete(r.Context(), sp.ID)
+		http.Error(w, "声纹索引写入失败，请重试", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, sp)
+}
+
+// sliceWavForEnroll 从 transcoded 16k mono wav 按 [start_ms,end_ms] 切片段（录入声纹用）。
+// 内联而非 import pipeline.sliceAudio（避免 api→pipeline 反向依赖；-c copy 包级精度对声纹无影响）。
+func sliceWavForEnroll(src, dst string, startMS, endMS int64) error {
+	out, err := exec.Command("ffmpeg", "-y",
+		"-ss", fmt.Sprintf("%.3f", float64(startMS)/1000),
+		"-to", fmt.Sprintf("%.3f", float64(endMS)/1000),
+		"-i", src, "-c", "copy", dst).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", out)
+	}
+	return nil
+}
+
+// MergeSegments timeline「合并连续同人段成一条」：把选中段合并成一条——text 按 sequence_no
+// 顺序拼接、时间 [min start, max end]、speaker_id=target，其余段删除 + 重算全文。
+// 用于纠正 ASR 把同人连续发言拆成多段。后端按 ListSegments(已按 sequence_no 排序) 顺序合并，
+// 不强制连续性校验（前端引导选连续同人段；非连续合并会得跨时段，用户自负）。
+func (h *SpeakerHandler) MergeSegments(w http.ResponseWriter, r *http.Request) {
+	sid, err := ids.ParseID(chi.URLParam(r, "sid"))
+	if err != nil {
+		http.Error(w, "invalid sid", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		SegmentIDs []string `json:"segment_ids"`
+		SpeakerID  string   `json:"speaker_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	spID, err := ids.ParseID(req.SpeakerID)
+	if err != nil {
+		http.Error(w, "invalid speaker_id", http.StatusBadRequest)
+		return
+	}
+	if len(req.SegmentIDs) < 2 {
+		http.Error(w, "至少选 2 段", http.StatusBadRequest)
+		return
+	}
+	tr, err := h.Transcripts.GetBySession(r.Context(), sid)
+	if err != nil {
+		http.Error(w, "无转写", http.StatusNotFound)
+		return
+	}
+	all, err := h.Transcripts.ListSegments(r.Context(), tr.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	idSet := make(map[ids.ID]bool, len(req.SegmentIDs))
+	for _, s := range req.SegmentIDs {
+		id, err := ids.ParseID(s)
+		if err != nil {
+			http.Error(w, "invalid segment_id: "+s, http.StatusBadRequest)
+			return
+		}
+		idSet[id] = true
+	}
+	// all 已按 sequence_no 排序，过滤选中即得合并顺序
+	picked := make([]repo.TranscriptSegment, 0, len(req.SegmentIDs))
+	for _, s := range all {
+		if idSet[s.ID] {
+			picked = append(picked, s)
+		}
+	}
+	if len(picked) != len(req.SegmentIDs) {
+		http.Error(w, "部分段不属于该会话", http.StatusBadRequest)
+		return
+	}
+	// 拼接文本 + [min,max] 时间
+	text := ""
+	startMS, endMS := picked[0].StartMS, picked[0].EndMS
+	for _, s := range picked {
+		text += s.Text
+		if s.StartMS < startMS {
+			startMS = s.StartMS
+		}
+		if s.EndMS > endMS {
+			endMS = s.EndMS
+		}
+	}
+	keeper := picked[0]
+	others := make([]ids.ID, 0, len(picked)-1)
+	for _, s := range picked[1:] {
+		others = append(others, s.ID)
+	}
+	if err := h.Transcripts.MergeSegments(r.Context(), tr.ID, keeper.ID, others, text, startMS, endMS, spID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = h.Transcripts.RecomputeFullText(r.Context(), tr.ID)
+	writeJSON(w, map[string]any{"ok": true, "merged_count": len(picked), "keeper_id": keeper.ID.String()})
 }
 
 // float32BlobAPI 256×float32 → []byte（Little-Endian），存 speaker.embedding 灾备 BLOB。
