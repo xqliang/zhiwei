@@ -200,3 +200,51 @@ func ParseSpeakerTranscript(text string) []TranscriptPiece {
 	}
 	return out
 }
+
+// fileASRQueryResponse 对应 StepFun 异步文件 ASR POST /v1/audio/asr/file/query 的响应。
+// 字段见 docs/superpowers/specs/asr-protocol-notes.md（2026-08-22 更新）与设计 §2.1：
+// result[].utterances[] 每句含 start_time/end_time（毫秒）+ speaker.id（spk_N，任务内稳定）。
+type fileASRQueryResponse struct {
+	Status string `json:"status"` // SUCCEEDED | PENDING | RUNNING | FAILED
+	Error  *struct {
+		Stage   string `json:"stage"`
+		Message string `json:"message"`
+	} `json:"error"`
+	Duration float64 `json:"duration"`
+	Result   []struct {
+		Text       string `json:"text"`
+		Utterances []struct {
+			Text      string `json:"text"`
+			StartTime int    `json:"start_time"` // 毫秒
+			EndTime   int    `json:"end_time"`   // 毫秒
+			Speaker   *struct {
+				ID string `json:"id"` // spk_1、spk_2 …（同一任务内稳定，跨任务不保证）
+			} `json:"speaker"`
+		} `json:"utterances"`
+	} `json:"result"`
+}
+
+// ParseFileASRResult 把 StepFun 异步文件 ASR 的 /file/query 响应解析成转写片段（纯函数，可单测）。
+// speaker.id 形如 "spk_1" → 去前缀得 "1"；speaker 字段缺失（未开 enable_speaker_info）→ 空 label；
+// start_time/end_time（ms）→ StartMS/EndMS。非法 JSON 或空结果返回 nil，不 panic。
+func ParseFileASRResult(raw []byte) []TranscriptPiece {
+	var resp fileASRQueryResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil
+	}
+	var out []TranscriptPiece
+	for _, r := range resp.Result {
+		for _, u := range r.Utterances {
+			p := TranscriptPiece{
+				Text: u.Text, StartMS: int64(u.StartTime), EndMS: int64(u.EndTime),
+			}
+			if u.Speaker != nil {
+				p.SpeakerLabel = strings.TrimPrefix(u.Speaker.ID, "spk_")
+			}
+			if p.Text != "" { // 过滤空文本
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}

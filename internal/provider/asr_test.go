@@ -42,3 +42,50 @@ func TestParseSpeakerTranscriptStripsTimePrefix(t *testing.T) {
 		t.Fatalf("pieces = %+v", pieces)
 	}
 }
+
+func TestParseFileASRResult(t *testing.T) {
+	// StepFun 异步文件 ASR /file/query 的真实响应结构：result[].utterances[]，每句带 ms 时间戳 + speaker.id。
+	raw := []byte(`{
+	  "status":"SUCCEEDED","duration":6.2,
+	  "result":[{
+	    "text":"你好。我咨询一下。",
+	    "utterances":[
+	      {"text":"你好。","start_time":2000,"end_time":4500,"speaker":{"id":"spk_1"}},
+	      {"text":"我咨询一下。","start_time":4500,"end_time":6200,"speaker":{"id":"spk_2"}}
+	    ]
+	  }]
+	}`)
+	pieces := ParseFileASRResult(raw)
+	if len(pieces) != 2 {
+		t.Fatalf("len=%d", len(pieces))
+	}
+	if pieces[0].SpeakerLabel != "1" { // spk_1 去前缀得 "1"
+		t.Fatalf("label=%q", pieces[0].SpeakerLabel)
+	}
+	if pieces[0].StartMS != 2000 || pieces[0].EndMS != 4500 {
+		t.Fatalf("ms=%d-%d", pieces[0].StartMS, pieces[0].EndMS)
+	}
+	if pieces[1].SpeakerLabel != "2" || pieces[1].Text != "我咨询一下。" || pieces[1].StartMS != 4500 || pieces[1].EndMS != 6200 {
+		t.Fatalf("p1=%+v", pieces[1])
+	}
+}
+
+func TestParseFileASRResultNoSpeaker(t *testing.T) {
+	// 未开 speaker_info：speaker 字段缺失，label 空；时间戳仍解析。
+	raw := []byte(`{"status":"SUCCEEDED","result":[{"text":"x","utterances":[
+	  {"text":"x","start_time":0,"end_time":100}]}]}`)
+	pieces := ParseFileASRResult(raw)
+	if len(pieces) != 1 || pieces[0].SpeakerLabel != "" || pieces[0].StartMS != 0 || pieces[0].EndMS != 100 {
+		t.Fatalf("%+v", pieces)
+	}
+}
+
+func TestParseFileASRResultMalformed(t *testing.T) {
+	// 非法 JSON / 空结果：返回 nil，不 panic。
+	if got := ParseFileASRResult([]byte(`{bad`)); got != nil {
+		t.Fatalf("want nil, got %+v", got)
+	}
+	if got := ParseFileASRResult([]byte(`{"status":"SUCCEEDED","result":[]}`)); len(got) != 0 {
+		t.Fatalf("want empty, got %+v", got)
+	}
+}
