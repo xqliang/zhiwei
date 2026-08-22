@@ -1,5 +1,24 @@
 # ASR 实测协议笔记（2026-08-18）
 
+## 2026-08-22 更新：改用异步文件 ASR（说话人声纹功能）
+
+说话人识别功能需要「每段时间戳 + 说话人标签」，realtime 协议均无原生时间戳/说话人分离。
+调研 StepFun 全部 ASR 接口后（见设计 `2026-08-22-speaker-voiceprint-design.md` §2.1），
+**改用异步文件 ASR**（唯一同时提供原生时间戳 + 说话人分离的接口）：
+
+- 端点：`POST https://api.stepfun.com/v1/audio/asr/file/submit` + `POST /v1/audio/asr/file/query`
+- 鉴权：`Authorization: Bearer $STEPFUN_API_KEY`
+- model：`stepaudio-2.5-asr`
+- 入参（submit body）：`{audio:{format:"wav",channel:1,rate:16000,url:<公网URL>}, request:{model_name, show_utterances:true, enable_speaker_info:true}}`
+  - **`audio.url` 只接受公网 URL，不支持 base64/直传** → 本项目用火山引擎 TOS 上传音频（私有 + presigned GET URL，1h TTL，识别后删）。
+- 轮询 query：`{task_id}` → `status: PENDING|RUNNING|SUCCEEDED|FAILED`，完成后 `result[].utterances[]` 每句含：
+  - `text`、`start_time`(ms)、`end_time`(ms) — **原生 ms 级时间戳**（满足"秒数 3 位小数"：ms/1000=x.xxx）
+  - `speaker.id` 形如 `spk_1`/`spk_2` — **原生说话人分离**，任务内稳定、跨任务不保证，最多 10 说话人
+- 解析：`provider.ParseFileASRResult(raw)` 把 `spk_N` 去前缀得说话人标签 `N`，ms→StartMS/EndMS。
+
+> realtime `stepaudio-2.5-realtime` 的 Provider 代码保留（`StepFunASR`），但主链路装配已切到 `StepFunFileASR`。
+> realtime 无原生时间戳/说话人，仅作回退/历史参考。
+
 ## 结论：当前可用 ASR = StepFun stepaudio-2.5-realtime（WSS，OpenAI Realtime 协议）
 
 ### 火山 Ark（不可用，待开通）

@@ -17,6 +17,9 @@ AI 全时生活记忆与个人智能体的云端服务。当前为 **Sprint 0-1*
 - 环境变量：
   - `ARK_API_KEY`（必填，火山方舟，LLM 用）
   - `STEPFUN_API_KEY`（ASR 用，可放 `.env` 文件，已被 gitignore）
+  - `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`（必填，火山引擎 TOS 对象存储，ASR 文件接口需上传音频换公网 URL；可放 `.env`）
+  - `ZW_VOICEPRINT_SIDECAR_URL`（声纹 sidecar 地址，默认 `http://127.0.0.1:8010`）
+  - `ZW_VOICEPRINT_THRESHOLD`（1:N 余弦匹配阈值，默认 `0.5`，需用真实录音 benchmark 实调）
 
 ## 快速开始
 
@@ -27,11 +30,16 @@ make compose-up
 # 2. 建表
 make migrate-up
 
-# 3. 起服务（会读取 .env 里的密钥）
+# 3. 起声纹 sidecar（说话人识别需要；首次需建 venv，见 Makefile 注释）
+make sidecar-start
+
+# 4. 起服务（会读取 .env 里的密钥）
 set -a; source .env; set +a
 make dev
 # 打开 http://localhost:8080 —— 时间线 / 录音 两个标签页
 ```
+
+> 启动顺序：MySQL → 声纹 sidecar → 服务。sidecar 未起时转写仍可用，但说话人解析 stage 会失败重试（不丢转写）。
 
 ## 运行测试
 
@@ -71,11 +79,14 @@ make spike-asr    # StepFun realtime 转写
 GET  /api/health            健康检查
 POST /api/audio             上传音频（multipart：file + source=web_upload|web_record）
 GET  /api/sessions          会话列表（含处理状态）
-GET  /api/sessions/{id}     会话详情：转写分段（带说话人标签）
+GET  /api/sessions/{id}     会话详情：转写分段（带说话人标签+解析到的说话人名）+ speakers 列表
 POST /api/jobs/{id}/retry   失败任务重跑
 GET/PATCH /api/memories      记忆列表（type/topic_id 过滤）/ 修正与忽略
 GET/PATCH /api/todos         待办列表 / 状态流转（确认/完成/忽略）
 GET/POST/PATCH /api/topics   主题计数列表 / 新建 / 确认/改名/忽略
+GET/POST/PATCH/DELETE /api/speakers  说话人名册 / 录入声纹(multipart file+name) / 改名 / 删除
+GET  /api/sessions/{id}/speakers     会话内已解析说话人列表（面板用）
+PATCH /api/sessions/{id}/segments/{seg}/speaker  单段换人（手动纠正说话人）
 ```
 
 ## 项目结构
