@@ -1,10 +1,13 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -15,7 +18,7 @@ import (
 
 // TranscriptPiece 是 ASR 输出的最小转写单元：一段话 + 说话人标签。
 type TranscriptPiece struct {
-	SpeakerLabel string  // ASR 标签（"1"/"2"/...），空表示未知/单人
+	SpeakerLabel string // ASR 标签（"1"/"2"/...），空表示未知/单人
 	Text         string
 	StartMS      int64 // 当前 StepFun 方案无时间戳，恒为 0
 	EndMS        int64
@@ -199,6 +202,124 @@ func ParseSpeakerTranscript(text string) []TranscriptPiece {
 		}
 	}
 	return out
+}
+
+// TOSUploader 抽象 TOS 上传/删除，便于 ASR provider 解耦存储 + 测试注入。
+// 生产实现见 internal/storage/tos.go（后续任务）。
+type TOSUploader interface {
+	UploadWAV(ctx context.Context, localPath, key string) (presignedURL string, err error)
+	Delete(ctx context.Context, key string) error
+}
+
+// StepFunFileASR 用 StepFun 异步文件 ASR（POST /v1/audio/asr/file/submit + /file/query）做转写。
+// 原生返回每句 ms 级 start/end_time + speaker.id(spk_N)，见 docs/superpowers/specs/asr-protocol-notes.md。
+// 音频需公网可访问：由 TOSUploader 上传后返回 presigned GET URL 喂给 StepFun。
+type StepFunFileASR struct {
+	BaseURL      string              // https://api.stepfun.com/v1
+	APIKey       string              // StepFun API Key（STEPFUN_API_KEY）
+	Model        string              // stepaudio-2.5-asr
+	TOS          TOSUploader         // 音频上传/删除的存储抽象
+	KeyPrefix    string              // TOS 对象 key 前缀，如 zhiwei/
+	sleep        func(time.Duration) // 可注入跳过真实 sleep（测试用）
+	pollInterval time.Duration       // 轮询 query 的间隔
+}
+
+// NewStepFunFileASR 构造。sleep 为 nil 时用 time.Sleep；测试可注入假 sleep。
+func NewStepFunFileASR(baseURL, apiKey, model string, tos TOSUploader, sleep func(time.Duration)) *StepFunFileASR {
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	return &StepFunFileASR{
+		BaseURL: baseURL, APIKey: apiKey, Model: model, TOS: tos,
+		KeyPrefix: "zhiwei/", sleep: sleep, pollInterval: 2 * time.Second,
+	}
+}
+
+// Transcribe 实现 ASRProvider：上传 TOS 拿 presigned URL → submit → 轮询 query → 解析。
+// defer 删 TOS 对象（best-effort，删失败不影响转写结果）。
+func (p *StepFunFileASR) Transcribe(ctx context.Context, audioPath string) ([]TranscriptPiece, error) {
+	if p.APIKey == "" {
+		return nil, fmt.Errorf("asr: STEPFUN_API_KEY 未设置")
+	}
+	// key 用纳秒时间戳保证同一前缀下不重名
+	key := p.KeyPrefix + fmt.Sprintf("%d.wav", time.Now().UnixNano())
+	url, err := p.TOS.UploadWAV(ctx, audioPath, key)
+	if err != nil {
+		return nil, fmt.Errorf("tos 上传: %w", err)
+	}
+	defer func() { _ = p.TOS.Delete(ctx, key) }()
+
+	taskID, err := p.submit(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("asr submit: %w", err)
+	}
+	raw, err := p.poll(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("asr query: %w", err)
+	}
+	return ParseFileASRResult(raw), nil
+}
+
+// submit 提交转写任务，返回 task_id。音频参数固定 16k mono wav（调用方保证格式）。
+func (p *StepFunFileASR) submit(ctx context.Context, audioURL string) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"audio":   map[string]any{"format": "wav", "channel": 1, "rate": 16000, "url": audioURL},
+		"request": map[string]any{"model_name": p.Model, "show_utterances": true, "enable_speaker_info": true},
+	})
+	resp, err := p.do(ctx, "POST", p.BaseURL+"/audio/asr/file/submit", body)
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(resp, &r); err != nil || r.TaskID == "" {
+		return "", fmt.Errorf("submit 响应非法: %s", resp)
+	}
+	return r.TaskID, nil
+}
+
+// poll 轮询 query 直到任务结束（SUCCEEDED/FAILED）或超时。
+// 返回成功时的原始响应，交给 ParseFileASRResult 解析。
+func (p *StepFunFileASR) poll(ctx context.Context, taskID string) ([]byte, error) {
+	maxAttempts := 150 // 2s × 150 ≈ 5min
+	for i := 0; i < maxAttempts; i++ {
+		if i > 0 {
+			p.sleep(p.pollInterval)
+		}
+		body, _ := json.Marshal(map[string]string{"task_id": taskID})
+		raw, err := p.do(ctx, "POST", p.BaseURL+"/audio/asr/file/query", body)
+		if err != nil {
+			continue // 单次网络抖动不致命，继续轮询
+		}
+		var r fileASRQueryResponse
+		if err := json.Unmarshal(raw, &r); err != nil {
+			continue
+		}
+		if r.Status == "FAILED" {
+			return nil, fmt.Errorf("asr failed: %s", raw)
+		}
+		if r.Status != "PENDING" && r.Status != "RUNNING" {
+			return raw, nil // SUCCEEDED 等终态
+		}
+	}
+	return nil, fmt.Errorf("asr 超时（task=%s）", taskID)
+}
+
+// do 发一个带 Bearer 鉴权的 JSON 请求，返回响应体原始字节。
+func (p *StepFunFileASR) do(ctx context.Context, method, url string, body []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
 
 // fileASRQueryResponse 对应 StepFun 异步文件 ASR POST /v1/audio/asr/file/query 的响应。

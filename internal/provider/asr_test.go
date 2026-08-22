@@ -1,7 +1,11 @@
 package provider
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestParseSpeakerTranscript(t *testing.T) {
@@ -88,4 +92,58 @@ func TestParseFileASRResultMalformed(t *testing.T) {
 	if got := ParseFileASRResult([]byte(`{"status":"SUCCEEDED","result":[]}`)); len(got) != 0 {
 		t.Fatalf("want empty, got %+v", got)
 	}
+}
+
+func TestStepFunFileASRTranscribe(t *testing.T) {
+	// 用 httptest 模拟 submit + query；TOS 用假 uploader 返回固定 URL。
+	tosUp := &stubTOS{url: "https://example.com/x.wav"}
+	var submitCount, queryCount int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/audio/asr/file/submit", func(w http.ResponseWriter, r *http.Request) {
+		submitCount++
+		write(w, `{"task_id":"t-1"}`)
+	})
+	mux.HandleFunc("/audio/asr/file/query", func(w http.ResponseWriter, r *http.Request) {
+		queryCount++
+		// 第一次 RUNNING，第二次完成
+		if queryCount == 1 {
+			write(w, `{"status":"RUNNING"}`)
+			return
+		}
+		write(w, `{"status":"SUCCEEDED","duration":6.2,"result":[{"text":"你好","utterances":[
+			{"text":"你好","start_time":2000,"end_time":4500,"speaker":{"id":"spk_1"}}]}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p := NewStepFunFileASR(srv.URL, "k", "stepaudio-2.5-asr", tosUp, func(time.Duration) {})
+	p.pollInterval = 1 * time.Millisecond
+	pieces, err := p.Transcribe(context.Background(), "testdata/speech.wav")
+	if err != nil {
+		t.Fatalf("transcribe: %v", err)
+	}
+	if submitCount != 1 || queryCount != 2 {
+		t.Fatalf("calls submit=%d query=%d", submitCount, queryCount)
+	}
+	if len(pieces) != 1 || pieces[0].SpeakerLabel != "1" || pieces[0].StartMS != 2000 {
+		t.Fatalf("%+v", pieces)
+	}
+	if !tosUp.deleted {
+		t.Fatal("未删 TOS 对象")
+	}
+}
+
+type stubTOS struct {
+	url     string
+	deleted bool
+}
+
+func (s *stubTOS) UploadWAV(ctx context.Context, localPath, key string) (string, error) {
+	return s.url, nil
+}
+func (s *stubTOS) Delete(ctx context.Context, key string) error { s.deleted = true; return nil }
+
+func write(w http.ResponseWriter, s string) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(s))
 }
