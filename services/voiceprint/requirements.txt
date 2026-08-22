@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+faiss-cpu
+numpy
+# WeSpeaker 推理依赖：spike.py 验证确切加载方式后固定（ONNX Runtime 是候选之一）。
+onnxruntime
+# 测试用
+httpx
+pytest
