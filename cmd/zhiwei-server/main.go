@@ -98,7 +98,7 @@ func main() {
 		PromptVersion: promptVersion,
 		ExtractWindow: cfg.ExtractWindow,
 		Gate:          memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
-		Voiceprint: voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
+		Voiceprint:    voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
 	})
 	flow := pipeline.Flow{Stages: []string{"asr", "segment", "speaker", "extract"}}
 	pool := pipeline.NewPool(jobs, flow, stages)
@@ -114,7 +114,11 @@ func main() {
 	api.RegisterAudio(r, sessions, jobs, cfg.DataDir)
 	api.RegisterQuery(r, &api.QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
-		Memories: memories, Todos: todos,
+		Memories: memories, Todos: todos, Speakers: speakers,
+	})
+	api.RegisterSpeaker(r, &api.SpeakerHandler{
+		Speakers: speakers, Transcripts: transcripts,
+		Voiceprint: voiceprintCli, DataDir: cfg.DataDir,
 	})
 	api.RegisterMemory(r, &api.MemoryHandler{
 		Memories: memories, Topics: topics, MemoryTopics: memoryTopics,
