@@ -179,6 +179,15 @@ func (r *TranscriptRepo) SetSegmentSpeaker(ctx context.Context, transcriptID ids
 	return err
 }
 
+// ClearSegmentSpeakers 清空本 transcript 所有段的 speaker_id（置 NULL）。
+// 用于 timeline「重新识别」：清空后 speaker stage 不再幂等跳过，会重新提向+按最新声纹库 1:N 匹配。
+// 注意：会覆盖手动纠正的换人（调用方需在 UI 二次确认）。
+func (r *TranscriptRepo) ClearSegmentSpeakers(ctx context.Context, transcriptID ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = NULL WHERE transcript_id = ?`, transcriptID.Int64())
+	return err
+}
+
 // SetSegmentSpeakerByID 单段换人（前端"换人"下拉用）。带 transcript_id 作用域防跨会话误写。
 func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID, segID, speakerID ids.ID) error {
 	_, err := r.DB.ExecContext(ctx,

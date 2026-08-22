@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 
 	"github.com/go-chi/chi/v5"
 
@@ -504,29 +505,71 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "声纹提取失败", http.StatusInternalServerError)
 		return
 	}
-	matchID, dist, hasMatch, err := h.Voiceprint.Search(r.Context(), vec)
-	if err != nil {
-		http.Error(w, "声纹检索失败: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
 	threshold := h.VoiceprintThreshold
 	if threshold == 0 {
 		threshold = 0.5
 	}
-	resp := map[string]any{
-		"similarity":  dist, // 余弦相似度（向量已 L2 归一，内积=余弦），越高越像
-		"threshold":   threshold,
-		"matched":     hasMatch && dist >= threshold,
-		"has_library": hasMatch, // 库非空才有候选；空库时 similarity=0
+	// 列全部 active 说话人，用其灾备 BLOB(与 FAISS 同向量) 逐个算余弦匹配度——
+	// 返回全库按相似度降序（不止 top-1），便于看「这段像库里的每一个谁、各多像」。
+	list, err := h.Speakers.List(r.Context())
+	if err != nil {
+		http.Error(w, "声纹库读取失败: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
-	// 命中或仅展示最接近候选：库非空就回最接近的说话人名（哪怕低于阈值，便于看「像谁」）
-	if hasMatch {
-		if sp, err := h.Speakers.Get(r.Context(), matchID); err == nil {
-			resp["speaker_id"] = sp.ID.String()
-			resp["speaker_name"] = sp.Name
+	type matchItem struct {
+		SpeakerID  string  `json:"speaker_id"`
+		Name       string  `json:"name"`
+		Similarity float64 `json:"similarity"`
+	}
+	items := make([]matchItem, 0, len(list))
+	for _, sp := range list {
+		emb, ok := decodeEmbedding(sp.Embedding)
+		if !ok || len(emb) != 256 {
+			continue // 无灾备向量或维度异常的跳过
 		}
+		items = append(items, matchItem{SpeakerID: sp.ID.String(), Name: sp.Name, Similarity: cosine(vec, emb)})
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].Similarity > items[j].Similarity })
+	matched := len(items) > 0 && items[0].Similarity >= threshold
+	resp := map[string]any{
+		"matches":     items, // 全库按相似度降序
+		"threshold":   threshold,
+		"matched":     matched,
+		"has_library": len(items) > 0,
+	}
+	if matched {
+		resp["speaker_id"] = items[0].SpeakerID
+		resp["speaker_name"] = items[0].Name
+		resp["similarity"] = items[0].Similarity
 	}
 	writeJSON(w, resp)
+}
+
+// decodeEmbedding 解码 speaker.embedding 灾备 BLOB(256×float32 LE) → []float32。
+// 长度非 4 倍数→脏数据，返回 ok=false 跳过。与 float32BlobAPI 互逆。
+func decodeEmbedding(blob []byte) ([]float32, bool) {
+	if len(blob) == 0 || len(blob)%4 != 0 {
+		return nil, false
+	}
+	v := make([]float32, len(blob)/4)
+	for i := range v {
+		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
+	}
+	return v, true
+}
+
+// cosine 两个 L2 归一化向量的余弦相似度（= 内积）。用于 match 预览对全库算匹配度。
+// 与 sidecar FAISS IndexFlatIP(内积) 等价——BLOB 与索引同向量，结果一致。
+func cosine(a, b []float32) float64 {
+	var s float64
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		s += float64(a[i]) * float64(b[i])
+	}
+	return s
 }
 
 // float32BlobAPI 256×float32 → []byte（Little-Endian），存 speaker.embedding 灾备 BLOB。

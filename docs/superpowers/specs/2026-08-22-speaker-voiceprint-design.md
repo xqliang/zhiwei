@@ -308,3 +308,8 @@ PATCH  /api/sessions/{id}/segments/{segId}/speaker   换人 {speaker_id}（校�
 - **声纹 tab 关联录音「要点第 2 次才播放」修**：根因——换 session 时只设 `a.src`+等 `loadedmetadata` 回调里 `play()`，但该回调异步、非用户手势，浏览器自动播放策略拦住首次 play（`.catch` 吞）→ 需点第 2 次（走同 session 手势内 play 路径）。修：换 src 时也在用户手势内先 `a.play()`（启动加载+解锁自动播放），与 timeline 版一致。
 - **声纹 tab 工具栏**：「手动合并」按钮移到「＋录入」左边。
 - 复述：speaker stage **已是「先 1:N 匹配音纹库，dist≥阈值 才命中已有，未命中才创建新」**（`runSpeakerStage` 每聚类先 Search 全库再决定 match/enroll），跨 session 1:N 验证过同人命中不重复登记。
+
+### 13.10 timeline「重新识别」+ 录音页匹配预览显示全库匹配度
+
+- **timeline「重新识别」**：新增 `POST /api/sessions/{id}/reidentify` → 清空本会话所有段 speaker_id（repo `ClearSegmentSpeakers`）→ 建 job 从 **speaker stage 起跑**（pool 跑 speaker→extract）。清空后 speaker stage 不再幂等跳过，重新切片提向 + 按最新声纹库 1:N 匹配。**区别于「重新提取」**（segment→speaker→extract，speaker 幂等跳过、不改已有归属）。用途：录入/合并/改名声纹后，重算已有会话的说话人归属。**会覆盖手动换人**，前端二次确认（`reidentifyConfirmId`）。验证：speech20s 段 Allen → 重新识别后命中最新库的「段录测试人」（同声纹，录入后重算即此场景）。
+- **录音页匹配预览显示全库匹配度**：`POST /api/voiceprint/match` 改为返回 **全库排序** `matches[]`（不止 top-1）——用各 speaker 的灾备 `embedding` BLOB（与 FAISS 同向量）在 Go 侧逐个算余弦（`decodeEmbedding`+`cosine`，与 FAISS IndexFlatIP 等价），降序返回 `{speaker_id,name,similarity}` + 阈值 + 是否命中。录音页展示为**排序列表 + 每条进度条**（≥阈值绿色/否则灰）+ 相似度数值。验证：speech.wav → 段录测试人 0.999✓ / 说话人rd5ad 0.262 / Allen 0.010。

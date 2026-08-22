@@ -252,13 +252,17 @@
                 <template v-if="s.todo_count"> · {{ s.todo_count }} 个待办</template>
               </div>
             </div>
-            <div style="display:flex; align-items:center; gap:6px; flex-shrink:0" @click.stop>
-              <span v-if="reextractingId !== s.id" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
-              <span v-else class="badge running"><span class="spinner"></span> 重新提取中</span>
-              <button v-if="reextractConfirmId !== s.id && deletingSessionId !== s.id && reextractingId !== s.id" class="btn mini" @click="askReextract(s)">重新提取</button>
+            <div style="display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap" @click.stop>
+              <span v-if="reextractingId !== s.id && reidentifyingId !== s.id" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
+              <span v-else-if="reextractingId === s.id" class="badge running"><span class="spinner"></span> 重新提取中</span>
+              <span v-else class="badge running"><span class="spinner"></span> 重新识别中</span>
+              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && reextractingId !== s.id && reidentifyingId !== s.id" class="btn mini" @click="askReidentify(s)" title="清空说话人归属，按最新声纹库重新匹配（会覆盖手动换人）">重新识别</button>
+              <button v-if="reidentifyConfirmId === s.id" class="btn warn" @click="confirmReidentify(s)">确认重识别?</button>
+              <button v-if="reidentifyConfirmId === s.id" class="btn ghost" @click="cancelReidentify()">取消</button>
+              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && reextractingId !== s.id && reidentifyingId !== s.id" class="btn mini" @click="askReextract(s)">重新提取</button>
               <button v-if="reextractConfirmId === s.id" class="btn warn" @click="confirmReextract(s)">确认重提取?</button>
               <button v-if="reextractConfirmId === s.id" class="btn ghost" @click="cancelReextract()">取消</button>
-              <button v-if="deletingSessionId !== s.id && reextractConfirmId !== s.id" class="btn mini" @click="askDeleteSession(s)">删除</button>
+              <button v-if="reidentifyConfirmId !== s.id && deletingSessionId !== s.id && reextractConfirmId !== s.id && reextractingId !== s.id && reidentifyingId !== s.id" class="btn mini" @click="askDeleteSession(s)">删除</button>
               <button v-if="deletingSessionId === s.id" class="btn danger" @click="confirmDeleteSession(s)">确认删除?</button>
               <button v-if="deletingSessionId === s.id" class="btn ghost" @click="cancelDeleteSession()">取消</button>
             </div>
@@ -471,20 +475,26 @@
       <div class="muted">{{ uploadInfo.filename }}</div>
       <span class="badge" :class="uploadInfo.status">{{ uploadInfo.text }}</span>
     </div>
-    <!-- 声纹匹配预览：最接近的说话人 + 相似度(余弦) + 阈值；命中/未达阈值徽标 -->
+    <!-- 声纹匹配预览：全库每个声纹的匹配度(余弦) 排序列表 + 阈值；命中/未达阈值徽标 -->
     <div v-if="matchInfo" class="card" style="margin-top:10px">
       <div class="kv">
         <div style="min-width:0">
           <b>声纹匹配</b>
-          <div v-if="matchInfo.has_library" class="muted" style="margin-top:2px">
-            最接近：<b>{{ matchInfo.speaker_name || '？' }}</b>
-            · 相似度 <b :style="{color: matchInfo.matched ? 'var(--ok)' : 'var(--muted)'}">{{ (matchInfo.similarity||0).toFixed(3) }}</b>
-            · 阈值 {{ (matchInfo.threshold||0).toFixed(2) }}
-          </div>
-          <div v-else class="muted">声纹库为空，暂无可匹配说话人</div>
+          <span class="muted" style="margin-left:6px">共 {{ (matchInfo.matches||[]).length }} 个声纹 · 阈值 {{ (matchInfo.threshold||0).toFixed(2) }}</span>
         </div>
-        <span class="badge" :class="matchInfo.matched ? 'done' : 'dismissed'">{{ matchInfo.matched ? '命中' : '未达阈值' }}</span>
+        <span class="badge" :class="matchInfo.matched ? 'done' : 'dismissed'">{{ matchInfo.matched ? '有命中' : '无命中' }}</span>
       </div>
+      <div v-if="matchInfo.has_library" style="margin-top:8px">
+        <div v-for="(m, i) in matchInfo.matches" :key="m.speaker_id" style="display:flex; align-items:center; gap:8px; padding:3px 0">
+          <span class="muted" style="width:16px; text-align:right">{{ i+1 }}</span>
+          <b style="min-width:64px; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">{{ m.name }}</b>
+          <div style="flex:1; height:6px; background:var(--surface-sunken); border-radius:3px; overflow:hidden">
+            <div :style="{width: Math.max(2, Math.min(100, (m.similarity||0)*100))+'%', background: (m.similarity||0) >= matchInfo.threshold ? 'var(--ok)' : 'var(--muted)'}" style="height:100%"></div>
+          </div>
+          <span :style="{color: (m.similarity||0) >= matchInfo.threshold ? 'var(--ok)' : 'var(--muted)', width:46, 'text-align':'right', 'font-variant-numeric':'tabular-nums'}">{{ (m.similarity||0).toFixed(3) }}</span>
+        </div>
+      </div>
+      <div v-else class="muted" style="margin-top:6px">声纹库为空，暂无可匹配说话人</div>
     </div>
   </div>
 
@@ -903,6 +913,6 @@
   </div>
 </div>
 
-<script src="/app/app.dacb155a.js"></script>
+<script src="/app/app.2612fe93.js"></script>
 </body>
 </html>

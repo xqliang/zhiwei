@@ -28,6 +28,7 @@ func RegisterQuery(r chi.Router, h *QueryHandler) {
 	r.Get("/api/sessions/{id}", h.GetSession)
 	r.Patch("/api/sessions/{id}/transcript", h.PatchTranscript)
 	r.Post("/api/sessions/{id}/reextract", h.Reextract)
+	r.Post("/api/sessions/{id}/reidentify", h.Reidentify) // timeline「重新识别」：清空说话人归属+重跑 speaker stage
 	r.Delete("/api/sessions/{id}", h.DeleteSession)
 	r.Get("/api/sessions/{id}/audio", h.ServeAudio)
 	r.Post("/api/jobs/{id}/retry", h.RetryJob)
@@ -218,6 +219,39 @@ func (h *QueryHandler) Reextract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j := &repo.Job{SessionID: sid, Stage: "segment", Status: "pending"}
+	if err := h.Jobs.Create(r.Context(), j); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = h.Sessions.SetJobID(r.Context(), sid, j.ID)
+	writeJSON(w, map[string]any{"job_id": j.ID})
+}
+
+// Reidentify 重新识别说话人：清空本会话所有段的 speaker_id（含手动纠正）→ 建 job 从
+// speaker stage 起跑（pool 跑 speaker→extract）。清空后 speaker stage 不再幂等跳过，会重新
+// 切片提向 + 按最新声纹库 1:N 匹配（用户录入/合并/改名声纹后重算归属用）。
+// 区别于 Reextract（segment→speaker→extract，speaker 幂等跳过、不改已有归属）。
+// 注意：会覆盖手动换人，前端需二次确认。
+func (h *QueryHandler) Reidentify(w http.ResponseWriter, r *http.Request) {
+	sid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.Sessions.Get(r.Context(), sid); err != nil {
+		http.Error(w, "session 不存在", http.StatusNotFound)
+		return
+	}
+	tr, err := h.Transcripts.GetBySession(r.Context(), sid)
+	if err != nil {
+		http.Error(w, "该会话暂无转写，无法重新识别", http.StatusConflict)
+		return
+	}
+	if err := h.Transcripts.ClearSegmentSpeakers(r.Context(), tr.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	j := &repo.Job{SessionID: sid, Stage: "speaker", Status: "pending"}
 	if err := h.Jobs.Create(r.Context(), j); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

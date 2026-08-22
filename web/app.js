@@ -1075,6 +1075,47 @@ const app = createApp({
       }
     }
 
+    // ---------- 重新识别说话人（清空说话人归属 + 重跑 speaker stage 用最新声纹库 1:N） ----------
+    // 区别于重新提取（speaker 幂等跳过、不改已有归属）；重新识别会覆盖手动换人，故二次确认。
+    const reidentifyingId = ref(null);     // 正在重新识别的 session id（卡片显 loading）
+    const reidentifyConfirmId = ref(null); // 待确认重新识别的 session id
+    let reidentifyPollTimer = null;
+    function askReidentify(s) { deletingSessionId.value = null; reextractConfirmId.value = null; reidentifyConfirmId.value = s.id; }
+    function cancelReidentify() { reidentifyConfirmId.value = null; }
+    async function confirmReidentify(s) { reidentifyConfirmId.value = null; await reidentifySession(s); }
+    async function reidentifySession(s) {
+      if (reidentifyingId.value) return;
+      reidentifyingId.value = s.id;
+      try {
+        await api('POST', '/api/sessions/' + s.id + '/reidentify', {});
+        toast.value = '正在重新识别说话人…';
+        const poll = async () => {
+          let st = '', err = '';
+          try {
+            const r = await api('GET', '/api/sessions/' + s.id);
+            st = r.job ? r.job.status : (r.session && r.session.status) || '';
+            err = r.job ? (r.job.last_error || '') : '';
+          } catch (e) { /* 轮询失败静默重试 */ }
+          if (st === 'done' || st === 'completed') {
+            reidentifyingId.value = null;
+            toast.value = '重新识别完成'; setTimeout(() => { toast.value = ''; }, 2500);
+            await loadSessions();
+            if (expandedId.value === s.id) await reloadSession(s.id);
+          } else if (st === 'failed') {
+            reidentifyingId.value = null;
+            toast.value = '重新识别失败' + (err ? '：' + err : '');
+            setTimeout(() => { toast.value = ''; }, 4000);
+          } else {
+            reidentifyPollTimer = setTimeout(poll, 2000);
+          }
+        };
+        poll();
+      } catch (e) {
+        reidentifyingId.value = null;
+        showError(e);
+      }
+    }
+
     // ---------- 智能合并 / 记忆整理：即时反馈标志 ----------
     const consolidating = ref(false);
     const memConsolidating = ref(false);
@@ -1132,6 +1173,7 @@ const app = createApp({
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
       spMergeMode, spMergeSelected, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
       reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
+      reidentifyingId, reidentifyConfirmId, askReidentify, cancelReidentify, confirmReidentify,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       lastAudioFile, matchInfo, voiceprintMatching, tryMatchVoiceprint,
       topics, topicDetail, showNewTopic, newTopic, creating, toggleNewTopic, cancelNewTopic, renaming,
