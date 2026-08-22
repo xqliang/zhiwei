@@ -445,9 +445,18 @@
       <div class="kv" style="margin-bottom:12px"><b>录入声纹</b><button class="btn-link" @click="showEnrollForm=false">✕</button></div>
       <label class="field-label">名称</label>
       <input class="txt" v-model="enrollForm.name" placeholder="如：张三" style="margin-bottom:8px">
-      <label class="field-label">语音样本（拖拽 5-30s 干净人声 wav/mp3）</label>
-      <div @dragover.prevent @drop.prevent="onEnrollDrop" style="border:2px dashed var(--border-strong); border-radius:9px; padding:18px; text-align:center; color:var(--muted); margin-bottom:8px">
-        {{ enrollForm.file ? enrollForm.file.name : '拖拽音频到此处' }}
+      <label class="field-label">照着念下面这段（任意一段即可，录 5-30s 干净人声）</label>
+      <div class="card sunken" style="margin-bottom:8px; padding:10px 14px; font-size:var(--fs-md); line-height:1.7">
+        {{ enrollPromptText }}
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px">
+        <button class="btn" :class="enrollRecording ? 'danger' : 'primary'" @click="enrollRecording ? stopEnrollRec() : startEnrollRec()">
+          <span v-if="enrollRecording" class="spinner"></span>{{ enrollRecording ? ('录音中…' + enrollRecSeconds + 's，再点停止') : '🎤 麦克风录入' }}
+        </button>
+        <span v-if="enrollForm.file" class="muted">✓ {{ enrollForm.file.name }}</span>
+      </div>
+      <div @dragover.prevent @drop.prevent="onEnrollDrop" style="border:2px dashed var(--border-strong); border-radius:9px; padding:14px; text-align:center; color:var(--muted); margin-bottom:8px">
+        或拖拽 wav/mp3 到此处
       </div>
       <div class="edit-actions">
         <button class="btn primary" :disabled="!enrollForm.name.trim()||!enrollForm.file||enrolling" @click="submitEnroll">
@@ -814,6 +823,6 @@
   </div>
 </div>
 
-<script src="/app/app.397d7a97.js"></script>
+<script src="/app/app.6698317a.js"></script>
 </body>
 </html>

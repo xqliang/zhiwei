@@ -714,6 +714,31 @@ const app = createApp({
     function openEnroll() { enrollOpen.value = true; enrollForm.name = ''; enrollForm.file = null; }
     // 拖拽落文件到录入区（与录音页 onDrop 同思路，取第一个文件）
     function onEnrollDrop(e) { if (e.dataTransfer.files.length) enrollForm.file = e.dataTransfer.files[0]; }
+    // 声纹录入：麦克风直录（独立 recorder，不与录音页的 recorder 冲突）。
+    // 录完产 webm File → enrollForm.file，与拖拽文件同路径（后端 ffmpeg 转码 wav16k 后提声纹）。
+    const enrollRecording = ref(false);
+    const enrollRecSeconds = ref(0);
+    let enrollRec = null, enrollRecTimer = null;
+    // 提示用户照着念的样本文字（约 15s 自然语速，录到足够时长的稳定人声做声纹更准）。
+    const enrollPromptText = '你好，我正在录入声纹样本。今天天气不错，晚点打算出去散散步。记得给团队发一封邮件，确认下周的会议时间。如果有任何问题，随时联系我，谢谢。';
+    async function startEnrollRec() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        enrollRec = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+        const chunks = [];
+        enrollRec.ondataavailable = e => chunks.push(e.data);
+        enrollRec.onstop = () => {
+          stream.getTracks().forEach(t => t.stop());
+          enrollForm.file = new File(chunks, 'enroll-' + Date.now() + '.webm', { type: 'audio/webm' });
+        };
+        enrollRec.start();
+        enrollRecording.value = true; enrollRecSeconds.value = 0;
+        enrollRecTimer = setInterval(() => enrollRecSeconds.value++, 1000);
+      } catch (e) { showError(e); }
+    }
+    function stopEnrollRec() {
+      if (enrollRec) { enrollRec.stop(); enrollRecording.value = false; clearInterval(enrollRecTimer); }
+    }
     // 拉全量已登记说话人（换人下拉的数据源）；失败静默——它只是下拉选项，不该打断主流程。
     async function loadAllSpeakers() {
       try { const d = await api('GET', '/api/speakers'); allSpeakers.value = d.speakers || []; }
@@ -960,6 +985,7 @@ const app = createApp({
       segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript,
       speakerFilter, renamingSpeaker, enrollOpen, enrollForm, enrolling, allSpeakers,
       speakerColor, segSpeakerBg, toggleSpeakerFilter, openEnroll, onEnrollDrop, submitEnroll, loadAllSpeakers,
+      startEnrollRec, stopEnrollRec, enrollRecording, enrollRecSeconds, enrollPromptText,
       startRenameSpeaker, commitRenameSpeaker, askDeleteSpeaker, reassignSegment,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
       reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
