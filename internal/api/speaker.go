@@ -24,7 +24,8 @@ type SpeakerHandler struct {
 	Transcripts         *repo.TranscriptRepo
 	Voiceprint          voiceprint.Client
 	DataDir             string
-	EnrollMinDurationMS int64 // 从转写段音频录入声纹的最小时长（ms，0→兜底 3000）
+	EnrollMinDurationMS int64   // 从转写段音频录入声纹的最小时长（ms，0→兜底 3000）
+	VoiceprintThreshold float64 // 1:N 余弦匹配阈值（match 预览判定+展示用，0→兜底 0.5）
 }
 
 // RegisterSpeaker 挂载说话人相关路由。
@@ -39,6 +40,7 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Patch("/api/sessions/{sid}/segments/{seg}/speaker", h.ReassignSegment)
 	r.Post("/api/sessions/{sid}/segments/{seg}/enroll", h.EnrollFromSegment) // timeline「用此段录音纹」：从转写段音频录入新说话人
 	r.Post("/api/sessions/{sid}/segments/merge", h.MergeSegments)            // timeline「合并连续同人段成一条」
+	r.Post("/api/voiceprint/match", h.MatchPreview)                          // 录音页「试匹配」预览：上传音频→提向→1:N→返回相似度+阈值（只读不登记）
 }
 
 // List 全部 active 说话人（管理页/换人下拉用）。
@@ -456,6 +458,75 @@ func (h *SpeakerHandler) MergeSegments(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.Transcripts.RecomputeFullText(r.Context(), tr.ID)
 	writeJSON(w, map[string]any{"ok": true, "merged_count": len(picked), "keeper_id": keeper.ID.String()})
+}
+
+// MatchPreview 试匹配预览（录音页「这段像谁」）：上传音频 → 转码 wav16k → sidecar /embed →
+// /search → 返回最匹配说话人 + 余弦相似度 + 阈值 + 是否命中。纯只读（不登记、不入库），
+// 便于用户在录入前看「这段音频和已有声纹库的匹配度」。低于阈值也回最接近的候选 + 相似度。
+func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "解析失败: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "缺少 file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	dir := filepath.Join(h.DataDir, "enroll")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		http.Error(w, "存储目录创建失败", http.StatusInternalServerError)
+		return
+	}
+	tmpID := ids.New()
+	src := filepath.Join(dir, tmpID.String()+"-match")
+	wav16 := src + ".wav"
+	defer os.Remove(src)
+	defer os.Remove(wav16)
+	out, err := os.Create(src)
+	if err != nil {
+		http.Error(w, "文件创建失败", http.StatusInternalServerError)
+		return
+	}
+	if _, err := io.Copy(out, file); err != nil {
+		out.Close()
+		http.Error(w, "文件写入失败", http.StatusInternalServerError)
+		return
+	}
+	out.Close()
+	if err := transcodeEnroll(src, wav16); err != nil {
+		http.Error(w, "转码失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	vec, err := h.Voiceprint.Embed(r.Context(), wav16)
+	if err != nil || len(vec) != 256 {
+		http.Error(w, "声纹提取失败", http.StatusInternalServerError)
+		return
+	}
+	matchID, dist, hasMatch, err := h.Voiceprint.Search(r.Context(), vec)
+	if err != nil {
+		http.Error(w, "声纹检索失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	threshold := h.VoiceprintThreshold
+	if threshold == 0 {
+		threshold = 0.5
+	}
+	resp := map[string]any{
+		"similarity":  dist, // 余弦相似度（向量已 L2 归一，内积=余弦），越高越像
+		"threshold":   threshold,
+		"matched":     hasMatch && dist >= threshold,
+		"has_library": hasMatch, // 库非空才有候选；空库时 similarity=0
+	}
+	// 命中或仅展示最接近候选：库非空就回最接近的说话人名（哪怕低于阈值，便于看「像谁」）
+	if hasMatch {
+		if sp, err := h.Speakers.Get(r.Context(), matchID); err == nil {
+			resp["speaker_id"] = sp.ID.String()
+			resp["speaker_name"] = sp.Name
+		}
+	}
+	writeJSON(w, resp)
 }
 
 // float32BlobAPI 256×float32 → []byte（Little-Endian），存 speaker.embedding 灾备 BLOB。

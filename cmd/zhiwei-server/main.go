@@ -125,6 +125,7 @@ func main() {
 		Speakers: speakers, Transcripts: transcripts,
 		Voiceprint: voiceprintCli, DataDir: cfg.DataDir,
 		EnrollMinDurationMS: cfg.EnrollMinDurationMS,
+		VoiceprintThreshold: cfg.VoiceprintThreshold,
 	})
 	api.RegisterMemory(r, &api.MemoryHandler{
 		Memories: memories, Topics: topics, MemoryTopics: memoryTopics,

@@ -157,6 +157,9 @@ const app = createApp({
     const recording = ref(false);
     const recSeconds = ref(0);
     const uploadInfo = ref(null);
+    const lastAudioFile = ref(null);   // 最近一次录音/拖拽的音频文件（试匹配声纹用）
+    const matchInfo = ref(null);       // 试匹配结果：{speaker_name, similarity, threshold, matched, has_library}
+    const voiceprintMatching = ref(false);
     let recorder = null, recTimer = null, pollTimer = null;
 
     async function startRec() {
@@ -167,7 +170,9 @@ const app = createApp({
         recorder.ondataavailable = e => chunks.push(e.data);
         recorder.onstop = () => {
           stream.getTracks().forEach(t => t.stop());
-          upload(new File(chunks, 'record-' + Date.now() + '.webm', { type: 'audio/webm' }), 'web_record');
+          const f = new File(chunks, 'record-' + Date.now() + '.webm', { type: 'audio/webm' });
+          lastAudioFile.value = f; matchInfo.value = null; // 供「试匹配声纹」按钮用
+          upload(f, 'web_record');
         };
         recorder.start();
         recording.value = true; recSeconds.value = 0;
@@ -180,7 +185,7 @@ const app = createApp({
     }
     function onDrop(e) {
       const f = e.dataTransfer.files[0];
-      if (f) upload(f, 'web_upload');
+      if (f) { lastAudioFile.value = f; matchInfo.value = null; upload(f, 'web_upload'); }
     }
     async function upload(file, source) {
       const fd = new FormData();
@@ -209,6 +214,22 @@ const app = createApp({
       } catch (e) {
         uploadInfo.value = { filename: file.name, status: 'failed', text: e.message };
       }
+    }
+
+    // 试匹配声纹库（录音页「这段像谁」）：把当前录音/拖拽的音频 POST /api/voiceprint/match
+    // → 后端转码+提向+1:N → 返回最匹配说话人 + 相似度 + 阈值。纯只读预览，不登记。
+    async function tryMatchVoiceprint() {
+      const f = lastAudioFile.value;
+      if (!f) return;
+      voiceprintMatching.value = true;
+      const fd = new FormData(); fd.append('file', f);
+      try {
+        const r = await fetch('/api/voiceprint/match', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || '匹配失败');
+        matchInfo.value = d;
+      } catch (e) { showError(e); }
+      finally { voiceprintMatching.value = false; }
     }
 
     // ---------- Topics ----------
@@ -952,6 +973,8 @@ const app = createApp({
         a.src = '/api/sessions/' + seg.session_id + '/audio';
         a.dataset.sid = String(seg.session_id);
         a.addEventListener('loadedmetadata', seekAndPlay, { once: true });
+        a.play().catch(() => {}); // 在用户手势内 play：既启动加载、又解锁自动播放策略——
+        // 否则 loadedmetadata 回调(异步、非手势)里的 play 会被拦(.catch 吞)，导致需点第2次才放
       }
       // 自然播放到文件结尾也复位高亮（正常会被 timeupdate 先在 end_ms 处 pause）
       a.addEventListener('ended', () => { playingSegId.value = null; }, { once: true });
@@ -1110,6 +1133,7 @@ const app = createApp({
       spMergeMode, spMergeSelected, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
       reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
+      lastAudioFile, matchInfo, voiceprintMatching, tryMatchVoiceprint,
       topics, topicDetail, showNewTopic, newTopic, creating, toggleNewTopic, cancelNewTopic, renaming,
       loadTopics, openTopic, closeTopicDetail, confirmTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, consolidating, toggleMergeMember, applyMerge, deletingTopicId, askDeleteTopic, cancelDeleteTopic, confirmDeleteTopic, dismissingTopicId, askDismissTopic, cancelDismissTopic, confirmDismissTopic, restoreTopic, dismissedTopics, dismissedCollapsed, loadDismissedTopics,
       manualMergeMode, manualSelected, manualMergeName, manualConfirming, startManualMerge, cancelManualMerge, toggleManualSelect, applyManualMerge, startManualConfirm,

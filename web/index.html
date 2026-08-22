@@ -460,13 +460,31 @@
       <template v-if="!recording">拖拽音频文件到此处，或点击下方按钮录音</template>
       <template v-else><span class="spinner"></span> 录音中…（{{ recSeconds }}s）</template>
     </div>
-    <div style="display:flex; gap:12px">
+    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center">
       <button class="btn primary" v-if="!recording" @click="startRec">开始录音</button>
       <button class="btn primary" v-else @click="stopRec">停止并上传</button>
+      <button class="btn mini" :disabled="!lastAudioFile || voiceprintMatching" @click="tryMatchVoiceprint" title="用当前音频匹配已有声纹库，看像谁（不登记）">
+        <span v-if="voiceprintMatching" class="spinner"></span>{{ voiceprintMatching ? '匹配中…' : '🔍 试匹配声纹库' }}
+      </button>
     </div>
     <div v-if="uploadInfo" class="card" style="margin-top:12px">
       <div class="muted">{{ uploadInfo.filename }}</div>
       <span class="badge" :class="uploadInfo.status">{{ uploadInfo.text }}</span>
+    </div>
+    <!-- 声纹匹配预览：最接近的说话人 + 相似度(余弦) + 阈值；命中/未达阈值徽标 -->
+    <div v-if="matchInfo" class="card" style="margin-top:10px">
+      <div class="kv">
+        <div style="min-width:0">
+          <b>声纹匹配</b>
+          <div v-if="matchInfo.has_library" class="muted" style="margin-top:2px">
+            最接近：<b>{{ matchInfo.speaker_name || '？' }}</b>
+            · 相似度 <b :style="{color: matchInfo.matched ? 'var(--ok)' : 'var(--muted)'}">{{ (matchInfo.similarity||0).toFixed(3) }}</b>
+            · 阈值 {{ (matchInfo.threshold||0).toFixed(2) }}
+          </div>
+          <div v-else class="muted">声纹库为空，暂无可匹配说话人</div>
+        </div>
+        <span class="badge" :class="matchInfo.matched ? 'done' : 'dismissed'">{{ matchInfo.matched ? '命中' : '未达阈值' }}</span>
+      </div>
     </div>
   </div>
 
@@ -476,8 +494,8 @@
     <div class="kv" style="margin-bottom:12px">
       <b style="font-size:var(--fs-lg)">声纹</b>
       <div style="display:flex; gap:6px">
-        <button v-if="!spMergeMode" class="btn primary" style="padding:7px 16px" @click="toggleEnrollForm">{{ showEnrollForm ? '收起' : '＋ 录入' }}</button>
         <button v-if="!spMergeMode" class="btn mini" @click="startSpMerge" title="选择多个说话人合并到一个（纠正同人被拆成多个说话人）">手动合并</button>
+        <button v-if="!spMergeMode" class="btn primary" style="padding:7px 16px" @click="toggleEnrollForm">{{ showEnrollForm ? '收起' : '＋ 录入' }}</button>
         <button v-else class="btn warn" @click="cancelSpMerge">取消合并</button>
       </div>
     </div>
@@ -885,6 +903,6 @@
   </div>
 </div>
 
-<script src="/app/app.64895e86.js"></script>
+<script src="/app/app.dacb155a.js"></script>
 </body>
 </html>

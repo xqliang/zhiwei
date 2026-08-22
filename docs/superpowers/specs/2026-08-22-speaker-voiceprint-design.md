@@ -301,3 +301,10 @@ PATCH  /api/sessions/{id}/segments/{segId}/speaker   换人 {speaker_id}（校�
 - **timeline「合并」语义改为段合并成一条**（修正 §13.6 的批量改判理解）：选中连续同人段 → 后端 `POST /api/sessions/{sid}/segments/merge {segment_ids, speaker_id}` 按 sequence_no 顺序拼文本、时间取 `[min start, max end]`、speaker_id=target，删其余段（repo `MergeSegments` 单事务）+ 重算全文。前端 `confirmMerge` 改调该端点。8 段合并 2→1 验证通过（拼接文本 + 跨段时间）。
 - **从转写段音频录入声纹**（timeline「录入」按钮）：`POST /api/sessions/{sid}/segments/{seg}/enroll {name}` 切 `transcoded/{sid}.wav` 的 `[start_ms,end_ms]` → sidecar /embed → 登记(enrolled)+/add。**最小时长闸门** `ZW_ENROLL_MIN_DURATION_MS`（默认 3000ms）——短于则 400 拒（前端按钮 disabled + 提示）。前端 `MIN_ENROLL_MS` 与后端默认对齐。只创建说话人、不改判段（改判可能误拆已聚类说话人，留给下拉/手动合并）。3.7s 段录入成功、1.9s 段被拒验证通过。
 - **timeline 段播放 bug 修**：`<audio ref="sessionAudioEl">` 在 timeline 会话列表 `v-for` 内，Vue 3 把字符串 ref 收集成数组，`sessionAudioEl.value` 是数组而非元素 → `addEventListener is not a function`。加 `tlAudio()` helper（`Array.isArray ? r[0] : r`，同声纹 tab `voiceAudio()`）取首元素。
+
+### 13.9 录音页声纹匹配预览 + 声纹 tab 播放 bug 修 + 按钮顺序
+
+- **录音页「试匹配声纹库」预览**：新增 `POST /api/voiceprint/match`（multipart file）→ 转码 wav16k → sidecar /embed → /search → 返回 `{speaker_name, similarity(余弦), threshold, matched, has_library}`，**只读不登记**。录音/拖拽的音频存 `lastAudioFile`，点「🔍 试匹配声纹库」按钮 → 展示「最接近 X · 相似度 Y · 阈值 Z」+ 命中/未达阈值徽标。验证：speech.wav 命中「段录测试人」相似度 0.999（同人）。SpeakerHandler 加 `VoiceprintThreshold` 字段供判定+展示。
+- **声纹 tab 关联录音「要点第 2 次才播放」修**：根因——换 session 时只设 `a.src`+等 `loadedmetadata` 回调里 `play()`，但该回调异步、非用户手势，浏览器自动播放策略拦住首次 play（`.catch` 吞）→ 需点第 2 次（走同 session 手势内 play 路径）。修：换 src 时也在用户手势内先 `a.play()`（启动加载+解锁自动播放），与 timeline 版一致。
+- **声纹 tab 工具栏**：「手动合并」按钮移到「＋录入」左边。
+- 复述：speaker stage **已是「先 1:N 匹配音纹库，dist≥阈值 才命中已有，未命中才创建新」**（`runSpeakerStage` 每聚类先 Search 全库再决定 match/enroll），跨 session 1:N 验证过同人命中不重复登记。
