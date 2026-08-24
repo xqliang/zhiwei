@@ -266,6 +266,8 @@ type WallClockSegment struct {
 // 按墙钟**正序**返回；limit 超限时保留**最近**的（靠近 to 的）——当前录音的段
 // 是窗口内最新的，天然优先保留。user 维度过滤。
 // 实现：SQL DESC + LIMIT 取最近 N，Go 侧反转回正序。
+// 次级键 seg.id DESC：墙钟毫秒相同（跨 session 撞毫秒）时定序，保证排序稳定、
+// LIMIT 截断到底保留哪几条可复现（雪花 id 单调递增，DESC 即“更晚生成的优先”）。
 // speakername stage 用它拼「当前录音全文 + 前 N 分钟跨录音对话」上下文。
 func (r *TranscriptRepo) ListSegmentsInWallClockWindow(ctx context.Context, userID int64, from, to time.Time, limit int) ([]WallClockSegment, error) {
 	if limit <= 0 {
@@ -282,7 +284,7 @@ JOIN audio_session s    ON s.id = tr.session_id
 LEFT JOIN speaker sp    ON sp.id = seg.speaker_id
 WHERE tr.user_id = ?
   AND (s.created_at + INTERVAL seg.start_ms * 1000 MICROSECOND) BETWEEN ? AND ?
-ORDER BY wall_time DESC
+ORDER BY wall_time DESC, seg.id DESC
 LIMIT ?`, userID, from, to, limit)
 	if err != nil {
 		return nil, err
