@@ -23,7 +23,7 @@
 5. **报告**：对当天所有录音**归纳整理生成日报**；每周出**周报**；以 **topic/项目粒度**跟进整体状态（进展 / todo / 风险）。报告用**图文 / 列表 / 表格 / 曲线**卡片呈现。
 6. **卡片交互**：数据展示、确认修改、报表（表格 / 曲线）都以结构化卡片在应用内呈现。
 
-**技术主线**：用 **deepseek-harness（dsh）作为 agent 内核**（真实运行，非仿写），以 **headless Node 边车**形式跑，**不用它自带的 :3080 Web UI**——由我们自己的 Go + Vue 前端驱动并渲染输出。LLM 用 **DeepSeek 模型**。
+**技术主线**：用 **deepseek-harness（dsh）作为 agent 内核**（真实运行，非仿写），以 **headless Node 边车**形式跑，**不用它自带的 :3080 Web UI**——由我们自己的 Go + Vue 前端驱动并渲染输出。LLM 用 **DeepSeek 模型（经火山方舟 Ark 提供，复用现有 ARK key）**。
 
 ### 1.1 非目标
 
@@ -43,7 +43,7 @@
 | D2 | **Go 既是 dsh 的父进程，又是它的工具提供方**：Go `spawn` dsh 子进程走 stdio 驱动；同时 Go 暴露 **MCP-over-HTTP** 工具端点，dsh 在 cordis.yml 里连回来消费 | JSON-RPC 走 stdio 必须由父进程持有管道，故 Go 必须 spawn dsh（区别于声纹边车的「独立进程 + HTTP」）。工具走 MCP-HTTP 而非 stdio，因为 Go 本就是 HTTP server，dsh 连出即可，无需再起第二个 Go 进程。 |
 | D3 | **写入 = 提议 → 确认两段式**：写工具只建 `agent_proposal`（pending）并返回确认卡，**不碰目标行**；用户点[确认]才经 Go 端点落库 | 「绝不静默覆盖」，对齐现有 memory/topic/todo 的 `suggested→confirmed` 文化与 person-profile 强约束；人审闸门在 dsh **之外**（Go 侧），因此即便转写/对话里含注入式「帮我改成 X」也无法自动生效——闸门兼作**提示注入防线**。 |
 | D4 | **检索 = 混合**：prompt 注入轻量上下文头（日期 / owner 概要 / 最近轮次）+ agent 自主调 MCP 读工具按需深挖 | 更「agent」、可迭代检索；上下文头负责 grounding，工具负责深度。 |
-| D5 | **报告引擎在 Go 侧**（`internal/review`），LLM 直连 DeepSeek（OpenAI 兼容，复用现有 client） | 报告是批量生成，不必绕 dsh；可被 cron / API / agent 工具三处调用。agent 在对话里说「生成今天报告」→ 调 `generate_report` 工具 → 落到同一引擎。 |
+| D5 | **报告引擎在 Go 侧**（`internal/review`），LLM 用 Ark 上的 DeepSeek 模型（复用现有 `ArkLLM` client，仅换 model id） | 报告是批量生成，不必绕 dsh；可被 cron / API / agent 工具三处调用。agent 在对话里说「生成今天报告」→ 调 `generate_report` 工具 → 落到同一引擎。 |
 | D6 | **会话真相源双写**：dsh 在进程内持有事件日志（其内部 JSONL）；我们仍以 `agent_message` / `agent_conversation` 为**展示 + 抽取**的真相源 | dsh 的 wire 无 seed/resume（见 §4.4）；我们自己存历史，重启后用上下文头重播近期对话。 |
 | D7 | **锁版本 + 接口隔离**：pin dsh 到确切 rc 版本；Go 侧用 `AgentRuntime` 接口封装 dsh，wire 细节不外泄 | dsh 是预发布 `0.1.1-rc.2`，明确「会有破坏性变更」、无协议版本协商。隔离后可整体替换 / 升级。 |
 | D8 | **一次做全设计，分期实现**：P1 不含 profile，P2 接 profile，P3 报告进阶 | 对齐 person-profile「总纲 + 分期」。v1 报告范围（用户定）：**日报 + 周报 + topic/项目状态** 都进 P1。 |
@@ -101,7 +101,7 @@
 
 - Go 启动时（若配置启用且 `node`/边车产物就绪）spawn dsh；崩溃 → 指数退避重启；保留 `sessionId ↔ conversation` 映射。
 - **重启后**：dsh 不从 wire 恢复历史（§4.4）。策略：对活跃 conversation 起**新 sessionId**，下一轮 prompt 的上下文头里**重播最近 N 轮摘要**。P1 可接受；后续可上「thin Node wrapper + seed」根治。
-- **边车不可用**：`/api/agent/*` 返回 503 + 前端「智能体暂不可用」卡片；**报告（§11 走 Go 直连 DeepSeek）与其余功能不受影响**——对齐声纹「sidecar 未起不丢转写」。
+- **边车不可用**：`/api/agent/*` 返回 503 + 前端「智能体暂不可用」卡片；**报告（§11 走 Go 直调 Ark 上的 DeepSeek）与其余功能不受影响**——对齐声纹「sidecar 未起不丢转写」。
 - **stdout 即协议**：dsh cordis.yml **禁止加载任何 stdout logger**；Go 读 stdout 为协议、stderr 为日志。setup 脚本与 CI 校验这一点。
 
 ---
@@ -113,7 +113,7 @@
 - 落位 `services/agent-sidecar/`（与现有 `services/` 并列）：`package.json`（pin `@deepseek-ai/dsh` 及 `dsh-sdk-jsonrpc-server`/`dsh-mcp-client` 到**确切 rc 版本**）、`cordis.yml`、`README`。
 - setup 脚本 `scripts/setup-agent-sidecar.sh`（仿 `scripts/setup-voiceprint.sh`）：校验 Node `^22.19 || >=24`、`pnpm install`、`pnpm build`（如需）。
 - Makefile：`agent-sidecar-build`；Go 负责 spawn，无需 `*-start`（区别于声纹的独立 start）。
-- 启动命令（Go spawn）：`node <bin>/dsh-jsonrpc-agent services/agent-sidecar/cordis.yml`，环境注入 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DSH_SESSION_ROOT` / `DSH_SYSTEM_PROMPT`。
+- 启动命令（Go spawn）：`node <bin>/dsh-jsonrpc-agent services/agent-sidecar/cordis.yml`，环境注入 `ARK_API_KEY` / `ZW_ARK_BASE_URL` / `ZW_AGENT_MODEL` / `DSH_SESSION_ROOT` / `DSH_SYSTEM_PROMPT`。
 
 ### 4.2 cordis.yml 组成（要点）
 
@@ -122,12 +122,13 @@
 plugins:
   - id: agent-loop            # 默认 react 循环
     name: '@deepseek-ai/dsh-agent-loop'
-  - id: llm-deepseek          # OpenAI 兼容；指向 DeepSeek
-    name: '@deepseek-ai/dsh-llm-deepseek'
-    config:
-      apiKeyEnv: DEEPSEEK_API_KEY
-      baseURL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      models: [{ id: deepseek-chat, contextWindow: 65536 }]   # 具体模型名实调
+  - id: llm-ark               # OpenAI 兼容；指向火山方舟 Ark 上的 DeepSeek 模型
+    name: '@deepseek-ai/dsh-llm-pi-ai'       # 通用 openai-completions，适配非 DeepSeek 原生端点(Ark)
+    config:                                  # 备选：llm-deepseek + baseURL=Ark；确切插件/字段 spike 确认
+      provider: openai-completions
+      apiKeyEnv: ARK_API_KEY
+      baseURL: ${ZW_ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      models: [{ id: ${ZW_AGENT_MODEL}, contextWindow: 65536 }]   # Ark 的 DeepSeek 模型/endpoint id
   - id: sdk-jsonrpc-server    # 驱动缝①：暴露 JSON-RPC/stdio
     name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
   - id: mcp-zhiwei            # 工具缝②：连回 Go 的 MCP-HTTP
@@ -180,15 +181,15 @@ plugins:
 
 ### 5.2 `internal/review`（报告引擎，§11）
 
-`Generator{LLM, Model, Prompt}`：`Daily(date)` / `Weekly(range)` / `TopicStatus(topicID)` → 结构化报告对象 + 持久化。被 cron、`/api/reviews/*`、MCP `generate_report` 三处复用。LLM 用 DeepSeek（OpenAI 兼容，复用 `provider` 层 client，仅换 baseURL/key/model）。
+`Generator{LLM, Model, Prompt}`：`Daily(date)` / `Weekly(range)` / `TopicStatus(topicID)` → 结构化报告对象 + 持久化。被 cron、`/api/reviews/*`、MCP `generate_report` 三处复用。LLM 用 Ark 上的 DeepSeek 模型（复用现有 `ArkLLM` client，仅换 model id）。
 
 ### 5.3 装配（`cmd/zhiwei-server/main.go`）
 
 现有：`NewArkLLM` → pipeline → `api.RegisterMemory/Todo/Topic`。新增：
 ```go
 dsRuntime := agent.NewRuntime(cfg.Agent)          // spawn dsh（可开关）
-dsLLM     := provider.NewOpenAICompatLLM(cfg.DeepSeekBaseURL, cfg.DeepSeekKey)  // 报告/抽取用
-reviewer  := review.NewGenerator(dsLLM, cfg.DeepSeekModel, ...)
+agentLLM  := provider.NewArkLLM(cfg.ARKBaseURL, cfg.ARKAPIKey)   // 复用现有 Ark client(报告/抽取用)
+reviewer  := review.NewGenerator(agentLLM, cfg.AgentModel, ...)  // AgentModel = Ark 上的 DeepSeek 模型 id
 mcpSrv    := agent.NewMCPServer(repos, reviewer)  // 挂 /internal/mcp
 orch      := agent.NewOrchestrator(dsRuntime, repos, mcpSrv)
 api.RegisterAgent(r, &api.AgentHandler{Orch: orch, ...})
@@ -420,9 +421,9 @@ ALL    /internal/mcp                                  MCP-over-HTTP 工具端点
 
 | env | 默认 | 说明 |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | （必填） | DeepSeek 密钥（放 `.env`） |
-| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | OpenAI 兼容前缀 |
-| `ZW_DEEPSEEK_MODEL` | `deepseek-chat` | 报告/抽取用模型（agent 侧模型在 cordis.yml 配） |
+| `ARK_API_KEY` | （现有必填） | 火山方舟 key，复用；dsh 与报告/抽取共用 |
+| `ZW_ARK_BASE_URL` | `https://ark.cn-beijing.volces.com/api/v3` | 现有配置，Ark OpenAI 兼容前缀 |
+| `ZW_AGENT_MODEL` | （填 Ark 的 DeepSeek 模型 id） | agent + 报告/抽取用的 DeepSeek 模型（如 `deepseek-v3` / `ep-xxx`），spike 确认 |
 | `ZW_AGENT_ENABLED` | `true` | 关掉则不 spawn dsh（报告等仍可用） |
 | `ZW_AGENT_SIDECAR_CMD` | `node .../dsh-jsonrpc-agent` | 边车启动命令 |
 | `ZW_AGENT_CORDIS_CONFIG` | `services/agent-sidecar/cordis.yml` | cordis 配置路径 |
@@ -445,7 +446,7 @@ persona / prompt 走版本化文件：`prompts/agent_persona_v1.md`、`prompts/c
 - **MCP 工具单测**：工具即 Go 函数覆 repo，验证读结果 schema、写工具只建 proposal 不 mutate。
 - **repo 单测**（integration）：agent_conversation/agent_proposal/weekly_review/topic_status CRUD、confirm 事务。
 - **review 单测**：mock LLM 返回结构化报告，验证 daily/weekly/topic_status schema 与持久化。
-- **spike（手动）**：`make spike-agent`（起真 dsh 边车 + 真 DeepSeek，跑一轮带工具调用的对话）、`make spike-review`（真 DeepSeek 生成日报）。
+- **spike（手动）**：`make spike-agent`（起真 dsh 边车 + Ark DeepSeek，跑一轮带工具调用的对话）、`make spike-review`（Ark DeepSeek 生成日报）。
 - **前端**：卡片组件按 `toolName→component` 映射的渲染快照（轻量，人工/最小自动化）。
 
 ---
