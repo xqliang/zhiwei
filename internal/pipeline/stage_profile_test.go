@@ -56,6 +56,21 @@ func TestStageProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 本用例经 ExtractSession 往共享 owner（user_id=1）写了 occupation=工程师 active 行 +
+	// 审计。pipeline 按字典序在 profile 包之前跑，且两包共用同一 zhiwei_test 库；若不清理，
+	// profile 包 TestExtractSession（写 occupation=后端开发工程师，高置信不同值）会撞见这条
+	// 现值而被闸门判为冲突→pending，断言「2 条 active」失败。收尾删掉 owner 的 occupation
+	// 属性 + 审计，恢复干净基线（模式参照 profile/extract_session_test.go）。提前用 t.Cleanup
+	// 注册，保证任一断言 t.Fatal 提前退出时也会清理。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := persons.GetOwner(cctx, 1); err == nil && o != nil {
+			oid := o.ID.Int64()
+			_, _ = db.ExecContext(cctx, `DELETE FROM person_attribute WHERE person_id = ? AND attr_key = 'occupation'`, oid)
+			_, _ = db.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ?`, oid)
+		}
+	})
+
 	// 最小 session 夹具。audio_session.id 非自增，须显式赋雪花 ID（SessionRepo.Create
 	// 不生成 ID）；不赋值会插入 id=0，共享测试库重跑即 PRIMARY 冲突。
 	sess := &repo.AudioSession{ID: ids.New(), Source: "web_upload", Filename: "t.wav", StoragePath: "/tmp/t.wav", Status: "completed"}

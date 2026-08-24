@@ -56,6 +56,25 @@ func TestApplyFactsGatePaths(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
 	oid := ownerID(t, svc)
+
+	// 本用例把 occupation/personality/hobbies 写到共享 owner（user_id=1），并经关系事实
+	// 自动新建 pending 人物 Alice（带 occupation=医生 + owner→Alice 配偶关系）。本包所有测试
+	// 共用同一 zhiwei_test 库、不逐个重置，靠各用例使用不相交的 key/人名共存；但这些行若留到
+	// 下一次 -count=1 重跑，会让本用例（occupation 撞现值→reaffirm、Alice 已 active）与
+	// TestExtractSession（occupation 撞现值→冲突）等断言失败。收尾删掉 Alice + owner 的这三类
+	// 属性 + 关系 + 审计，恢复干净基线（模式参照 extract_session_test.go）。提前用 t.Cleanup
+	// 注册，保证任一断言 t.Fatal 提前退出时也会清理。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person WHERE user_id = 1 AND display_name = 'Alice'`)
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			ownerPK := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_attribute WHERE person_id = ? AND attr_key IN ('occupation','personality','hobbies')`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_relationship WHERE person_id = ?`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ?`, ownerPK)
+		}
+	})
+
 	sess := ids.New()
 
 	facts := []Fact{

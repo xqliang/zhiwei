@@ -12,6 +12,23 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	ctx := context.Background()
 	oid := ownerID(t, svc)
 
+	// 本用例往共享 owner（user_id=1）写 city/personality 属性 + 朋友关系，并新建 Bob（→Bob2）
+	// 与「确认人物测试」两个人物（后者最终被确认为 active）。本包共用同一 zhiwei_test 库，若不
+	// 清理，这些行会让下一次 -count=1 重跑失败——尤其「确认人物测试」残留为 active 后，重跑时
+	// resolveOrCreateByName 会命中它而非新建 pending，断言 cand.Status=="pending" 失败。收尾删掉
+	// 这三个人物 + owner 的 city/personality 属性 + 关系 + 审计，恢复干净基线（模式参照
+	// extract_session_test.go）。提前用 t.Cleanup 注册，保证 t.Fatal 提前退出时也会清理。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person WHERE user_id = 1 AND display_name IN ('Bob','Bob2','确认人物测试')`)
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			ownerPK := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_attribute WHERE person_id = ? AND attr_key IN ('city','personality')`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_relationship WHERE person_id = ?`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ?`, ownerPK)
+		}
+	})
+
 	// ---- 手动建人物 + 手动加属性 ----
 	p, err := svc.ManualCreatePerson(ctx, "Bob", nil, nil)
 	if err != nil {

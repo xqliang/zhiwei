@@ -78,6 +78,22 @@ func TestPersonAPIFlow(t *testing.T) {
 	h, svc := setupPersonAPI(t)
 	ctx := context.Background()
 
+	// 本用例往共享 owner（user_id=1）写了不少行：手动 city（active）、personality=沉稳
+	// （pending→HTTP 确认为 active）、朋友关系及各自审计。api 包按字典序最先跑，与后续
+	// profile 包共用同一 zhiwei_test 库；若不清理，profile 包 TestApplyFactsGatePaths 的
+	// 「owner 无 active personality」断言会撞见这条残留的 active 沉稳而失败。收尾删掉 owner
+	// 的 city/personality 属性 + 关系 + 审计，恢复干净基线（模式参照 profile/extract_session_test.go）。
+	// 提前用 t.Cleanup 注册，保证任一断言 t.Fatal 提前退出时也会清理。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			oid := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_attribute WHERE person_id = ? AND attr_key IN ('city','personality')`, oid)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_relationship WHERE person_id = ?`, oid)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ?`, oid)
+		}
+	})
+
 	// 名册：至少有 owner「我」
 	rec := doReq(t, h, "GET", "/api/persons", nil)
 	if rec.Code != 200 {

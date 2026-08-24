@@ -147,6 +147,11 @@ func TestGetSessionSpeakerEnrichment(t *testing.T) {
 	if err := speakers.Create(ctx, sp); err != nil {
 		t.Fatal(err)
 	}
+	// 该 speaker 全程 active 且不绑定任何 person，会残留在共享 zhiwei_test 库里。repo 包
+	// （字典序在本包之后）TestPersonLifecycle 跑 EnsurePersonBootstrap 时，会把每个未绑定的
+	// active speaker 物化成同名 active person——于是凭空多出一个 id 更小的「张三」person，令
+	// 该用例的 FindByName(张三) 命中错误行。收尾删掉这个 speaker，堵住物化来源。
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), sp.ID) })
 	if err := transcripts.SetSegmentSpeaker(ctx, tr.ID, "1", sp.ID); err != nil {
 		t.Fatal(err)
 	}
