@@ -23,7 +23,7 @@ type Decision string
 const (
 	DecisionCreateActive    Decision = "create_active"    // 无现值且高置信 observed/inferred → 直接 active
 	DecisionCreatePending   Decision = "create_pending"   // 无现值低置信 → pending 待人工确认
-	DecisionReaffirm        Decision = "reaffirm"         // 同值已存在 → 佐证：上调置信度 +0.05 封顶 0.99
+	DecisionReaffirm        Decision = "reaffirm"         // 同值已存在 → 佐证（属性平面为置信度上调 +0.05 封顶 0.99；关系平面为 touch 不上调）
 	DecisionConflictPending Decision = "conflict_pending" // 单值冲突 → pending（supersedes 指向现值），绝不静默覆盖
 	DecisionSkip            Decision = "skip"             // 自然键已处理过（同 session 同值）→ 幂等跳过
 )

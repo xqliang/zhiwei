@@ -27,6 +27,25 @@ func TestDecideAttribute(t *testing.T) {
 	if d := DecideAttribute(sugg, nil, false, false, cfg); d != DecisionCreatePending {
 		t.Fatalf("suggested 应为 create_pending: %v", d)
 	}
+	// 高置信 inferred（可推断）→ active（inferred 与 observed 并列在自动写入白名单——
+	// 钉死谓词第二个操作数：删掉 `|| inferred` 后这条会失败）
+	inf := base
+	inf.EpistemicType = "inferred"
+	if d := DecideAttribute(inf, nil, false, false, cfg); d != DecisionCreateActive {
+		t.Fatalf("inferred 高置信应为 create_active: %v", d)
+	}
+	// 高置信 predicted（预测）→ pending（predicted 不在自动写入白名单，须人工确认）
+	pred := base
+	pred.EpistemicType = "predicted"
+	if d := DecideAttribute(pred, nil, false, false, cfg); d != DecisionCreatePending {
+		t.Fatalf("predicted 应为 create_pending: %v", d)
+	}
+	// 边界值：confidence 恰好等于阈值 0.75（cfg.AutoConf=0.75）→ active，钉死 `>=` 而非 `>`
+	edge := base
+	edge.Confidence = 0.75
+	if d := DecideAttribute(edge, nil, false, false, cfg); d != DecisionCreateActive {
+		t.Fatalf("confidence==阈值应为 create_active（>= 语义）: %v", d)
+	}
 	// 同 session 同值已处理 → skip（幂等）
 	if d := DecideAttribute(base, nil, false, true, cfg); d != DecisionSkip {
 		t.Fatalf("dedupHit 应 skip: %v", d)
