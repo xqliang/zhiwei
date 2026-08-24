@@ -1,0 +1,56 @@
+# Agent variant of cordis.yml (P2a): same headless JSON-RPC agent as
+# cordis.mcp.yml, but the MCP client connects over **streamable-http** to the
+# main zhiwei-server's in-process MCP endpoint (/internal/mcp) instead of a
+# stdio echo server. Its tools are published to the model as `mcp__zhiwei__*`.
+#
+# stdout of the harness bin stays reserved for JSON-RPC — NO stdout logger.
+
+- id: sdk-jsonrpc-server
+  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+  config:
+    maxTokensAsSuccess: true
+
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  config:
+    apiKeyEnv: ARK_API_KEY
+    baseURL: https://ark.cn-beijing.volces.com/api/v3
+    thinking: enabled
+    reasoningEffort: max
+    maxTokens: 32768
+    models:
+      - id: !!js process.env.DSH_MODEL ?? 'deepseek-v4-flash'
+        contextWindow: 1000000
+
+# Agent spine. toolBash stays off, but the MCP client below contributes its own
+# model-facing tools onto ctx.tools.
+- id: agent-spine
+  name: '@deepseek-ai/dsh-agent-spine-demo'
+  config:
+    persona: !!js process.env.DSH_SYSTEM_PROMPT ?? 'You are a friendly assistant.'
+    workspaceContext: false
+    skills:
+      enabled: false
+    toolBash: false
+    toolJobs: false
+
+# MCP client bridge -> main zhiwei-server over streamable-http (/internal/mcp).
+# Publishes tools `mcp__zhiwei__*` (e.g. mcp__zhiwei__zhiwei_ping).
+# failOnStartupError so a broken MCP connection fails boot loudly instead of
+# silently continuing tool-less.
+- id: mcp-zhiwei
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    transport: streamable-http
+    serverName: zhiwei
+    url: !!js process.env.ZW_AGENT_MCP_URL ?? 'http://127.0.0.1:8080/internal/mcp'
+    failOnStartupError: true
+
+- id: sessions
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js process.env.DSH_SESSION_ROOT ?? './.sessions'
+    compression: none
+
+- id: token-meter
+  name: '@deepseek-ai/dsh-token-meter'

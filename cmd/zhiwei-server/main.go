@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"zhiwei/internal/agent"
 	"zhiwei/internal/api"
 	"zhiwei/internal/config"
 	"zhiwei/internal/ids"
@@ -149,6 +150,18 @@ func main() {
 		Topics: topics, Memories: memories, Todos: todos,
 		LLM: llm, LLMModel: cfg.LLMFastModel, ConsolidatePrompt: string(consolidateBytes),
 	})
+
+	// MCP 工具端点（仅供本机 dsh 边车经 streamable-http 连回；不对外）。
+	// 进程内运行、复用上面已开库的 repo 实例（同一个 DB 池）。
+	mcpSrv := agent.NewMCPServer(agent.MCPDeps{
+		Memory:     memories,
+		Session:    sessions,
+		Transcript: transcripts,
+		Topic:      topics,
+		Todo:       todos,
+	})
+	r.Handle("/internal/mcp", agent.MCPHandler(mcpSrv))
+	r.Handle("/internal/mcp/*", agent.MCPHandler(mcpSrv))
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
 	go func() {
