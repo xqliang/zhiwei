@@ -296,7 +296,7 @@
                     style="cursor:default" :title="c.evidence || '无依据记录'">
                 {{ c.name }} · {{ c.confidence.toFixed(2) }}
                 <button class="chip-x" @click.stop="acceptNameCandidate(sp, c)" title="采纳为正式名">✓</button>
-                <button class="chip-x" @click.stop="dismissNameCandidate(sp, c)" title="忽略该候选">✕</button>
+                <button class="chip-x" @click.stop="dismissNameCandidate(sp, c)" title="忽略该候选（下次识别可能再次建议；采纳后不再）">✕</button>
               </span>
             </div>
           </div>
@@ -582,7 +582,7 @@
               style="cursor:default" :title="c.evidence || '无依据记录'">
           {{ c.name }} · {{ c.confidence.toFixed(2) }}
           <button class="chip-x" @click.stop="acceptNameCandidate(sp, c)" title="采纳为正式名">✓</button>
-          <button class="chip-x" @click.stop="dismissNameCandidate(sp, c)" title="忽略该候选">✕</button>
+          <button class="chip-x" @click.stop="dismissNameCandidate(sp, c)" title="忽略该候选（下次识别可能再次建议；采纳后不再）">✕</button>
         </span>
       </div>
 

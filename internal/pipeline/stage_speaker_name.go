@@ -64,8 +64,12 @@ func ParseNameCandidates(raw string) (map[string][]nameCandidate, error) {
 			if strings.TrimSpace(c.Name) == "" {
 				continue // 无名候选丢弃
 			}
-			c.Name = strings.TrimSpace(c.Name)
+			// 按 rune 截断到 DB VARCHAR 上限：MySQL STRICT_TRANS_TABLES 下超长写入会
+			// Data too long 报错，令 Upsert 失败 → stage 返回 error，违背 speakername
+			// 「尽力而为、不阻塞 session」不变量。宁可截断建议，也不让流水线因此中断。
+			c.Name = truncateRunes(strings.TrimSpace(c.Name), maxCandidateNameRunes)
 			c.Confidence = clampConfidence(c.Confidence)
+			c.Evidence = truncateRunes(c.Evidence, maxCandidateEvidenceRunes)
 			cands = append(cands, c)
 		}
 		sort.SliceStable(cands, func(i, j int) bool { return cands[i].Confidence > cands[j].Confidence })
@@ -85,6 +89,23 @@ func clampConfidence(v float64) float64 {
 		return 1
 	}
 	return v
+}
+
+// 候选名 / 证据的存储上限（rune 数），对齐 migration 000005 的 VARCHAR 列宽。
+// utf8mb4 下 VARCHAR(N) 按「字符」计，故用 rune 数而非字节数裁剪。
+const (
+	maxCandidateNameRunes     = 128 // speaker_name_candidate.name    VARCHAR(128)
+	maxCandidateEvidenceRunes = 512 // speaker_name_candidate.evidence VARCHAR(512)
+)
+
+// truncateRunes 把字符串按 rune（字符）安全截断到 max 个字符。
+// 按 rune 而非字节切，避免把多字节中文拦腰截成半个字符（乱码 / 非法 UTF-8）。
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }
 
 // runSpeakerNameStage 是 speakername stage 的可测核心（避开 pool），由 stageSpeakerName 包装。

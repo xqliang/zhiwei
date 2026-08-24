@@ -89,6 +89,20 @@ func TestParseNameCandidates(t *testing.T) {
 		t.Fatalf("空 speakers 应返回空 map，实际 %d 项", len(got4))
 	}
 
+	// 超长候选名按 rune 截断到 128（对齐 DB VARCHAR(128)，防 STRICT 模式 Data too long
+	// 令 Upsert 失败、stage 返回 error）。构造 200 字中文名验证。
+	longName := strings.Repeat("名", 200)
+	gotLong, err := ParseNameCandidates(`{"speakers":[{"ref":"L","candidates":[{"name":"` + longName + `","confidence":0.5}]}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotLong["L"]) != 1 {
+		t.Fatalf("超长名候选应保留 1 条，实际 %d", len(gotLong["L"]))
+	}
+	if n := len([]rune(gotLong["L"][0].Name)); n > 128 {
+		t.Fatalf("候选名应按 rune 截断到 ≤128，实际 %d", n)
+	}
+
 	// 彻底非法 JSON → error（stage 走重试）
 	if _, err := ParseNameCandidates(`完全不是 JSON`); err == nil {
 		t.Fatal("非法 JSON 应返回 error")
