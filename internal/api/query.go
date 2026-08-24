@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -141,7 +142,10 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 			spIDs[i] = sis[i].SpeakerID
 		}
 		if h.SpeakerNameCandidates != nil {
-			if cands, err := h.SpeakerNameCandidates.ListBySpeakers(r.Context(), spIDs); err == nil {
+			cands, err := h.SpeakerNameCandidates.ListBySpeakers(r.Context(), spIDs)
+			if err != nil {
+				log.Printf("[speaker] 候选名富化失败: %v", err) // 降级为空候选，不阻断详情
+			} else {
 				idx := make(map[ids.ID]int, len(sisView))
 				for i := range sisView {
 					idx[sisView[i].SpeakerID] = i
@@ -152,7 +156,7 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 							NameCandidateView{Name: c.Name, Confidence: c.Confidence, Evidence: c.Evidence})
 					}
 				}
-			} // 查询失败降级为空候选，不阻断详情
+			}
 		}
 		resp["transcript"] = tr
 		resp["segments"] = views

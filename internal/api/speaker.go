@@ -63,6 +63,7 @@ func (h *SpeakerHandler) attachCandidates(ctx context.Context, list []repo.Speak
 	}
 	cands, err := h.SpeakerNameCandidates.ListBySpeakers(ctx, spIDs)
 	if err != nil {
+		log.Printf("[speaker] 候选名富化失败: %v", err)
 		return out // 降级：无候选展示
 	}
 	for _, c := range cands {
@@ -237,6 +238,13 @@ func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = h.Speakers.DB.ExecContext(r.Context(),
 		`UPDATE transcript_segment SET speaker_id = NULL WHERE speaker_id = ?`, id.Int64())
+	// 删说话人后清其候选：孤儿候选永不外显（说话人已没了）但会在表里累积，顺手清掉。
+	// best-effort，失败仅 log 不阻断删除（与 Rename 清候选一致；候选残留无副作用）。
+	if h.SpeakerNameCandidates != nil {
+		if err := h.SpeakerNameCandidates.DeleteBySpeaker(r.Context(), id); err != nil {
+			log.Printf("[speaker] 删说话人后清候选失败 speaker=%s: %v", id, err)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

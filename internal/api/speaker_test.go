@@ -326,4 +326,24 @@ func TestSpeakerDeleteNameCandidate(t *testing.T) {
 	if rec3.Code != 400 {
 		t.Fatalf("缺 name 应 400，实际 %d", rec3.Code)
 	}
+	// repo 未装配 → 501（另建一个不注入 SpeakerNameCandidates 的 router）
+	rNil := chi.NewRouter()
+	RegisterSpeaker(rNil, &SpeakerHandler{
+		Speakers: speakers, Transcripts: &repo.TranscriptRepo{DB: db},
+		Voiceprint: fakeVoiceprintAPI{}, DataDir: t.TempDir(),
+		// SpeakerNameCandidates 故意留空
+	})
+	rec4 := httptest.NewRecorder()
+	rNil.ServeHTTP(rec4, httptest.NewRequest(http.MethodDelete,
+		"/api/speakers/"+sp.ID.String()+"/name-candidates?name="+url.QueryEscape("张总"), nil))
+	if rec4.Code != 501 {
+		t.Fatalf("repo 未装配应 501，实际 %d", rec4.Code)
+	}
+	// 非法 id → 400（id 解析在 name 校验之前，故带 name 也应 400）
+	rec5 := httptest.NewRecorder()
+	r.ServeHTTP(rec5, httptest.NewRequest(http.MethodDelete,
+		"/api/speakers/not-a-valid-id/name-candidates?name="+url.QueryEscape("张总"), nil))
+	if rec5.Code != 400 {
+		t.Fatalf("非法 id 应 400，实际 %d", rec5.Code)
+	}
 }
