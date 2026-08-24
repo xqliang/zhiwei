@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"testing"
+	"time"
 
 	"zhiwei/internal/ids"
 )
@@ -223,5 +224,92 @@ func TestTranscriptMergeSegments(t *testing.T) {
 	// 第 3 段保留不变
 	if after[1].Text != "他人" {
 		t.Fatalf("未参与合并的第3段应保留: %q", after[1].Text)
+	}
+}
+
+// TestListSegmentsInWallClockWindow 验证跨 session 墙钟窗口查询：
+// 段的墙钟时间 = session.created_at + start_ms；窗口外的 session 不入选；
+// DESC+LIMIT 裁剪保留最近；结果按墙钟正序返回。
+func TestListSegmentsInWallClockWindow(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	sessions := &SessionRepo{DB: db}
+	transcripts := &TranscriptRepo{DB: db}
+	// 用独立 user_id 隔离本用例：墙钟窗口查询按 user 维度过滤，共享测试库里
+	// 其他用例/历史遗留的 user_id=1 段（created_at≈now）会落入窗口造成计数漂移，
+	// 故本用例的 transcript 全部挂到一个全新 user_id 下，天然与其它数据隔离。
+	uid := ids.New().Int64()
+
+	// session A：窗口外（30 分钟前创建）——即便文本命中也不该入选
+	sa := &AudioSession{ID: ids.New(), Source: "web_upload", Filename: "old.wav", StoragePath: "/tmp/old.wav", Status: "completed"}
+	sa.CreatedAt = time.Now().Add(-30 * time.Minute)
+	if err := sessions.Create(ctx, sa); err != nil {
+		t.Fatal(err)
+	}
+	// 手动改 created_at（Create 用的 DB 默认值）：直接 UPDATE 保证窗口判定用目标时间
+	if _, err := db.ExecContext(ctx, `UPDATE audio_session SET created_at = ? WHERE id = ?`, sa.CreatedAt, sa.ID.Int64()); err != nil {
+		t.Fatal(err)
+	}
+	tra := &Transcript{UserID: uid, SessionID: sa.ID, Language: "zh-CN"}
+	_ = transcripts.Create(ctx, tra)
+	_ = transcripts.InsertSegments(ctx, []TranscriptSegment{
+		{TranscriptID: tra.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "老录音内容", StartMS: 0, EndMS: 1000},
+	})
+
+	// session B：紧邻当前录音之前 5 分钟创建（窗口内）
+	sb := &AudioSession{ID: ids.New(), Source: "web_upload", Filename: "prev.wav", StoragePath: "/tmp/prev.wav", Status: "completed"}
+	sb.CreatedAt = time.Now().Add(-5 * time.Minute)
+	if err := sessions.Create(ctx, sb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE audio_session SET created_at = ? WHERE id = ?`, sb.CreatedAt, sb.ID.Int64()); err != nil {
+		t.Fatal(err)
+	}
+	trb := &Transcript{UserID: uid, SessionID: sb.ID, Language: "zh-CN"}
+	_ = transcripts.Create(ctx, trb)
+	_ = transcripts.InsertSegments(ctx, []TranscriptSegment{
+		{TranscriptID: trb.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "前一段录音", StartMS: 0, EndMS: 2000},
+	})
+
+	// session C：当前录音（now 创建）
+	sc := &AudioSession{ID: ids.New(), Source: "web_upload", Filename: "cur.wav", StoragePath: "/tmp/cur.wav", Status: "processing"}
+	sc.CreatedAt = time.Now()
+	if err := sessions.Create(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	// 同 A/B：Create 不回填 created_at，手动 UPDATE，让墙钟计算与断言基于已知的 sc.CreatedAt
+	if _, err := db.ExecContext(ctx, `UPDATE audio_session SET created_at = ? WHERE id = ?`, sc.CreatedAt, sc.ID.Int64()); err != nil {
+		t.Fatal(err)
+	}
+	trc := &Transcript{UserID: uid, SessionID: sc.ID, Language: "zh-CN"}
+	_ = transcripts.Create(ctx, trc)
+	_ = transcripts.InsertSegments(ctx, []TranscriptSegment{
+		{TranscriptID: trc.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "当前录音开头", StartMS: 0, EndMS: 1000},
+		{TranscriptID: trc.ID, SequenceNo: 2, SpeakerLabel: "2", Text: "当前录音后段", StartMS: 60000, EndMS: 61000},
+	})
+
+	// 窗口 = [now-10min, now+2min]（当前录音时长按 70s 计）
+	got, err := transcripts.ListSegmentsInWallClockWindow(ctx, uid,
+		time.Now().Add(-10*time.Minute), time.Now().Add(2*time.Minute), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("窗口内应 3 段（B 的 1 段 + C 的 2 段），实际 %d: %+v", len(got), got)
+	}
+	// 正序：B 的段在 C 之前；C 内按 start_ms
+	if got[0].Text != "前一段录音" || got[1].Text != "当前录音开头" || got[2].Text != "当前录音后段" {
+		t.Fatalf("顺序错误: %s / %s / %s", got[0].Text, got[1].Text, got[2].Text)
+	}
+	// 墙钟时间正确性：C 第 2 段 = sc.created_at + 60s
+	want := sc.CreatedAt.Add(60 * time.Second)
+	if diff := got[2].WallTime.Sub(want); diff < -time.Second || diff > time.Second {
+		t.Fatalf("wall_time 应≈ created_at+60s，差 %v", diff)
+	}
+	// LIMIT 裁剪保留最近：上限 2 → C 的两段（最新）
+	got2, _ := transcripts.ListSegmentsInWallClockWindow(ctx, uid,
+		time.Now().Add(-10*time.Minute), time.Now().Add(2*time.Minute), 2)
+	if len(got2) != 2 || got2[0].Text != "当前录音开头" {
+		t.Fatalf("裁剪应保留最近的 2 段，实际 %+v", got2)
 	}
 }

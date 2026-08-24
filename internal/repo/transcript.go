@@ -247,3 +247,49 @@ type SpeakerSegmentOccurrence struct {
 	Filename   string    `db:"filename" json:"filename"`
 	CreatedAt  time.Time `db:"created_at" json:"created_at"`
 }
+
+// WallClockSegment 跨 session 墙钟时间窗口内的一条发言（speakername stage 上下文用）。
+// WallTime = session.created_at + start_ms，由 SQL 计算返回。
+// SpeakerName 经 LEFT JOIN speaker 取（已确认真名/随机名原样；NULL 段为 nil）。
+type WallClockSegment struct {
+	SegmentID   ids.ID    `db:"segment_id"`
+	SessionID   ids.ID    `db:"session_id"`
+	SpeakerID   *ids.ID   `db:"speaker_id"`
+	SpeakerName *string   `db:"speaker_name"`
+	Text        string    `db:"text"`
+	StartMS     int64     `db:"start_ms"`
+	EndMS       int64     `db:"end_ms"`
+	WallTime    time.Time `db:"wall_time"`
+}
+
+// ListSegmentsInWallClockWindow 跨 session 取墙钟时间落在 [from,to] 的全部段，
+// 按墙钟**正序**返回；limit 超限时保留**最近**的（靠近 to 的）——当前录音的段
+// 是窗口内最新的，天然优先保留。user 维度过滤。
+// 实现：SQL DESC + LIMIT 取最近 N，Go 侧反转回正序。
+// speakername stage 用它拼「当前录音全文 + 前 N 分钟跨录音对话」上下文。
+func (r *TranscriptRepo) ListSegmentsInWallClockWindow(ctx context.Context, userID int64, from, to time.Time, limit int) ([]WallClockSegment, error) {
+	if limit <= 0 {
+		limit = 400
+	}
+	var desc []WallClockSegment
+	err := r.DB.SelectContext(ctx, &desc, `
+SELECT seg.id AS segment_id, tr.session_id, seg.speaker_id, sp.name AS speaker_name,
+       seg.text, seg.start_ms, seg.end_ms,
+       (s.created_at + INTERVAL seg.start_ms * 1000 MICROSECOND) AS wall_time
+FROM transcript_segment seg
+JOIN transcript tr      ON tr.id = seg.transcript_id
+JOIN audio_session s    ON s.id = tr.session_id
+LEFT JOIN speaker sp    ON sp.id = seg.speaker_id
+WHERE tr.user_id = ?
+  AND (s.created_at + INTERVAL seg.start_ms * 1000 MICROSECOND) BETWEEN ? AND ?
+ORDER BY wall_time DESC
+LIMIT ?`, userID, from, to, limit)
+	if err != nil {
+		return nil, err
+	}
+	// DESC → 正序（原地反转，避免再分配）
+	for i, j := 0, len(desc)-1; i < j; i, j = i+1, j-1 {
+		desc[i], desc[j] = desc[j], desc[i]
+	}
+	return desc, nil
+}
