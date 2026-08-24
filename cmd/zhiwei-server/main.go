@@ -147,12 +147,14 @@ func main() {
 	api.RegisterQuery(r, &api.QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,
+		SpeakerNameCandidates: nameCandidates,
 	})
 	api.RegisterSpeaker(r, &api.SpeakerHandler{
 		Speakers: speakers, Transcripts: transcripts,
 		Voiceprint: voiceprintCli, DataDir: cfg.DataDir,
-		EnrollMinDurationMS: cfg.EnrollMinDurationMS,
-		VoiceprintThreshold: cfg.VoiceprintThreshold,
+		EnrollMinDurationMS:   cfg.EnrollMinDurationMS,
+		VoiceprintThreshold:   cfg.VoiceprintThreshold,
+		SpeakerNameCandidates: nameCandidates,
 	})
 	api.RegisterMemory(r, &api.MemoryHandler{
 		Memories: memories, Topics: topics, MemoryTopics: memoryTopics,

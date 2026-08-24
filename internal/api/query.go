@@ -20,6 +20,8 @@ type QueryHandler struct {
 	Memories    *repo.MemoryRepo  // Sprint 2：详情附带 memory 卡片
 	Todos       *repo.TodoRepo    // Sprint 2：详情附带 todo 卡片
 	Speakers    *repo.SpeakerRepo // speaker stage：详情附带段说话人 + speakers 列表
+
+	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // speakername stage：详情 speakers 附候选名
 }
 
 // RegisterQuery 挂载查询路由。
@@ -127,9 +129,34 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 				views[i].Speaker = speakerLabelName(sg.SpeakerLabel) // 未解析→"说话人 N"
 			}
 		}
+		// sis 富化候选名（随机名说话人展示「建议名字」区）；repo 未装配则空候选
+		type speakerWithCands struct {
+			repo.SpeakerInSegment
+			NameCandidates []NameCandidateView `json:"name_candidates"`
+		}
+		sisView := make([]speakerWithCands, len(sis))
+		spIDs := make([]ids.ID, len(sis))
+		for i := range sis {
+			sisView[i] = speakerWithCands{SpeakerInSegment: sis[i], NameCandidates: []NameCandidateView{}}
+			spIDs[i] = sis[i].SpeakerID
+		}
+		if h.SpeakerNameCandidates != nil {
+			if cands, err := h.SpeakerNameCandidates.ListBySpeakers(r.Context(), spIDs); err == nil {
+				idx := make(map[ids.ID]int, len(sisView))
+				for i := range sisView {
+					idx[sisView[i].SpeakerID] = i
+				}
+				for _, c := range cands {
+					if i, ok := idx[c.SpeakerID]; ok {
+						sisView[i].NameCandidates = append(sisView[i].NameCandidates,
+							NameCandidateView{Name: c.Name, Confidence: c.Confidence, Evidence: c.Evidence})
+					}
+				}
+			} // 查询失败降级为空候选，不阻断详情
+		}
 		resp["transcript"] = tr
 		resp["segments"] = views
-		resp["speakers"] = sis
+		resp["speakers"] = sisView
 	}
 	// Sprint 2：详情附带 memory/todo 卡片（repo 为空则跳过，兼容旧装配）
 	if h.Memories != nil {

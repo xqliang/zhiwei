@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"os"
@@ -27,6 +29,50 @@ type SpeakerHandler struct {
 	DataDir             string
 	EnrollMinDurationMS int64   // 从转写段音频录入声纹的最小时长（ms，0→兜底 3000）
 	VoiceprintThreshold float64 // 1:N 余弦匹配阈值（match 预览判定+展示用，0→兜底 0.8）
+
+	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // 名字候选 repo（nil = 不富化/不清理，兼容旧装配）
+}
+
+// NameCandidateView 前端展示的候选名：名称 + 置信度数值（硬性要求：用户确认时
+// 必须能看到名称和置信度值）+ 依据。倒排。
+type NameCandidateView struct {
+	Name       string  `json:"name"`
+	Confidence float64 `json:"confidence"`
+	Evidence   string  `json:"evidence,omitempty"`
+}
+
+// speakerWithCandidates speaker + 候选名列表（名册/面板富化视图）。
+type speakerWithCandidates struct {
+	repo.Speaker
+	NameCandidates []NameCandidateView `json:"name_candidates"`
+}
+
+// attachCandidates 为说话人列表批量附候选名（一次查询避免 N+1）。
+// repo 未装配时返回全空候选；查询失败降级为空候选（富化仅影响建议展示，不阻断列表）。
+func (h *SpeakerHandler) attachCandidates(ctx context.Context, list []repo.Speaker) []speakerWithCandidates {
+	out := make([]speakerWithCandidates, len(list))
+	spIDs := make([]ids.ID, len(list))
+	idx := make(map[ids.ID]int, len(list))
+	for i, sp := range list {
+		out[i] = speakerWithCandidates{Speaker: sp, NameCandidates: []NameCandidateView{}}
+		spIDs[i] = sp.ID
+		idx[sp.ID] = i
+	}
+	if h.SpeakerNameCandidates == nil || len(list) == 0 {
+		return out
+	}
+	cands, err := h.SpeakerNameCandidates.ListBySpeakers(ctx, spIDs)
+	if err != nil {
+		return out // 降级：无候选展示
+	}
+	for _, c := range cands {
+		if i, ok := idx[c.SpeakerID]; ok {
+			out[i].NameCandidates = append(out[i].NameCandidates, NameCandidateView{
+				Name: c.Name, Confidence: c.Confidence, Evidence: c.Evidence,
+			})
+		}
+	}
+	return out
 }
 
 // RegisterSpeaker 挂载说话人相关路由。
@@ -35,8 +81,9 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Post("/api/speakers", h.Enroll)
 	r.Patch("/api/speakers/{id}", h.Rename)
 	r.Delete("/api/speakers/{id}", h.Delete)
-	r.Post("/api/speakers/merge", h.Merge)           // 声纹页「手动合并」：多说话人并入一个目标
-	r.Get("/api/speakers/{id}/segments", h.Segments) // 该说话人跨 session 出现的片段（声纹 tab 点开看关联录音）
+	r.Delete("/api/speakers/{id}/name-candidates", h.DeleteNameCandidate) // 忽略单个候选名（建议区 ✕）
+	r.Post("/api/speakers/merge", h.Merge)                                // 声纹页「手动合并」：多说话人并入一个目标
+	r.Get("/api/speakers/{id}/segments", h.Segments)                      // 该说话人跨 session 出现的片段（声纹 tab 点开看关联录音）
 	r.Get("/api/sessions/{sid}/speakers", h.SessionSpeakers)
 	r.Patch("/api/sessions/{sid}/segments/{seg}/speaker", h.ReassignSegment)
 	r.Post("/api/sessions/{sid}/segments/{seg}/enroll", h.EnrollFromSegment) // timeline「用此段录音纹」：从转写段音频录入新说话人
@@ -44,14 +91,14 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Post("/api/voiceprint/match", h.MatchPreview)                          // 录音页「试匹配」预览：上传音频→提向→1:N→返回相似度+阈值（只读不登记）
 }
 
-// List 全部 active 说话人（管理页/换人下拉用）。
+// List 全部 active 说话人（管理页/换人下拉用）。随机名说话人附 LLM 推断的候选名（倒排）。
 func (h *SpeakerHandler) List(w http.ResponseWriter, r *http.Request) {
 	list, err := h.Speakers.List(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"speakers": list})
+	writeJSON(w, map[string]any{"speakers": h.attachCandidates(r.Context(), list)})
 }
 
 // Segments 该说话人出现的所有片段（跨 session，声纹 tab「点开看关联录音」用）。
@@ -164,6 +211,14 @@ func (h *SpeakerHandler) Rename(w http.ResponseWriter, r *http.Request) {
 	if err := h.Speakers.UpdateName(r.Context(), id, req.Name); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// 改名 = 用户已确认称呼（采纳候选或手动命名）：清空候选——名字不再是随机名，
+	// 后续也不再重跑推断。清空失败不回滚改名（候选残留仅影响建议展示，前端对
+	// 非随机名说话人本就不显示建议区），log 便于排查。
+	if h.SpeakerNameCandidates != nil {
+		if err := h.SpeakerNameCandidates.DeleteBySpeaker(r.Context(), id); err != nil {
+			log.Printf("[speaker] 改名后清候选失败 speaker=%s: %v", id, err)
+		}
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -592,4 +647,28 @@ func float32BlobAPI(v []float32) []byte {
 		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(x))
 	}
 	return buf
+}
+
+// DeleteNameCandidate 忽略单个候选名（前端建议区 ✕ 按钮）。
+// ?name= 指定候选名；幂等（不存在也 204）。repo 未装配 501。
+func (h *SpeakerHandler) DeleteNameCandidate(w http.ResponseWriter, r *http.Request) {
+	if h.SpeakerNameCandidates == nil {
+		http.Error(w, "候选名功能未装配", http.StatusNotImplemented)
+		return
+	}
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+	if err := h.SpeakerNameCandidates.DeleteOne(r.Context(), id, name); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
