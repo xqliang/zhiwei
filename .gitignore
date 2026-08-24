@@ -16,3 +16,5 @@ services/voiceprint/.venv/
 # Python 字节码缓存（sidecar 引入 Python 后新增）
 __pycache__/
 *.pyc
+# git worktree 目录（feature 分支/模型对比隔离工作区），勿提交
+.worktrees/
