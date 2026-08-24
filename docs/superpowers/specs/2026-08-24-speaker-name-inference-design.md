@@ -117,17 +117,15 @@ CREATE TABLE speaker_name_candidate (
   id                BIGINT PRIMARY KEY,
   speaker_id        BIGINT NOT NULL,                       -- 归属说话人
   name              VARCHAR(128) NOT NULL,                 -- 候选名（张总/王哥/张三…）
-  confidence        DOUBLE NOT NULL DEFAULT 0,             -- 置信度 [0,1]，排序键
+  confidence        DECIMAL(5,4) NOT NULL DEFAULT 0,       -- 置信度 [0,1]，排序键（类型对齐全库 confidence 列）
   evidence          VARCHAR(512) NULL,                     -- 依据：简短引用 + 时间
   source_session_id BIGINT NULL,                           -- 最近一次产生该候选的会话
   created_at        DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at        DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  UNIQUE KEY uk_speaker_name (speaker_id, name),
-  KEY idx_speaker (speaker_id)
+  UNIQUE KEY uk_speaker_name (speaker_id, name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
-
-down：`DROP TABLE speaker_name_candidate`。
+（质量审查修订：去掉冗余的 `idx_speaker`——被 uk 最左前缀覆盖；confidence 用 DECIMAL(5,4) 对齐全库。）down：`DROP TABLE IF EXISTS speaker_name_candidate;`
 
 - **跨 session 累积**：`INSERT … ON DUPLICATE KEY UPDATE confidence=GREATEST(confidence, VALUES(confidence)), evidence=VALUES(evidence), source_session_id=VALUES(source_session_id)`。多段录音复现同一候选名 → 取最高置信、留最新证据。（MVP 用 GREATEST；后续可考虑「多次复现小幅上调」的佐证式增强，参考 extract stage 的 D1。）
 - **说话人改名即清空候选**：`speaker` 改名（点选候选或手动改名）后删除该 speaker 的全部候选行——名字已确认、也不再是随机名，不再重跑。删除逻辑挂在改名路径（见 §7）。
