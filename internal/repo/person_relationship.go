@@ -118,6 +118,28 @@ ORDER BY id DESC LIMIT 1`, personID.Int64(), relationType, rid).StructScan(&rel)
 	return &rel, nil
 }
 
+// FindActiveRelatedPersonIDExt 找主体指定类型的最早 active 关系对端人物 id
+// （「我老婆」→ 配偶 person；多条同类型取最老一条，id 升序稳定选择）。必须传 tx 以看到
+// 本事务内未提交的关系行（ApplyFacts 批内 relation 指代解析依赖此语义：同批「我老婆是医生」
+// 挂到刚新建、尚未提交的配偶关系对端上，走非事务读会看不到而误判解析不到）。
+// 只返回对端为具体 person（related_person_id 非 NULL）的关系；无命中返回 (nil, nil)。
+// 注：FindActiveByTypeExt 传 nil 对端只匹配 related_person_id IS NULL 的组织关系，语义相反，
+// 故此处单列一个查询，专供「按关系找对端 person」，不复用它。
+func (r *PersonRelationshipRepo) FindActiveRelatedPersonIDExt(ctx context.Context, ext QueryRowxContext, personID ids.ID, relationType string) (*ids.ID, error) {
+	var rid ids.ID
+	err := ext.QueryRowxContext(ctx, `
+SELECT related_person_id FROM person_relationship
+WHERE person_id = ? AND relation_type = ? AND status = 'active' AND related_person_id IS NOT NULL
+ORDER BY id LIMIT 1`, personID.Int64(), relationType).Scan(&rid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rid, nil
+}
+
 // FindByNaturalKeyExt 幂等去重：同 session 同（主体,类型,对端）任意 status 的行。
 // label 不进自然键（同一关系不同称呼视为同一条）。对端可空，同样用 `<=>` 匹配。
 func (r *PersonRelationshipRepo) FindByNaturalKeyExt(ctx context.Context, ext QueryRowxContext, sessionID, personID ids.ID, relationType string, relatedPersonID *ids.ID) (*PersonRelationship, error) {

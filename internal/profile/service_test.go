@@ -139,6 +139,12 @@ func TestApplyFactsGatePaths(t *testing.T) {
 	if st3.Pending != 1 || st3.Conflicts != 1 {
 		t.Fatalf("冲突统计错误: %+v", st3)
 	}
+	// supersedes 链接：冲突产生的 pending「教师」行须指向当前 active「工程师」行（oa），
+	// 不静默覆盖现值——供确认队列展示「替换谁」。
+	pend, _ := svc.Attributes.FindByNaturalKey(ctx, sess2, oid, "occupation", "教师")
+	if pend == nil || pend.Status != "pending" || pend.SupersedesID == nil || *pend.SupersedesID != oa.ID {
+		t.Fatalf("冲突 pending 应指向 active 现值行: pend=%+v 期望 supersedes=%d", pend, oa.ID)
+	}
 	// 佐证：sess2 重申 occupation=工程师（active 现值）→ reaffirm
 	st4, err := svc.ApplyFacts(ctx, sess2, 1, []Fact{
 		{Plane: "attribute", Subject: Subject{Kind: "self"}, AttrKey: "occupation",

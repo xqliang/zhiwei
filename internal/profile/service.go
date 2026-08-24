@@ -2,7 +2,6 @@ package profile
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,7 +76,8 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 	for _, f := range facts {
 		prov := Provenance{SessionID: sessionID, SegmentIDs: f.SegmentIDs}
 		if err := s.applyFact(ctx, tx, userID, f, prov, memRows, &st); err != nil {
-			return st, fmt.Errorf("应用事实(plane=%s key=%s): %w", f.Plane, f.AttrKey, err)
+			return st, fmt.Errorf("应用事实(plane=%s key=%s relation=%s subject=%s): %w",
+				f.Plane, f.AttrKey, f.RelationType, f.Subject.Kind, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -202,9 +202,9 @@ func (s *Service) applyRelationshipFact(ctx context.Context, tx *sqlx.Tx, userID
 	case DecisionSkip:
 		st.Skipped++
 	case DecisionReaffirm:
-		if err := s.Relationships.SetStatusExt(ctx, tx, existing.ID, "active"); err != nil { // no-op touch（updated_at 刷新，确认可见）
-			return err
-		}
+		// reaffirm 的持久化效果=审计记录（change_log）；关系平面不上调置信度、不 touch
+		//（gate 注释已声明两平面差异）。实测 MySQL：对已 active 行 UPDATE status='active'
+		// 无值变更，不触发 ON UPDATE CURRENT_TIMESTAMP，是纯 no-op SQL，故不写。
 		if err := s.ChangeLogs.CreateExt(ctx, tx, reaffirmRelLog(personID, existing, memID, prov)); err != nil {
 			return err
 		}
@@ -304,30 +304,23 @@ func (s *Service) personBySpeakerName(ctx context.Context, tx *sqlx.Tx, name str
 
 // personByOwnerRelation owner 的指定类型 active 关系对端（「我老婆」→ 配偶 person）。
 //
-// 必须在事务连接 tx 上查：同一批 ApplyFacts 里，「我老婆是医生」这类属性事实的主体
-// （relation:配偶）依赖同批刚新建、尚未提交的配偶关系——走 r.DB 的非事务读看不到本事务
-// 未提交行，会把该事实误判为「主体解析不到」而跳过。故此处用 tx 直接查询（sqlx Get 走 tx）。
-//
-// 语义：取该类型、对端为具体 person（related_person_id 非 NULL）、active 的最早一条
-// （id 升序稳定选择，如多个子女取最老一条）。repo.FindActiveByTypeExt 传 nil 对端只能匹配
-// related_person_id IS NULL 的组织关系，不适合「找关系对端 person」，故这里不复用它。
+// 走 tx（而非 r.DB）以看到本事务内未提交的关系：同一批 ApplyFacts 里，「我老婆是医生」
+// 这类属性事实的主体（relation:配偶）依赖同批刚新建、尚未提交的配偶关系；非事务读看不到
+// 未提交行，会把该事实误判为「主体解析不到」而跳过。查询语义（取该类型、对端为具体 person、
+// active 的最老一条）下沉到 repo.FindActiveRelatedPersonIDExt——业务层不写裸 SQL（见 db.go）。
 func (s *Service) personByOwnerRelation(ctx context.Context, tx *sqlx.Tx, relationType string) (ids.ID, error) {
 	owner, err := s.Persons.GetOwnerExt(ctx, tx, 1)
 	if err != nil || owner == nil {
 		return 0, err
 	}
-	var rid ids.ID
-	err = tx.GetContext(ctx, &rid, `
-SELECT related_person_id FROM person_relationship
-WHERE person_id = ? AND relation_type = ? AND status = 'active' AND related_person_id IS NOT NULL
-ORDER BY id LIMIT 1`, owner.ID.Int64(), relationType)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
+	rid, err := s.Relationships.FindActiveRelatedPersonIDExt(ctx, tx, owner.ID, relationType)
 	if err != nil {
 		return 0, err
 	}
-	return rid, nil
+	if rid == nil {
+		return 0, nil // 无对端为具体 person 的该类型 active 关系
+	}
+	return *rid, nil
 }
 
 // resolveOrCreateByName 按显示名找 active/pending 人物；找不到新建
@@ -428,6 +421,9 @@ func createRelLog(personID ids.ID, row *repo.PersonRelationship, memID *ids.ID, 
 	}
 }
 
+// reaffirmRelLog 关系佐证审计。关系平面 reaffirm 既不上调置信度也不 touch 关系行
+// （见 applyRelationshipFact 的 DecisionReaffirm 分支），这条 change_log 就是佐证的
+// 唯一持久化效果——与属性平面 reaffirmAttrLog（伴随置信度 +0.05）刻意不同。
 func reaffirmRelLog(personID ids.ID, row *repo.PersonRelationship, memID *ids.ID, prov Provenance) *repo.PersonChangeLog {
 	return &repo.PersonChangeLog{
 		PersonID: personID, EntityKind: "relationship", EntityID: &row.ID,
