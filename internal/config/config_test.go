@@ -81,3 +81,50 @@ func TestLoadExtractInvalidFallback(t *testing.T) {
 		})
 	}
 }
+
+// TestProfileDefaults 验证不设 ZW_PROFILE_* 时使用画像默认值。
+func TestProfileDefaults(t *testing.T) {
+	t.Setenv("ARK_API_KEY", "k")
+	// 不设 ZW_PROFILE_* → 默认值
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ProfileAutoConfidence != 0.75 {
+		t.Fatalf("ProfileAutoConfidence 默认应 0.75: %v", c.ProfileAutoConfidence)
+	}
+	if !c.ProfileExtractEnabled {
+		t.Fatal("ProfileExtractEnabled 默认应 true")
+	}
+	if c.ProfileExtractWindow != 10 {
+		t.Fatalf("ProfileExtractWindow 默认应 10: %v", c.ProfileExtractWindow)
+	}
+}
+
+// TestProfileOverrides 验证 ZW_PROFILE_* 环境变量覆盖生效。
+func TestProfileOverrides(t *testing.T) {
+	t.Setenv("ARK_API_KEY", "k")
+	t.Setenv("ZW_PROFILE_AUTO_CONFIDENCE", "0.9")
+	t.Setenv("ZW_PROFILE_EXTRACT_ENABLED", "false")
+	t.Setenv("ZW_PROFILE_EXTRACT_WINDOW", "20")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ProfileAutoConfidence != 0.9 || c.ProfileExtractEnabled || c.ProfileExtractWindow != 20 {
+		t.Fatalf("覆盖未生效: %+v", c)
+	}
+}
+
+// TestGetenvBool 验证布尔环境变量解析：1/true/TRUE（大小写不敏感）为 true，其余为 false；未设置返回默认值。
+func TestGetenvBool(t *testing.T) {
+	for k, v := range map[string]bool{"1": true, "true": true, "TRUE": true, "0": false, "yes": false, "": false} {
+		t.Setenv("ZW_TEST_BOOL", k)
+		if getenvBool("ZW_TEST_BOOL", false) != v {
+			t.Fatalf("getenvBool(%q) 期望 %v", k, v)
+		}
+	}
+	if getenvBool("ZW_TEST_UNSET", true) != true {
+		t.Fatal("未设置时应返回默认值 true")
+	}
+}

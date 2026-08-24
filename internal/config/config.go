@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -45,6 +46,11 @@ type Config struct {
 	VoiceprintSidecarURL string  // 声纹 sidecar 地址（http://127.0.0.1:8010）
 	VoiceprintThreshold  float64 // 1:N 余弦匹配阈值，低于则视为未命中→自动登记
 	EnrollMinDurationMS  int64   // 从转写段音频录入声纹的最小时长（毫秒，默认 3000=3s；WeSpeaker LM 对 >3s 更稳）
+
+	// ---- profile stage（用户画像 P1）----
+	ProfileAutoConfidence float64 // ZW_PROFILE_AUTO_CONFIDENCE：LLM 抽取自动写入 active 的置信阈值（默认 0.75）
+	ProfileExtractEnabled bool    // ZW_PROFILE_EXTRACT_ENABLED：是否启用 profile 流水线阶段（默认 true）
+	ProfileExtractWindow  int     // ZW_PROFILE_EXTRACT_WINDOW：抽取窗口大小（对话块数，默认 10）
 }
 
 func getenv(k, def string) string {
@@ -95,6 +101,11 @@ func Load() (*Config, error) {
 		VoiceprintSidecarURL: getenv("ZW_VOICEPRINT_SIDECAR_URL", "http://127.0.0.1:8010"),
 		VoiceprintThreshold:  getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.5),
 		EnrollMinDurationMS:  int64(getenvInt("ZW_ENROLL_MIN_DURATION_MS", 3000)),
+
+		// ---- profile stage ----
+		ProfileAutoConfidence: getenvFloat("ZW_PROFILE_AUTO_CONFIDENCE", 0.75),
+		ProfileExtractEnabled: getenvBool("ZW_PROFILE_EXTRACT_ENABLED", true),
+		ProfileExtractWindow:  getenvInt("ZW_PROFILE_EXTRACT_WINDOW", 10),
 	}, nil
 }
 
@@ -116,4 +127,14 @@ func getenvFloat(key string, def float64) float64 {
 		}
 	}
 	return def
+}
+
+// getenvBool 读取布尔环境变量：1/true/TRUE（大小写不敏感）为 true，其余为 false；
+// 未设置返回默认值。
+func getenvBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	return v == "1" || strings.EqualFold(v, "true")
 }
