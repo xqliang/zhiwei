@@ -1,0 +1,11 @@
+# pnpm gates packages that ship install/build scripts. This spike (text turn +
+# MCP echo) uses no PTY or bash tools, so none of these native builds are
+# needed — they are left unbuilt and everything works.
+#
+# Plan 2 note: if the real composition enables PTY/bash-backed tools, flip
+# node-pty (and dsh-subprocess-local, whose postinstall restores node-pty's
+# macOS spawn-helper exec bit) to true and reinstall.
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': false
+  koffi: false
+  node-pty: false

@@ -1,0 +1,56 @@
+# MCP variant of cordis.yml for the SECONDARY spike goal: same headless
+# JSON-RPC agent, plus one MCP client bridged to a trivial stdio echo server.
+# Its tool is published to the model as `mcp__echo_srv__echo`.
+#
+# stdout of the harness bin stays reserved for JSON-RPC — NO stdout logger.
+
+- id: sdk-jsonrpc-server
+  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+  config:
+    maxTokensAsSuccess: true
+
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  config:
+    apiKeyEnv: ARK_API_KEY
+    baseURL: https://ark.cn-beijing.volces.com/api/v3
+    thinking: enabled
+    reasoningEffort: max
+    maxTokens: 32768
+    models:
+      - id: !!js process.env.DSH_MODEL ?? 'deepseek-v4-flash'
+        contextWindow: 1000000
+
+# Agent spine. toolBash stays off, but the MCP client below contributes its own
+# model-facing tool onto ctx.tools, so the model gets exactly one tool: echo.
+- id: agent-spine
+  name: '@deepseek-ai/dsh-agent-spine-demo'
+  config:
+    persona: !!js process.env.DSH_SYSTEM_PROMPT ?? 'You are a friendly assistant.'
+    workspaceContext: false
+    skills:
+      enabled: false
+    toolBash: false
+    toolJobs: false
+
+# MCP client bridge -> trivial stdio echo server (spike/mcp-echo-server.mjs).
+# Publishes tool `mcp__echo_srv__echo`. failOnStartupError so a broken MCP
+# connection fails boot loudly instead of silently continuing tool-less.
+- id: mcp-echo
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    transport: stdio
+    serverName: echo_srv
+    command: node
+    args:
+      - !!js process.getBuiltinModule('node:path').join(process.env.DSH_CWD ?? process.cwd(), 'spike', 'mcp-echo-server.mjs')
+    failOnStartupError: true
+
+- id: sessions
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js process.env.DSH_SESSION_ROOT ?? './.sessions'
+    compression: none
+
+- id: token-meter
+  name: '@deepseek-ai/dsh-token-meter'

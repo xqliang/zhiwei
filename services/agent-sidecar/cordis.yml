@@ -1,0 +1,70 @@
+# Headless JSON-RPC agent composition for the 知微 (zhiwei) spike, pointed at
+# 火山方舟 (Volcengine Ark). Driven by the bundled `dsh-jsonrpc-agent` bin over
+# newline-delimited JSON-RPC 2.0 on stdio.
+#
+# CRITICAL: stdout is reserved for JSON-RPC frames — do NOT add any stdout
+# logger or terminal UI here. Diagnostics go to stderr.
+#
+# This is a trimmed version of examples/jsonrpc-agent/cordis.yml: it keeps only
+# what a pure text turn needs (wire server + LLM adapter + agent spine +
+# persistence). All model-facing tools (bash/fs/subagent/todo) are disabled so
+# the composition needs no subprocess / PTY / native-addon backends.
+
+# The stdio JSON-RPC serving plugin. inject: ['agents']; binds process.stdin /
+# process.stdout as the wire. `initialize` waits for the whole tree to settle.
+- id: sdk-jsonrpc-server
+  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+  config:
+    # Treat a max-tokens turn termination as an accepted result (spike-friendly).
+    maxTokensAsSuccess: true
+
+# DeepSeek OpenAI-compatible adapter, pointed at Ark. The provider ROUTE this
+# plugin registers is always "deepseek-official" (that is the value the driver
+# passes in `initialize.params.provider`). The wire model name IS the harness
+# model name, so `initialize.params.model` = deepseek-v4-flash resolves here.
+#   POST {baseURL}/chat/completions  with  Authorization: Bearer $ARK_API_KEY
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  config:
+    apiKeyEnv: ARK_API_KEY
+    baseURL: https://ark.cn-beijing.volces.com/api/v3
+    # Shipped default: full thinking at max effort. This puts
+    # `thinking: {type: 'enabled'}` and `reasoning_effort: 'max'` on the wire —
+    # DeepSeek-flavored OpenAI fields Ark may or may not accept for this model.
+    thinking: enabled
+    reasoningEffort: max
+    # The adapter defaults max_tokens to 256000; Doubao/most Ark models cap far
+    # lower (doubao-seed-1-6 rejects >32768 with HTTP 400). Cap it here.
+    maxTokens: 32768
+    # Advisory catalog entry so context accounting has a window for the model.
+    # Model id comes from DSH_MODEL (the driver sets it and passes the same
+    # value in initialize.params.model). Task intent is deepseek-v4-flash, but
+    # that id is not available on this Ark account (see spike/probe-ark.mjs), so
+    # the driver can override it with an activated Ark model to prove streaming.
+    models:
+      - id: !!js process.env.DSH_MODEL ?? 'deepseek-v4-flash'
+        contextWindow: 1000000
+
+# The default executor-less/UI-less agent spine: provides ctx.agents (required
+# by the JSON-RPC server), the agent loop, session store, session-title, and
+# the system prompt. Every model-facing tool is turned off for this text spike.
+- id: agent-spine
+  name: '@deepseek-ai/dsh-agent-spine-demo'
+  config:
+    persona: !!js process.env.DSH_SYSTEM_PROMPT ?? 'You are a friendly assistant.'
+    workspaceContext: false
+    skills:
+      enabled: false
+    toolBash: false
+    toolJobs: false
+
+# JSONL session persistence (uncompressed so the .sessions logs stay readable).
+- id: sessions
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js process.env.DSH_SESSION_ROOT ?? './.sessions'
+    compression: none
+
+# Per-request token accounting (present in the shipped composition; harmless).
+- id: token-meter
+  name: '@deepseek-ai/dsh-token-meter'
