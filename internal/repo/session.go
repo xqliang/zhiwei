@@ -89,3 +89,12 @@ func (r *SessionRepo) Delete(ctx context.Context, id ids.ID, jobID *ids.ID) erro
 	}
 	return tx.Commit()
 }
+
+// ListCompletedIDs 返回已完成 session 的 id（雪花 ID 升序=时间从旧到新），
+// 画像回填端点按历史顺序重放用。limit 上限由调用方控制。
+func (r *SessionRepo) ListCompletedIDs(ctx context.Context, limit int) ([]ids.ID, error) {
+	var out []ids.ID
+	err := r.DB.SelectContext(ctx, &out,
+		`SELECT id FROM audio_session WHERE status = 'completed' ORDER BY id LIMIT ?`, limit)
+	return out, err
+}
