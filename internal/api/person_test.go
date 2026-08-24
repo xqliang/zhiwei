@@ -154,6 +154,12 @@ func TestPersonAPIFlow(t *testing.T) {
 		t.Fatalf("改值应 supersede: %+v", attr2)
 	}
 
+	// PATCH attribute 带与目标行不一致的 attr_key → 400（锁死「静默改到别的 key」回归）
+	if rec := doReq(t, h, "PATCH", "/api/persons/"+owner.ID.String()+"/attributes/"+attr2.ID.String(),
+		map[string]any{"attr_key": "occupation", "value": "工程师"}); rec.Code != 400 {
+		t.Fatalf("attr_key 不一致应 400: %d %s", rec.Code, rec.Body.String())
+	}
+
 	// 历史：应有 create + update 记录
 	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/history?entity_kind=attribute", nil)
 	if rec.Code != 200 {
@@ -220,5 +226,117 @@ func TestPersonAPIFlow(t *testing.T) {
 	}
 	if p, _ := svc.Persons.Get(ctx, created.ID); p.Status != "dismissed" {
 		t.Fatalf("归档后应 dismissed: %+v", p)
+	}
+}
+
+// TestPersonPatchPreservesSummary 锁死部分更新语义：PATCH 只改名（不传 summary）
+// 必须保留现有备注；传空串则显式清空。
+func TestPersonPatchPreservesSummary(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+
+	// 建带 summary 的人物
+	sum := "重要客户，谨慎跟进"
+	rec := doReq(t, h, "POST", "/api/persons", map[string]any{"display_name": "李四", "summary": sum})
+	if rec.Code != 200 {
+		t.Fatalf("新建失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var p repo.Person
+	_ = json.Unmarshal(rec.Body.Bytes(), &p)
+	if p.Summary == nil || *p.Summary != sum {
+		t.Fatalf("新建应带 summary: %+v", p)
+	}
+
+	// PATCH 只改名、不传 summary → summary 应保留（回归 #1：静默清空）
+	if rec := doReq(t, h, "PATCH", "/api/persons/"+p.ID.String(),
+		map[string]any{"display_name": "李四改"}); rec.Code != 200 {
+		t.Fatalf("改名失败: %d %s", rec.Code, rec.Body.String())
+	}
+	got, _ := svc.Persons.Get(ctx, p.ID)
+	if got.DisplayName != "李四改" {
+		t.Fatalf("改名未生效: %+v", got)
+	}
+	if got.Summary == nil || *got.Summary != sum {
+		t.Fatalf("不传 summary 应保留现值，却变成: %v", got.Summary)
+	}
+
+	// PATCH 传空串 → 显式清空为 NULL
+	empty := ""
+	if rec := doReq(t, h, "PATCH", "/api/persons/"+p.ID.String(),
+		map[string]any{"summary": empty}); rec.Code != 200 {
+		t.Fatalf("清空 summary 失败: %d %s", rec.Code, rec.Body.String())
+	}
+	got, _ = svc.Persons.Get(ctx, p.ID)
+	if got.Summary != nil {
+		t.Fatalf("空串应清空 summary，却为: %q", *got.Summary)
+	}
+}
+
+// TestPersonCreateSpeakerConflict 声纹换绑冲突：同一声纹已绑定人物后，
+// 再建人物绑同一声纹 → 409。
+func TestPersonCreateSpeakerConflict(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+
+	// setup 已跑 EnsurePersonBootstrap，此后新建的声纹不会被自动建档占用
+	sp := &repo.Speaker{Name: "声纹A", Source: "enrolled"}
+	if err := svc.Speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	// 首次绑定成功
+	if rec := doReq(t, h, "POST", "/api/persons",
+		map[string]any{"display_name": "赵六", "speaker_id": sp.ID.String()}); rec.Code != 200 {
+		t.Fatalf("首次绑定失败: %d %s", rec.Code, rec.Body.String())
+	}
+	// 再建人物绑同一声纹 → 409
+	if rec := doReq(t, h, "POST", "/api/persons",
+		map[string]any{"display_name": "冒名者", "speaker_id": sp.ID.String()}); rec.Code != 409 {
+		t.Fatalf("重复绑定应 409: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPendingDismissHTTP 冒烟 dismiss 端点：造一条 pending 属性，走 HTTP dismiss → dismissed。
+// 单列（不改 TestPersonAPIFlow 里的 confirm 路径覆盖）。跨运行幂等：dismissed 非 active，
+// 下次 ApplyFacts 仍走 create_pending。
+func TestPendingDismissHTTP(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+
+	// 低置信 observed → create_pending（owner 无 occupation active 值）
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []profile.Fact{
+		{Plane: "attribute", Subject: profile.Subject{Kind: "self"}, AttrKey: "occupation",
+			Value: "自由职业", Confidence: 0.4, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := doReq(t, h, "GET", "/api/profile/pending", nil)
+	if rec.Code != 200 {
+		t.Fatalf("队列失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var pend struct {
+		Items []map[string]any `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pend)
+	var itemID string
+	for _, it := range pend.Items {
+		if it["kind"] == "attribute" && it["attr_key"] == "occupation" {
+			itemID, _ = it["id"].(string)
+		}
+	}
+	if itemID == "" {
+		t.Fatalf("未找到 occupation pending: %+v", pend.Items)
+	}
+	// 非法 kind → 400
+	if rec := doReq(t, h, "POST", "/api/profile/pending/bogus/"+itemID+"/dismiss", nil); rec.Code != 400 {
+		t.Fatalf("非法 kind 应 400: %d %s", rec.Code, rec.Body.String())
+	}
+	// dismiss 走 HTTP
+	if rec := doReq(t, h, "POST", "/api/profile/pending/attribute/"+itemID+"/dismiss", nil); rec.Code != 200 {
+		t.Fatalf("dismiss 失败: %d %s", rec.Code, rec.Body.String())
+	}
+	aid, _ := ids.ParseID(itemID)
+	a, _ := svc.Attributes.Get(ctx, aid)
+	if a == nil || a.Status != "dismissed" {
+		t.Fatalf("dismiss 后应 dismissed: %+v", a)
 	}
 }

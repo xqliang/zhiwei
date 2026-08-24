@@ -44,6 +44,16 @@ func RegisterPerson(r chi.Router, h *PersonHandler) {
 	r.Post("/api/profile/extract", h.Extract)
 }
 
+// validPersonStatuses 是 person 状态机的合法取值（Patch 状态流转白名单）。
+var validPersonStatuses = map[string]bool{
+	"active": true, "pending": true, "merged": true, "dismissed": true,
+}
+
+// validPendingKinds 是确认队列 kind 的合法取值（confirm/dismiss 端点白名单）。
+var validPendingKinds = map[string]bool{
+	"person": true, "attribute": true, "relationship": true,
+}
+
 // ---- 名册 ----
 
 func (h *PersonHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +210,10 @@ func (h *PersonHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Status != "" {
+		if !validPersonStatuses[req.Status] {
+			http.Error(w, "status 非法（active|pending|merged|dismissed）", http.StatusBadRequest)
+			return
+		}
 		if err := h.Service.ManualSetPersonStatus(r.Context(), id, req.Status); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -236,7 +250,17 @@ func (h *PersonHandler) Patch(w http.ResponseWriter, r *http.Request) {
 	} else {
 		speakerID = p.SpeakerID // 不改
 	}
-	if err := h.Service.ManualUpdatePerson(r.Context(), id, name, speakerID, req.Summary); err != nil {
+	// summary 部分更新语义（与 display_name/speaker_id 的部分更新保持一致）：
+	// 不传（nil）→ 保留现值；传空串 → 显式清空（SQL NULL）；传非空 → 更新。
+	summary := p.Summary
+	if req.Summary != nil {
+		if *req.Summary == "" {
+			summary = nil
+		} else {
+			summary = req.Summary
+		}
+	}
+	if err := h.Service.ManualUpdatePerson(r.Context(), id, name, speakerID, summary); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -305,15 +329,16 @@ func (h *PersonHandler) PatchAttribute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		AttrKey string `json:"attr_key"`
+		AttrKey string `json:"attr_key"` // 可选；传了必须与目标行一致（否则 400），防改到别的 key 的行
 		Value   string `json:"value"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "请求体非法", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.AttrKey) == "" || strings.TrimSpace(req.Value) == "" {
-		http.Error(w, "attr_key 与 value 必填", http.StatusBadRequest)
+	val := strings.TrimSpace(req.Value)
+	if val == "" {
+		http.Error(w, "value 必填", http.StatusBadRequest)
 		return
 	}
 	// 校验目标行存在且属于该人物
@@ -326,9 +351,14 @@ func (h *PersonHandler) PatchAttribute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "属性不存在", http.StatusNotFound)
 		return
 	}
+	// attr_key 一律以目标行为准；body 若带 attr_key 必须与之一致，否则会 supersede 到
+	// 另一个 key 的 active 行、目标行原样不动（静默改错对象）——直接 400 拒绝。
+	if k := strings.TrimSpace(req.AttrKey); k != "" && k != a.AttrKey {
+		http.Error(w, "attr_key 与目标属性不一致", http.StatusBadRequest)
+		return
+	}
 	// 手动改值 = 同 key 写新值（ManualAddAttribute 内部 supersede 旧 active 行）
-	na, err := h.Service.ManualAddAttribute(r.Context(), pid,
-		strings.TrimSpace(req.AttrKey), strings.TrimSpace(req.Value))
+	na, err := h.Service.ManualAddAttribute(r.Context(), pid, a.AttrKey, val)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -509,6 +539,10 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 
 func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
 	kind := chi.URLParam(r, "kind")
+	if !validPendingKinds[kind] {
+		http.Error(w, "kind 非法（person|attribute|relationship）", http.StatusBadRequest)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
@@ -523,6 +557,10 @@ func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
 
 func (h *PersonHandler) DismissPending(w http.ResponseWriter, r *http.Request) {
 	kind := chi.URLParam(r, "kind")
+	if !validPendingKinds[kind] {
+		http.Error(w, "kind 非法（person|attribute|relationship）", http.StatusBadRequest)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
