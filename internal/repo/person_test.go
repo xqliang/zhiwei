@@ -3,6 +3,8 @@ package repo
 import (
 	"context"
 	"testing"
+
+	"zhiwei/internal/ids"
 )
 
 func TestPersonLifecycle(t *testing.T) {
@@ -81,5 +83,50 @@ func TestPersonLifecycle(t *testing.T) {
 	}
 	if g2, _ := persons.Get(ctx, p.ID); g2.Status != "dismissed" {
 		t.Fatalf("SetStatus 未生效: %+v", g2)
+	}
+}
+
+func TestPersonListWithPendingAndRecentSessions(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	persons := &PersonRepo{DB: db}
+	attrs := &PersonAttributeRepo{DB: db}
+
+	p := &Person{DisplayName: "计数测试人物"}
+	if err := persons.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	sess := ids.New()
+	// 一条 active、一条 pending：pending 计数应为 1
+	if err := attrs.Create(ctx, &PersonAttribute{PersonID: p.ID, AttrKey: "city", ValueText: "上海", Status: "active", SessionID: &sess}); err != nil {
+		t.Fatal(err)
+	}
+	if err := attrs.Create(ctx, &PersonAttribute{PersonID: p.ID, AttrKey: "occupation", ValueText: "医生", Status: "pending", SessionID: &sess}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := persons.ListWithPending(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hit *PersonWithPending
+	for i := range list {
+		if list[i].ID == p.ID {
+			hit = &list[i]
+		}
+	}
+	if hit == nil || hit.PendingCount != 1 {
+		t.Fatalf("ListWithPending 计数错误: %+v", hit)
+	}
+
+	sids, err := persons.RecentSessionIDs(ctx, p.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sids) != 1 || sids[0] != sess {
+		t.Fatalf("RecentSessionIDs 错误: %v", sids)
 	}
 }
