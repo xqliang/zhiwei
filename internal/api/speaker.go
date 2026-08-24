@@ -26,7 +26,7 @@ type SpeakerHandler struct {
 	Voiceprint          voiceprint.Client
 	DataDir             string
 	EnrollMinDurationMS int64   // 从转写段音频录入声纹的最小时长（ms，0→兜底 3000）
-	VoiceprintThreshold float64 // 1:N 余弦匹配阈值（match 预览判定+展示用，0→兜底 0.5）
+	VoiceprintThreshold float64 // 1:N 余弦匹配阈值（match 预览判定+展示用，0→兜底 0.8）
 }
 
 // RegisterSpeaker 挂载说话人相关路由。
@@ -519,7 +519,7 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	threshold := h.VoiceprintThreshold
 	if threshold == 0 {
-		threshold = 0.5
+		threshold = 0.8
 	}
 	// 列全部 active 说话人，用其灾备 BLOB(与 FAISS 同向量) 逐个算余弦匹配度——
 	// 返回全库按相似度降序（不止 top-1），便于看「这段像库里的每一个谁、各多像」。

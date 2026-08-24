@@ -12,13 +12,14 @@ import (
 	"zhiwei/internal/voiceprint"
 )
 
-// fakeVoiceprint 实现 voiceprint.Client，可控 matched/matchID，记录 Add 调用 + 各方法调用计数。
+// fakeVoiceprint 实现 voiceprint.Client，可控 matched/matchID/相似度，记录 Add 调用 + 各方法调用计数。
 type fakeVoiceprint struct {
 	matched     bool
 	matchID     ids.ID
+	searchSim   float64 // Search 返回的相似度；0 → 兜底 0.9（清晰命中，兼容既有用例）
 	added       []ids.ID
 	embedOK     bool
-	sameVec     bool // true→各段返回相同向量(测同人聚类)；false→逐段正交(测独立登记)
+	sameVec     bool // true→各段返回相同向量；false→逐段正交（各段不同向量）
 	embedCalls  int
 	searchCalls int
 }
@@ -27,17 +28,21 @@ func (f *fakeVoiceprint) Embed(_ context.Context, _ string) ([]float32, error) {
 	f.embedCalls++
 	v := make([]float32, 256)
 	if f.sameVec {
-		// 常量向量：各段声纹相同 → 同人不同 ASR 标签会被聚类合并（测同人合并）
+		// 常量向量：各段声纹完全相同（同人）——用于验证「即便声纹相同也不本地合并 ASR 标签」
 		v[0] = 1.0
 	} else {
-		// 逐段正交 one-hot：不同段不同向量 → 不同组不会被误聚类（测独立登记）
+		// 逐段正交 one-hot：不同段不同向量 → 各组彼此独立
 		v[(f.embedCalls-1)%256] = 1.0
 	}
 	return v, nil
 }
 func (f *fakeVoiceprint) Search(_ context.Context, _ []float32) (ids.ID, float64, bool, error) {
 	f.searchCalls++
-	return f.matchID, 0.9, f.matched, nil
+	sim := f.searchSim
+	if sim == 0 {
+		sim = 0.9 // 兜底：默认返回清晰命中相似度，兼容既有用例
+	}
+	return f.matchID, sim, f.matched, nil
 }
 func (f *fakeVoiceprint) Add(_ context.Context, _ []float32, id ids.ID) error {
 	f.added = append(f.added, id)
@@ -192,19 +197,19 @@ func TestStageSpeakerIdempotentSkip(t *testing.T) {
 	}
 }
 
-// TestStageSpeakerClustersSamePerson 验证 session 内聚类：realtime prompt 式 diarization 可能
-// 把同一人标成 spk0/spk1，stage 用声纹相似度兜底合并——fake 让两组返回相同向量（同人），
-// 应聚成 1 个 speaker（只登记 1 次，3 段都归到同一个人），而非拆成 2 个。
-// 注：真实场景需 WeSpeaker 真向量才生效，StubEmbedder 随机向量聚不出；本测用可控向量验证聚类逻辑本身。
-func TestStageSpeakerClustersSamePerson(t *testing.T) {
+// TestStageSpeakerNoLocalMergeSameVoiceprint 验证：ASR 已足够准，stage 不再用声纹在本地
+// 合并 ASR 返回的说话人。即便两个 ASR 标签声纹完全相同（fake 各段返回同一向量），只要 ASR
+// 标成两个说话人（标签 1 和 2），就各自独立做跨 session 1:N（此处均未命中）→ 分别登记，
+// 而不是像旧逻辑那样按声纹相似度本地聚成 1 个。
+func TestStageSpeakerNoLocalMergeSameVoiceprint(t *testing.T) {
 	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
-	fv := &fakeVoiceprint{matched: false, sameVec: true} // 各段同向量 → 两组同人 → 聚类合并
+	fv := &fakeVoiceprint{matched: false, sameVec: true} // 各段同向量：即便同人也不应本地合并
 	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
 	if err := runSpeakerStage(context.Background(), d, sid, tr); err != nil {
 		t.Fatalf("stage: %v", err)
 	}
-	if len(fv.added) != 1 { // 2 个 ASR 标签同人 → 聚成 1 个 → 只登记 1 次
-		t.Fatalf("同人合并应只登记 1 个，实际 %d", len(fv.added))
+	if len(fv.added) != 2 { // 2 个 ASR 标签 → 各自独立登记，不再本地合并
+		t.Fatalf("不应本地合并，应按 ASR 标签登记 2 个，实际 %d", len(fv.added))
 	}
 	segs, _ := transcripts.ListSegments(context.Background(), tr.ID)
 	speakerIDs := map[ids.ID]bool{}
@@ -214,7 +219,28 @@ func TestStageSpeakerClustersSamePerson(t *testing.T) {
 		}
 		speakerIDs[*s.SpeakerID] = true
 	}
-	if len(speakerIDs) != 1 { // 3 段都归到同一个人
-		t.Fatalf("同人合并后 3 段应归到 1 个 speaker，实际 %d", len(speakerIDs))
+	if len(speakerIDs) != 2 { // 标签 1 的两段归一个人、标签 2 归另一个人 → 2 个 speaker
+		t.Fatalf("应回填到 2 个不同 speaker，实际 %d", len(speakerIDs))
+	}
+}
+
+// TestStageSpeakerEnrollsWhenSimilarityBelowThreshold 验证「同一人阈值 >= 0.8」：
+// sidecar 报命中(matched=true)但相似度 0.7 < 0.8 → 视为不同人 → 登记新声纹、不复用 matchID。
+func TestStageSpeakerEnrollsWhenSimilarityBelowThreshold(t *testing.T) {
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	preset := ids.New()
+	fv := &fakeVoiceprint{matched: true, matchID: preset, searchSim: 0.7} // 0.7 < 0.8
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(context.Background(), d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) == 0 {
+		t.Fatalf("相似度 0.7 < 0.8 应登记新声纹，实际未登记")
+	}
+	segs, _ := transcripts.ListSegments(context.Background(), tr.ID)
+	for _, s := range segs {
+		if s.SpeakerID != nil && *s.SpeakerID == preset {
+			t.Fatalf("相似度 0.7 < 0.8 不应复用 matchID(%v)", preset)
+		}
 	}
 }

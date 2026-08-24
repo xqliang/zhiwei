@@ -43,7 +43,7 @@ type StageDeps struct {
 	// ---- speaker stage ----
 	Voiceprint          voiceprint.Client
 	Speakers            *repo.SpeakerRepo
-	VoiceprintThreshold float64 // ZW_VOICEPRINT_THRESHOLD，0 表示用默认 0.5
+	VoiceprintThreshold float64 // ZW_VOICEPRINT_THRESHOLD，0 表示用默认 0.8
 
 	// ---- speakername stage（名字推断）----
 	NameInferPrompt       string                         // prompts/speaker_naming_v1.md 内容（system prompt）

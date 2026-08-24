@@ -93,7 +93,7 @@ func Load() (*Config, error) {
 		StepFunASRModel:      getenv("ZW_STEPFUN_ASR_MODEL", "stepaudio-2.5-asr"),
 		ASRProvider:          getenv("ZW_ASR_PROVIDER", "file"),
 		VoiceprintSidecarURL: getenv("ZW_VOICEPRINT_SIDECAR_URL", "http://127.0.0.1:8010"),
-		VoiceprintThreshold:  getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.5),
+		VoiceprintThreshold:  getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.8),
 		EnrollMinDurationMS:  int64(getenvInt("ZW_ENROLL_MIN_DURATION_MS", 3000)),
 	}, nil
 }
