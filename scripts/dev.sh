@@ -62,8 +62,9 @@ cmd_start() {
     echo "错误: ARK_API_KEY 未设置（LLM 必需）。请在项目根目录 .env 中配置后重试。" >&2
     exit 1
   fi
-  if [ -z "${STEPFUN_API_KEY:-}" ]; then
-    echo "错误: STEPFUN_API_KEY 未设置（ASR 必需）。请在项目根目录 .env 中配置后重试。" >&2
+  # ASR key：file provider（默认）用 STEPFUN_ASR_FILE_API_KEY；realtime provider 用 STEPFUN_API_KEY
+  if [ -z "${STEPFUN_ASR_FILE_API_KEY:-}" ] && [ -z "${STEPFUN_API_KEY:-}" ]; then
+    echo "错误: STEPFUN_ASR_FILE_API_KEY 或 STEPFUN_API_KEY 未设置（ASR 必需）。请在项目根目录 .env 中配置后重试。" >&2
     exit 1
   fi
 

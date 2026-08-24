@@ -116,7 +116,11 @@ func (h *SpeakerHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	vec, err := h.Voiceprint.Embed(r.Context(), wav16)
 	if err != nil || len(vec) != 256 {
-		http.Error(w, "声纹提取失败", http.StatusInternalServerError)
+		msg := "声纹提取失败"
+		if err != nil {
+			msg += ": " + err.Error()
+		}
+		writeJSONError(w, msg, http.StatusInternalServerError)
 		return
 	}
 	sp := &repo.Speaker{Name: name, Source: "enrolled", Embedding: float32BlobAPI(vec), SampleCount: 1}
@@ -349,7 +353,11 @@ func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Reques
 	}
 	vec, err := h.Voiceprint.Embed(r.Context(), slice)
 	if err != nil || len(vec) != 256 {
-		http.Error(w, "声纹提取失败", http.StatusInternalServerError)
+		msg := "声纹提取失败"
+		if err != nil {
+			msg += ": " + err.Error()
+		}
+		writeJSONError(w, msg, http.StatusInternalServerError)
 		return
 	}
 	sp := &repo.Speaker{Name: req.Name, Source: "enrolled", Embedding: float32BlobAPI(vec), SampleCount: 1}
@@ -502,7 +510,11 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	vec, err := h.Voiceprint.Embed(r.Context(), wav16)
 	if err != nil || len(vec) != 256 {
-		http.Error(w, "声纹提取失败", http.StatusInternalServerError)
+		msg := "声纹提取失败"
+		if err != nil {
+			msg += ": " + err.Error()
+		}
+		writeJSONError(w, msg, http.StatusInternalServerError)
 		return
 	}
 	threshold := h.VoiceprintThreshold

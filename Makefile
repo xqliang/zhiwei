@@ -1,4 +1,4 @@
-.PHONY: build dev dev-start dev-stop dev-restart dev-status dev-logs test test-integration migrate-up migrate-down compose-up compose-down init-testdb spike-llm spike-embed spike-asr spike-voiceprint e2e sidecar-start sidecar-stop sidecar-restart sidecar-status
+.PHONY: build dev dev-start dev-stop dev-restart dev-status dev-logs test test-integration migrate-up migrate-down compose-up compose-down init-testdb spike-llm spike-embed spike-asr spike-voiceprint e2e sidecar-start sidecar-stop sidecar-restart sidecar-status sidecar-logs
 
 # 给 web/app.js 生成内容 hash 文件名（缓存破除，无构建方案）。build 自动依赖。
 hash-web:
@@ -59,8 +59,7 @@ e2e:
 	bash scripts/e2e.sh
 
 # 声纹 sidecar（Python FastAPI，WeSpeaker+FAISS）后台启停。PID 文件在 data/voiceprint.pid。
-# 启动前需在 services/voiceprint/ 建好 venv：python3 -m venv services/voiceprint/.venv &&
-#   services/voiceprint/.venv/bin/pip install -r services/voiceprint/requirements.txt
+# 首次启动前需建 venv：bash scripts/setup-voiceprint.sh（一键装 wespeaker + 依赖）
 sidecar-start:
 	bash scripts/sidecar.sh start
 sidecar-stop:
@@ -69,6 +68,8 @@ sidecar-restart:
 	bash scripts/sidecar.sh restart
 sidecar-status:
 	bash scripts/sidecar.sh status
+sidecar-logs:
+	bash scripts/sidecar.sh logs
 
 # 验证 WeSpeaker resnet34-LM 加载 + 输出 256 维（手动，需装好 venv 与模型权重）
 spike-voiceprint:

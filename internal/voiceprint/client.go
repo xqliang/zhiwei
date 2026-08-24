@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"zhiwei/internal/ids"
 )
@@ -32,9 +34,23 @@ type httpClient struct {
 	hc      *http.Client
 }
 
-// NewClient 构造一个指向 sidecar BaseURL 的客户端，复用 http.DefaultClient。
+// NewClient 构造一个指向 sidecar BaseURL 的客户端。
+// localhost 请求不走系统代理（避免 http_proxy 环境变量导致 sidecar 调用失败）。
 func NewClient(baseURL string) Client {
-	return &httpClient{BaseURL: baseURL, hc: http.DefaultClient}
+	return &httpClient{
+		BaseURL: baseURL,
+		hc: &http.Client{
+			Transport: &http.Transport{
+				Proxy: func(req *http.Request) (*url.URL, error) {
+					// sidecar 走本地回环，绕过系统代理
+					if strings.HasPrefix(req.URL.Host, "127.0.0.1") || strings.HasPrefix(req.URL.Host, "localhost") {
+						return nil, nil
+					}
+					return http.ProxyFromEnvironment(req)
+				},
+			},
+		},
+	}
 }
 
 // post 统一处理 JSON 编解码、请求发送与错误封装：

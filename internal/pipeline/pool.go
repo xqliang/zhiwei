@@ -23,6 +23,7 @@ type Pool struct {
 	handlers    map[string]Handler
 	concurrency int
 	onDone      func(ctx context.Context, sessionID ids.ID)
+	onFail      func(ctx context.Context, sessionID ids.ID) // job 彻底失败（超重试上限）时回调
 }
 
 func NewPool(jobs *repo.JobRepo, flow Flow, handlers map[string]Handler) *Pool {
@@ -31,6 +32,9 @@ func NewPool(jobs *repo.JobRepo, flow Flow, handlers map[string]Handler) *Pool {
 
 // OnDone 注册流水线完成回调（如把 session 置为 completed）。
 func (p *Pool) OnDone(fn func(ctx context.Context, sessionID ids.ID)) { p.onDone = fn }
+
+// OnFail 注册流水线失败回调（如把 session 置为 failed），避免 session 永远停在 processing。
+func (p *Pool) OnFail(fn func(ctx context.Context, sessionID ids.ID)) { p.onFail = fn }
 
 // Start 阻塞式启动：先恢复遗留 running 任务，再启动 worker 循环。
 // 应在 goroutine 中调用。
@@ -81,6 +85,9 @@ func (p *Pool) claimAndRun(ctx context.Context) {
 	persist(ctx, p.jobs, j, st, runErr)
 	if st.Status == "done" && p.onDone != nil {
 		p.onDone(ctx, j.SessionID)
+	}
+	if st.Status == "failed" && p.onFail != nil {
+		p.onFail(ctx, j.SessionID)
 	}
 }
 

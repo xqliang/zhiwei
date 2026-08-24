@@ -222,8 +222,8 @@ type TOSUploader interface {
 // 原生返回每句 ms 级 start/end_time + speaker.id(spk_N)，见 docs/superpowers/specs/asr-protocol-notes.md。
 // 音频需公网可访问：由 TOSUploader 上传后返回 presigned GET URL 喂给 StepFun。
 type StepFunFileASR struct {
-	BaseURL      string              // https://api.stepfun.com/v1
-	APIKey       string              // StepFun API Key（STEPFUN_API_KEY）
+	BaseURL      string              // https://api.c.ibasemind.com/v1（默认）/ https://api.stepfun.com/v1（生产）
+	APIKey       string              // File ASR 专用 Key（STEPFUN_ASR_FILE_API_KEY）
 	Model        string              // stepaudio-2.5-asr
 	TOS          TOSUploader         // 音频上传/删除的存储抽象
 	KeyPrefix    string              // TOS 对象 key 前缀，如 zhiwei/
@@ -246,7 +246,7 @@ func NewStepFunFileASR(baseURL, apiKey, model string, tos TOSUploader, sleep fun
 // defer 删 TOS 对象（best-effort，删失败不影响转写结果）。
 func (p *StepFunFileASR) Transcribe(ctx context.Context, audioPath string) ([]TranscriptPiece, error) {
 	if p.APIKey == "" {
-		return nil, fmt.Errorf("asr: STEPFUN_API_KEY 未设置")
+		return nil, fmt.Errorf("asr: STEPFUN_ASR_FILE_API_KEY 未设置")
 	}
 	// key 用纳秒时间戳保证同一前缀下不重名
 	key := p.KeyPrefix + fmt.Sprintf("%d.wav", time.Now().UnixNano())

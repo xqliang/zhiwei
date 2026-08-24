@@ -34,8 +34,15 @@ func main() {
 	if err := ids.Init(1); err != nil {
 		log.Fatal(err)
 	}
-	if cfg.StepFunAPIKey == "" {
-		log.Fatal("STEPFUN_API_KEY 未设置：ASR 不可用。请先 source .env（set -a; source .env; set +a）再启动")
+	// ASR key 校验：file 用 STEPFUN_ASR_FILE_API_KEY，realtime 用 STEPFUN_API_KEY
+	if cfg.ASRProvider == "realtime" {
+		if cfg.StepFunAPIKey == "" {
+			log.Fatal("STEPFUN_API_KEY 未设置（ZW_ASR_PROVIDER=realtime）。请先 source .env")
+		}
+	} else {
+		if cfg.StepFunASRFileAPIKey == "" {
+			log.Fatal("STEPFUN_ASR_FILE_API_KEY 未设置。请先 source .env")
+		}
 	}
 	db, err := repo.NewDB(cfg.MySQLDSN)
 	if err != nil {
@@ -72,14 +79,19 @@ func main() {
 		log.Fatal("读取记忆整理 prompt 失败: ", err)
 	}
 
-	// pipeline 装配：ASR 默认 realtime（Step Plan WSS + diarization prompt，免 TOS、配额可用）；
-	// ZW_ASR_PROVIDER=file 切回异步文件 ASR（原生 diarization+ms 时间戳，需 TOS 上传换公网 URL，受配额限制）。
-	// LLM 走 Ark OpenAI 兼容接口（Tier 1 flash）
+	// pipeline 装配：ASR 默认 file（StepFun 异步文件 ASR，原生 diarization + ms 时间戳）。
+	// ZW_ASR_PROVIDER=realtime 切回 WebSocket 方案（免 TOS、靠 prompt diarization）。
+	// File ASR 需 TOS 上传音频换公网 URL + STEPFUN_ASR_FILE_API_KEY。
 	var asr provider.ASRProvider
 	switch cfg.ASRProvider {
-	case "file":
+	case "realtime":
+		asr = provider.NewStepFunASR(cfg.StepFunASREndpoint, cfg.StepFunAPIKey)
+	default: // file
 		if cfg.TOSAccessKey == "" || cfg.TOSSecretKey == "" {
 			log.Fatal("ASR_PROVIDER=file 需 TOS_ACCESS_KEY/TOS_SECRET_KEY 上传音频换公网 URL")
+		}
+		if cfg.StepFunASRFileAPIKey == "" {
+			log.Fatal("ASR_PROVIDER=file 需 STEPFUN_ASR_FILE_API_KEY（.env 中配置）")
 		}
 		tosClient, err := storage.NewTOSClient(storage.TOSConfig{
 			AccessKey: cfg.TOSAccessKey, SecretKey: cfg.TOSSecretKey,
@@ -88,9 +100,7 @@ func main() {
 		if err != nil {
 			log.Fatal("TOS 客户端构造: ", err)
 		}
-		asr = provider.NewStepFunFileASR(cfg.StepFunASRBase, cfg.StepFunAPIKey, cfg.StepFunASRModel, tosClient, nil)
-	default:
-		asr = provider.NewStepFunASR(cfg.StepFunASREndpoint, cfg.StepFunAPIKey)
+		asr = provider.NewStepFunFileASR(cfg.StepFunASRBase, cfg.StepFunASRFileAPIKey, cfg.StepFunASRModel, tosClient, nil)
 	}
 	voiceprintCli := voiceprint.NewClient(cfg.VoiceprintSidecarURL)
 	llm := provider.NewArkLLM(cfg.ARKBaseURL, cfg.ARKAPIKey)
@@ -109,6 +119,9 @@ func main() {
 	pool := pipeline.NewPool(jobs, flow, stages)
 	pool.OnDone(func(ctx context.Context, sid ids.ID) {
 		_ = sessions.UpdateStatus(ctx, sid, "completed")
+	})
+	pool.OnFail(func(ctx context.Context, sid ids.ID) {
+		_ = sessions.UpdateStatus(ctx, sid, "failed")
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

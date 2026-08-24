@@ -8,7 +8,7 @@ LOG=data/voiceprint.log
 VENV=services/voiceprint/.venv/bin/python
 # venv 不存在时给出明确提示，避免静默用错 python
 if [ ! -f "$VENV" ]; then
-  echo "错误: 未找到 $VENV，先建 venv："
+  echo "错误: 未找到 $VENV, 先建 venv:"
   echo "  python3.12 -m venv services/voiceprint/.venv"
   echo "  services/voiceprint/.venv/bin/pip install -r services/voiceprint/requirements.txt"
   exit 1
@@ -47,7 +47,14 @@ case "${1:-status}" in
       echo "stopped"
     fi
     ;;
+  logs)
+    # 日志文件可能还不存在（从未启动过），先 touch 保证 tail 不报错
+    mkdir -p "$(dirname "$LOG")"
+    touch "$LOG"
+    echo "Follow $LOG (Ctrl-C to exit)"
+    exec tail -n 100 -f "$LOG"
+    ;;
   *)
-    echo "用法: $0 {start|stop|restart|status}"; exit 1
+    echo "Usage: $0 {start|stop|restart|status|logs}"; exit 1
     ;;
 esac

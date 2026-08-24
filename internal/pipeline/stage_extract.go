@@ -36,6 +36,18 @@ func stageExtract(d StageDeps) Handler {
 			return fmt.Errorf("读取 segments: %w", err)
 		}
 
+		// 把 ASR 标签（spk_1）替换成已登记的说话人名字，让 LLM 抽取时能区分是谁说的。
+		// speaker stage 已回填 SpeakerID；未解析的段保持原 ASR 标签。
+		if speakerNames, err := buildSpeakerNameMap(ctx, d.Speakers); err == nil {
+			for i := range segs {
+				if segs[i].SpeakerID != nil {
+					if name, ok := speakerNames[*segs[i].SpeakerID]; ok {
+						segs[i].SpeakerLabel = name
+					}
+				}
+			}
+		}
+
 		// ① 对话块聚合；无有效文字的会话直接完成（低价值不进抽取）
 		blocks := memory.AggregateBlocks(segs, blockGapMS)
 		if len(blocks) == 0 {
@@ -78,6 +90,20 @@ func stageExtract(d StageDeps) Handler {
 			sessionID, len(blocks), len(cands), len(gated), len(newNames))
 		return nil
 	}
+}
+
+// buildSpeakerNameMap 把 speaker_id → name 映射建好，供 extract stage 把 ASR 标签替换成说话人名字。
+// 查询失败返回 error（调用方可忽略，保持原 ASR 标签）。
+func buildSpeakerNameMap(ctx context.Context, speakers *repo.SpeakerRepo) (map[ids.ID]string, error) {
+	list, err := speakers.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[ids.ID]string, len(list))
+	for _, sp := range list {
+		m[sp.ID] = sp.Name
+	}
+	return m, nil
 }
 
 // commitExtract 在单事务内完成幂等清理与落库（多对多版）。

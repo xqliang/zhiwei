@@ -19,6 +19,12 @@ type Config struct {
 	StepFunAPIKey      string // StepFun API Key（ASR 用，来自 .env）
 	StepFunASREndpoint string // stepaudio realtime 端点
 
+	// File ASR（异步，原生 diarization + ms 时间戳）
+	StepFunASRFileAPIKey string // File ASR 专用 Key（STEPFUN_ASR_FILE_API_KEY）
+	StepFunASRBase       string // File ASR 基址（ZW_STEPFUN_ASR_BASE，默认 https://api.c.ibasemind.com/v1）
+	StepFunASRModel      string // stepaudio-2.5-asr（ZW_STEPFUN_ASR_MODEL）
+	ASRProvider          string // realtime | file（ZW_ASR_PROVIDER，默认 file）
+
 	LLMFastModel   string // Tier1：抽取/分类
 	LLMStrongModel string // Tier2：Agent/Review
 	EmbedModel     string
@@ -36,9 +42,6 @@ type Config struct {
 	TOSBucket            string  // user-growth
 	TOSEndpoint          string  // tos-cn-shanghai.volces.com
 	TOSKeyPrefix         string  // zhiwei/
-	StepFunASRBase       string  // https://api.stepfun.com/v1（异步文件 ASR submit/query 基址）
-	StepFunASRModel      string  // stepaudio-2.5-asr（ZW_STEPFUN_ASR_MODEL）
-	ASRProvider          string  // realtime | file（ZW_ASR_PROVIDER，默认 realtime：文件 ASR 配额受限时用 realtime+prompt）
 	VoiceprintSidecarURL string  // 声纹 sidecar 地址（http://127.0.0.1:8010）
 	VoiceprintThreshold  float64 // 1:N 余弦匹配阈值，低于则视为未命中→自动登记
 	EnrollMinDurationMS  int64   // 从转写段音频录入声纹的最小时长（毫秒，默认 3000=3s；WeSpeaker LM 对 >3s 更稳）
@@ -84,9 +87,11 @@ func Load() (*Config, error) {
 		TOSBucket:            getenv("ZW_TOS_BUCKET", "user-growth"),
 		TOSEndpoint:          getenv("ZW_TOS_ENDPOINT", "tos-cn-shanghai.volces.com"),
 		TOSKeyPrefix:         getenv("ZW_TOS_KEY_PREFIX", "zhiwei/"),
-		StepFunASRBase:       getenv("ZW_STEPFUN_ASR_BASE", "https://api.stepfun.com/v1"),
+		StepFunASRFileAPIKey: os.Getenv("STEPFUN_ASR_FILE_API_KEY"),
+		// 开发环境默认 https://api.c.ibasemind.com/v1；生产设 ZW_STEPFUN_ASR_BASE=https://api.stepfun.com/v1
+		StepFunASRBase:       getenv("ZW_STEPFUN_ASR_BASE", "https://api.c.ibasemind.com/v1"),
 		StepFunASRModel:      getenv("ZW_STEPFUN_ASR_MODEL", "stepaudio-2.5-asr"),
-		ASRProvider:          getenv("ZW_ASR_PROVIDER", "realtime"),
+		ASRProvider:          getenv("ZW_ASR_PROVIDER", "file"),
 		VoiceprintSidecarURL: getenv("ZW_VOICEPRINT_SIDECAR_URL", "http://127.0.0.1:8010"),
 		VoiceprintThreshold:  getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.5),
 		EnrollMinDurationMS:  int64(getenvInt("ZW_ENROLL_MIN_DURATION_MS", 3000)),

@@ -224,9 +224,7 @@ const app = createApp({
       voiceprintMatching.value = true;
       const fd = new FormData(); fd.append('file', f);
       try {
-        const r = await fetch('/api/voiceprint/match', { method: 'POST', body: fd });
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.error || '匹配失败');
+        const d = await api('POST', '/api/voiceprint/match', fd);
         matchInfo.value = d;
       } catch (e) { showError(e); }
       finally { voiceprintMatching.value = false; }

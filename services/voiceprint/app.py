@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import threading
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from .embedder import load_embedder, StubEmbedder
 
@@ -139,9 +139,12 @@ def health() -> dict:
 
 @app.post("/embed")
 def embed(req: EmbedReq) -> dict:
-    v = _embedder.embed(req.audio_path)
-    v = v / (np.linalg.norm(v) + 1e-12)
-    return {"vector": v.tolist()}
+    try:
+        v = _embedder.embed(req.audio_path)
+        v = v / (np.linalg.norm(v) + 1e-12)
+        return {"vector": v.tolist()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"embed failed: {e}")
 
 
 @app.post("/search")

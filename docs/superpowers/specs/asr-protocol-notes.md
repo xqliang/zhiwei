@@ -21,8 +21,8 @@
 调研 StepFun 全部 ASR 接口后（见设计 `2026-08-22-speaker-voiceprint-design.md` §2.1），
 **改用异步文件 ASR**（唯一同时提供原生时间戳 + 说话人分离的接口）：
 
-- 端点：`POST https://api.stepfun.com/v1/audio/asr/file/submit` + `POST /v1/audio/asr/file/query`
-- 鉴权：`Authorization: Bearer $STEPFUN_API_KEY`
+- 端点：`POST https://api.c.ibasemind.com/v1/audio/asr/file/submit` + `POST /v1/audio/asr/file/query`（开发默认，生产设 `ZW_STEPFUN_ASR_BASE=https://api.stepfun.com/v1`）
+- 鉴权：`Authorization: Bearer $STEPFUN_ASR_FILE_API_KEY`（.env）
 - model：`stepaudio-2.5-asr`
 - 入参（submit body）：`{audio:{format:"wav",channel:1,rate:16000,url:<公网URL>}, request:{model_name, show_utterances:true, enable_speaker_info:true}}`
   - **`audio.url` 只接受公网 URL，不支持 base64/直传** → 本项目用火山引擎 TOS 上传音频（私有 + presigned GET URL，1h TTL，识别后删）。

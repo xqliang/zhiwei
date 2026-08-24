@@ -367,3 +367,11 @@ func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+// writeJSONError 返回 JSON 格式错误响应：{error: msg}，带 HTTP 状态码。
+// 前端 api() helper 统一按 JSON 解析错误体；http.Error 返回纯文本会导致 JSON.parse 失败。
+func writeJSONError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
