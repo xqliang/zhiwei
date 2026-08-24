@@ -29,6 +29,12 @@ type SpeakerNameCandidateRepo struct{ DB *sqlx.DB }
 // 置信度取两者最高（多段录音复现=更强信号，不因低质量录音被拉低）、
 // 证据与来源会话取最新。ON DUPLICATE KEY 单行原子写，并发安全。
 // sourceSessionID 传 0 时存 NULL。
+//
+// 并发语义：confidence 用 GREATEST 聚合（与写入先后无关，谁高留谁），而
+// evidence/source_session_id 是 last-writer-wins（谁最后写就覆盖成谁）。
+// 因此并发下最终保留的最高置信度，可能与最终留下的证据/来源会话不来自同一次
+// 写入（例如高置信那次的证据被随后一次低置信写入覆盖）。候选仅作建议展示，
+// 此错配可接受——无需加锁或事务串行化。
 func (r *SpeakerNameCandidateRepo) Upsert(ctx context.Context, speakerID ids.ID, name string, confidence float64, evidence string, sourceSessionID ids.ID) error {
 	var src interface{}
 	if sourceSessionID != 0 {

@@ -20,9 +20,10 @@ func testDB(t *testing.T) *sqlx.DB {
 }
 
 // seedCandidate 准备一个 speaker（随机名，模拟自动登记），返回其 ID。
-func seedCandidate(t *testing.T, name string) ids.ID {
+// 复用调用方传入的 db，避免每次另开连接池（与既有 repo 测试模式一致）。
+func seedCandidate(t *testing.T, db *sqlx.DB, name string) ids.ID {
 	t.Helper()
-	speakers := &SpeakerRepo{DB: testDB(t)}
+	speakers := &SpeakerRepo{DB: db}
 	sp := &Speaker{Name: name, Source: "auto"}
 	if err := speakers.Create(context.Background(), sp); err != nil {
 		t.Fatal(err)
@@ -34,7 +35,7 @@ func TestCandidateUpsertAndList(t *testing.T) {
 	db := testDB(t)
 	r := &SpeakerNameCandidateRepo{DB: db}
 	ctx := context.Background()
-	sid := seedCandidate(t, "说话人ab3x9")
+	sid := seedCandidate(t, db, "说话人ab3x9")
 
 	// 初次插入两个候选（第二行故意低置信度，验证倒序）
 	if err := r.Upsert(ctx, sid, "张总", 0.82, "对方在 15:03:12 说『张总，您看这个方案』", 1001); err != nil {
@@ -56,13 +57,34 @@ func TestCandidateUpsertAndList(t *testing.T) {
 	if list[0].Evidence != "对方在 15:03:12 说『张总，您看这个方案』" {
 		t.Fatalf("evidence=%s", list[0].Evidence)
 	}
+
+	// NULL 分支：sourceSessionID 传 0 时应存 NULL，扫描回来 SourceSessionID == nil
+	if err := r.Upsert(ctx, sid, "李工", 0.3, "证据", 0); err != nil {
+		t.Fatal(err)
+	}
+	list, err = r.ListBySpeakers(ctx, []ids.ID{sid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var li *SpeakerNameCandidate
+	for i := range list {
+		if list[i].Name == "李工" {
+			li = &list[i]
+		}
+	}
+	if li == nil {
+		t.Fatal("未找到候选 李工")
+	}
+	if li.SourceSessionID != nil {
+		t.Fatalf("sourceSessionID=0 应存 NULL，SourceSessionID 应为 nil，实际 %v", *li.SourceSessionID)
+	}
 }
 
 func TestCandidateUpsertAccumulatesMaxConfidence(t *testing.T) {
 	db := testDB(t)
 	r := &SpeakerNameCandidateRepo{DB: db}
 	ctx := context.Background()
-	sid := seedCandidate(t, "说话人cd4e0")
+	sid := seedCandidate(t, db, "说话人cd4e0")
 
 	// 同名候选跨 session 复现：第二次置信度更低 → 保留最高置信、证据取最新
 	if err := r.Upsert(ctx, sid, "张总", 0.82, "旧证据", 1001); err != nil {
@@ -95,8 +117,8 @@ func TestCandidateDelete(t *testing.T) {
 	db := testDB(t)
 	r := &SpeakerNameCandidateRepo{DB: db}
 	ctx := context.Background()
-	sid := seedCandidate(t, "说话人ef5a1")
-	other := seedCandidate(t, "说话人gh6b2")
+	sid := seedCandidate(t, db, "说话人ef5a1")
+	other := seedCandidate(t, db, "说话人gh6b2")
 	_ = r.Upsert(ctx, sid, "张总", 0.8, "", 1001)
 	_ = r.Upsert(ctx, sid, "张明", 0.4, "", 1001)
 	_ = r.Upsert(ctx, other, "李哥", 0.7, "", 1001)
