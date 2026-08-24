@@ -309,6 +309,7 @@ extract 阶段靠「删本 session 旧 memory 再重插」保证幂等；**profi
 - 落库前在事务内查该自然键是否已有行（任意 status）；已有则**跳过**（不重复建 pending、不重复 bump）。
 - 自动新建人物按 `(user_id, normalize(display_name), source='llm')` 去重。
 - 效果：重跑同一 session 不产生重复建议，且用户此前的 confirm/dismiss 决定被保留。
+- **边界（2026-08-25 评审澄清）**：跳过依赖「本 session 落过行」。跨 session 佐证（S2 重申 S1 的值）只 bump S1 行、不在 S2 落行——重跑 S2 会再次佐证 +0.05（0.99 封顶）并追加 reaffirm 审计。这与 extract stage 显式接受的「跨 session 旧记忆仍会命中→佐证」取舍一致，非缺陷；「不重复 bump」的字面承诺限定于同源 session 的 create 路径重跑。
 
 ### 6.4 去重约定
 
@@ -383,6 +384,14 @@ POST               /api/profile/extract               触发抽取/回填（可�
 全量模型在本总纲一次画清，plan 按期出。**先做 P1**。
 
 ## 13. 已知限制与后续
+
+P1a 实现后（2026-08-25 final review）追加的合并后跟进清单：
+
+- **F2 关系先行的批内顺序**：`subject:relation:TYPE` 的属性事实依赖同批对应关系事实先落库（prompt 示例排序兜底但不保证）；LLM 乱序时该属性被跳过（非破坏，后续会话可再抽到）。跟进：ApplyFacts 两趟落库（relationship 平面先行）或 facts 稳定排序。
+- **F3 profile stage 致命性**：作为 flow 末段，画像抽取失败会把整个 session 置 failed（transcript/memory 已落库也被标失败）。跟进：考虑非致命化（记 trace 后放行）。
+- **F4 枚举/类型值写入端不校验**：EnumOptions 与 bool/date 规范形态对 LLM/手动路径均为建议性。跟进：写入校验与规范化。
+- **F5 人物归档不级联**：dismiss 人物后其属性/关系行不变，可能留孤儿引用。跟进：级联处置。
+- **F6 小项**：ListPending 的 supersedes CurrentValue 查询 N+1（队列规模小，可接受）；属性自然键 SQL 用原始 value_text 精确比较（ParseFacts 已 trim，轻微出入）；集成测试共享 user_id=1 靠 t.Cleanup 维持隔离（可改独立 user_id）。
 
 - 人物归属对「同名不同人」「代词指代」依赖 LLM+规则，边界情形进 pending 由人确认。
 - 回填端点对大量历史 session 的批处理性能，P1 先小批/单 session，规模化留后续。
