@@ -104,3 +104,59 @@ func TestGetTopicsTool(t *testing.T) {
 		t.Fatalf("结果非 JSON 数组: %v", err)
 	}
 }
+
+func TestGetTimelineRecentTool(t *testing.T) {
+	d := testDeps(t)
+	ctx := t.Context()
+	sess := &repo.AudioSession{ID: ids.New(), Source: "web_upload", Filename: "t.wav", DurationMS: 1000, Status: "completed"}
+	if err := d.Session.Create(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	res, _, err := getTimelineHandler(d)(ctx, nil, getTimelineArgs{Limit: 50})
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	var out []sessionOut
+	if err := json.Unmarshal([]byte(firstText(t, res)), &out); err != nil {
+		t.Fatalf("非 JSON 数组: %v", err)
+	}
+	var found bool
+	for _, s := range out {
+		if s.SessionID == sess.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("最近时间线应含新建会话")
+	}
+}
+
+func TestGetTimelineBySessionTool(t *testing.T) {
+	d := testDeps(t)
+	ctx := t.Context()
+	sess := &repo.AudioSession{ID: ids.New(), Source: "web_upload", Filename: "t2.wav", DurationMS: 2000, Status: "completed"}
+	if err := d.Session.Create(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sess.ID, Language: "zh-CN"}
+	if err := d.Transcript.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	segs := []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 0, SpeakerLabel: "张三", Text: "分段验证文本", StartMS: 0, EndMS: 500},
+	}
+	if err := d.Transcript.InsertSegments(ctx, segs); err != nil {
+		t.Fatal(err)
+	}
+	res, _, err := getTimelineHandler(d)(ctx, nil, getTimelineArgs{SessionID: sess.ID.String()})
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	var out []segmentOut
+	if err := json.Unmarshal([]byte(firstText(t, res)), &out); err != nil {
+		t.Fatalf("非 JSON 数组: %v", err)
+	}
+	if len(out) != 1 || out[0].Text != "分段验证文本" || out[0].EndMS != 500 || out[0].Speaker != "张三" {
+		t.Errorf("分段结果异常: %+v", out)
+	}
+}

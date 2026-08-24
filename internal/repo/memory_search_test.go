@@ -51,3 +51,41 @@ func TestMemorySearch(t *testing.T) {
 		}
 	}
 }
+
+func TestMemorySearchEscapesWildcards(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := &MemoryRepo{DB: db}
+	ctx := t.Context()
+	sid := ids.New()
+	lit := "进度100%达成X9Z"     // 含字面量 %
+	other := "进度100abc达成X9Z" // % 若被当通配符, 会误命中它
+	ms := []*Memory{
+		{Type: "fact", Title: lit, Content: lit, SessionID: sid, Status: "active", Confidence: 0.8},
+		{Type: "fact", Title: other, Content: other, SessionID: sid, Status: "active", Confidence: 0.8},
+	}
+	if err := mr.InsertExt(ctx, db, ms); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mr.Search(ctx, 1, lit, "", 20)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	var hitLit, hitOther bool
+	for _, m := range got {
+		if m.ID == ms[0].ID {
+			hitLit = true
+		}
+		if m.ID == ms[1].ID {
+			hitOther = true
+		}
+	}
+	if !hitLit {
+		t.Error("含字面量 % 的记忆应被命中")
+	}
+	if hitOther {
+		t.Error("% 被当作通配符了(应按字面量匹配)")
+	}
+}

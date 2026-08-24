@@ -238,7 +238,7 @@ func (r *MemoryRepo) Search(ctx context.Context, userID int64, query, typ string
 	args := []any{userID}
 	if q := strings.TrimSpace(query); q != "" {
 		esc := escapeLike(q)
-		conds = append(conds, "(title LIKE ? OR content LIKE ?)")
+		conds = append(conds, `(title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')`)
 		args = append(args, "%"+esc+"%", "%"+esc+"%")
 	}
 	if typ != "" {

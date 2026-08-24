@@ -160,8 +160,9 @@ func main() {
 		Topic:      topics,
 		Todo:       todos,
 	})
-	r.Handle("/internal/mcp", agent.MCPHandler(mcpSrv))
-	r.Handle("/internal/mcp/*", agent.MCPHandler(mcpSrv))
+	mcpHandler := agent.MCPHandler(mcpSrv)
+	r.Handle("/internal/mcp", mcpHandler)
+	r.Handle("/internal/mcp/*", mcpHandler)
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
 	go func() {

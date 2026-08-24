@@ -57,6 +57,7 @@ type segmentOut struct {
 	Speaker string `json:"speaker"`
 	Text    string `json:"text"`
 	StartMS int64  `json:"start_ms"`
+	EndMS   int64  `json:"end_ms"`
 }
 
 type topicOut struct {
@@ -84,7 +85,7 @@ func jsonResult(v any) (*mcp.CallToolResult, any, error) {
 }
 
 type searchMemoryArgs struct {
-	Query string `json:"query" jsonschema:"检索关键词(匹配标题或内容)；留空则按 type 列最近记忆"`
+	Query string `json:"query,omitempty" jsonschema:"检索关键词(匹配标题或内容)；留空则按 type 列最近记忆"`
 	Type  string `json:"type,omitempty" jsonschema:"可选记忆类型: event|fact|decision|idea|problem|preference"`
 	Limit int    `json:"limit,omitempty" jsonschema:"最多返回条数, 默认 20, 上限 50"`
 }
@@ -133,13 +134,16 @@ func getTimelineHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, g
 				if sp == "" {
 					sp = "未知"
 				}
-				out = append(out, segmentOut{Speaker: sp, Text: s.Text, StartMS: s.StartMS})
+				out = append(out, segmentOut{Speaker: sp, Text: s.Text, StartMS: s.StartMS, EndMS: s.EndMS})
 			}
 			return jsonResult(out)
 		}
 		limit := a.Limit
-		if limit <= 0 || limit > 50 {
+		if limit <= 0 {
 			limit = 20
+		}
+		if limit > 50 {
+			limit = 50
 		}
 		ss, err := d.Session.List(ctx, limit, 0)
 		if err != nil {
