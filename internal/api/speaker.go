@@ -352,10 +352,12 @@ func (h *SpeakerHandler) ReassignSegment(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// EnrollFromSegment timeline「用此段录音纹」：用某转写段对应时间段的音频录入新说话人。
-// 切 transcoded/{sid}.wav 的 [start_ms,end_ms] → sidecar /embed → 登记(enrolled) + /add。
+// EnrollFromSegment timeline「用此段录音纹」：用某转写段对应时间段的音频录入新说话人，
+// 并把该段所属说话人在本会话的全部段一并改判到新说话人。
+// 切 transcoded/{sid}.wav 的 [start_ms,end_ms] → sidecar /embed → 登记(enrolled) + /add → 批量改判。
 // 时长 < EnrollMinDurationMS 拒绝（声纹需足够时长才稳，WeSpeaker LM 对 >3s 更准）。
-// 只创建说话人、不改判段——改判可能误拆已聚类说话人，留给下拉/手动合并；返回新 speaker。
+// 改判口径「按当前显示的说话人」：该段已识别出说话人(speaker_id 非空)→ 改判本 transcript 内同一
+// speaker 的所有段；尚未识别(为空)→ 退回按 ASR 说话人标签分组，回填本 transcript 内同标签的未解析段。
 func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Request) {
 	sid, err := ids.ParseID(chi.URLParam(r, "sid"))
 	if err != nil {
@@ -433,6 +435,22 @@ func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Reques
 		_ = h.Speakers.Delete(r.Context(), sp.ID)
 		http.Error(w, "声纹索引写入失败，请重试", http.StatusInternalServerError)
 		return
+	}
+	// 把该段所属说话人在本会话的全部段一并改判到新录入的说话人（口径见函数注释）。
+	// 走到这里 speaker 已成功登记+入索引：改判失败只返回错误、不回滚新说话人（它是有效声纹，
+	// 用户可用换人下拉补救；不留孤儿）。
+	if seg.SpeakerID != nil {
+		// 已识别：按当前 speaker_id 分组，改判本 transcript 内同一 speaker 的所有段。
+		if _, err := h.Transcripts.ReassignSpeakerInTranscript(r.Context(), tr.ID, *seg.SpeakerID, sp.ID); err != nil {
+			http.Error(w, "改判失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// 未识别：退回按 ASR 说话人标签分组，回填本 transcript 内同标签的未解析段（含本段）。
+		if err := h.Transcripts.SetSegmentSpeaker(r.Context(), tr.ID, seg.SpeakerLabel, sp.ID); err != nil {
+			http.Error(w, "改判失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, sp)
 }

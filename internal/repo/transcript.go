@@ -196,6 +196,20 @@ func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID
 	return err
 }
 
+// ReassignSpeakerInTranscript 把本 transcript 内所有 speaker_id = fromID 的段改判为 toID，返回改动行数。
+// 带 transcript_id 作用域，只影响本会话——同一 speaker 在其他会话的段不动。单条 UPDATE 原子写、并发安全。
+// 用于 timeline「用此段录音纹」：录入新说话人后，把该说话人在本会话的全部段一并改判到新说话人。
+func (r *TranscriptRepo) ReassignSpeakerInTranscript(ctx context.Context, transcriptID, fromID, toID ids.ID) (int, error) {
+	res, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ? WHERE transcript_id = ? AND speaker_id = ?`,
+		toID.Int64(), transcriptID.Int64(), fromID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // ListSpeakersForTranscript 本 transcript 解析到的说话人聚合（说话人面板用）。
 // 按 sequence_no 升序的首段定序，保证面板说话人顺序与转写一致。
 func (r *TranscriptRepo) ListSpeakersForTranscript(ctx context.Context, transcriptID ids.ID) ([]SpeakerInSegment, error) {

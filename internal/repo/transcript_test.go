@@ -313,3 +313,87 @@ func TestListSegmentsInWallClockWindow(t *testing.T) {
 		t.Fatalf("裁剪应保留最近的 2 段，实际 %+v", got2)
 	}
 }
+
+// TestReassignSpeakerInTranscript 覆盖 timeline「用此段录音纹」录入后的批量改判：
+// 把本 transcript 内所有 speaker_id = fromID 的段改判为 toID，返回改动行数；
+// 不碰 speaker_id 为其他人或 NULL 的段，也不越过 transcript 作用域波及其他会话。
+func TestReassignSpeakerInTranscript(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tr := &TranscriptRepo{DB: db}
+	spk := &SpeakerRepo{DB: db}
+	sessions := &SessionRepo{DB: db}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// mkTranscript 建一个 session + 空 transcript，返回 transcript。
+	mkTranscript := func(fname string) *Transcript {
+		sid := ids.New()
+		must(sessions.Create(ctx, &AudioSession{
+			ID: sid, Source: "web_upload", Filename: fname,
+			StoragePath: "/tmp/" + fname, Status: "completed",
+		}))
+		tc := &Transcript{SessionID: sid, Language: "zh-CN"}
+		must(tr.Create(ctx, tc))
+		return tc
+	}
+
+	tc := mkTranscript("a.wav")
+	segs := []TranscriptSegment{
+		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "一", StartMS: 0, EndMS: 1000},
+		{TranscriptID: tc.ID, SequenceNo: 2, SpeakerLabel: "1", Text: "二", StartMS: 1000, EndMS: 2000},
+		{TranscriptID: tc.ID, SequenceNo: 3, SpeakerLabel: "2", Text: "三", StartMS: 2000, EndMS: 3000},
+		{TranscriptID: tc.ID, SequenceNo: 4, SpeakerLabel: "1", Text: "四", StartMS: 3000, EndMS: 4000},
+	}
+	must(tr.InsertSegments(ctx, segs))
+
+	spA := &Speaker{Name: "甲", Source: "auto"}
+	spB := &Speaker{Name: "乙", Source: "auto"}
+	spNew := &Speaker{Name: "新录入", Source: "enrolled"}
+	for _, s := range []*Speaker{spA, spB, spNew} {
+		must(spk.Create(ctx, s))
+	}
+	// 段1、段2 → 甲；段3 → 乙；段4 保持 NULL（未解析）
+	must(tr.SetSegmentSpeakerByID(ctx, tc.ID, segs[0].ID, spA.ID))
+	must(tr.SetSegmentSpeakerByID(ctx, tc.ID, segs[1].ID, spA.ID))
+	must(tr.SetSegmentSpeakerByID(ctx, tc.ID, segs[2].ID, spB.ID))
+
+	// 另一会话也有一段归甲——验证作用域：不该被本 transcript 的改判波及。
+	other := mkTranscript("b.wav")
+	otherSegs := []TranscriptSegment{
+		{TranscriptID: other.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "别的会话", StartMS: 0, EndMS: 1000},
+	}
+	must(tr.InsertSegments(ctx, otherSegs))
+	must(tr.SetSegmentSpeakerByID(ctx, other.ID, otherSegs[0].ID, spA.ID))
+
+	// 改判：本 transcript 内 甲 → 新录入
+	n, err := tr.ReassignSpeakerInTranscript(ctx, tc.ID, spA.ID, spNew.ID)
+	if err != nil {
+		t.Fatalf("ReassignSpeakerInTranscript: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("应改判 2 段（段1/段2 原属甲），实际 %d", n)
+	}
+	got, _ := tr.ListSegments(ctx, tc.ID)
+	if got[0].SpeakerID == nil || *got[0].SpeakerID != spNew.ID ||
+		got[1].SpeakerID == nil || *got[1].SpeakerID != spNew.ID {
+		t.Fatalf("段1/2 应改判为新录入, got %+v %+v", got[0].SpeakerID, got[1].SpeakerID)
+	}
+	if got[2].SpeakerID == nil || *got[2].SpeakerID != spB.ID {
+		t.Fatalf("段3（乙）不应变动, got %+v", got[2].SpeakerID)
+	}
+	if got[3].SpeakerID != nil {
+		t.Fatalf("段4（未解析）不应被改判, got %+v", got[3].SpeakerID)
+	}
+	// 作用域：另一会话的甲段不动
+	gotOther, _ := tr.ListSegments(ctx, other.ID)
+	if gotOther[0].SpeakerID == nil || *gotOther[0].SpeakerID != spA.ID {
+		t.Fatalf("另一会话的甲段不应被本 transcript 改判波及, got %+v", gotOther[0].SpeakerID)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -345,5 +346,146 @@ func TestSpeakerDeleteNameCandidate(t *testing.T) {
 		"/api/speakers/not-a-valid-id/name-candidates?name="+url.QueryEscape("张总"), nil))
 	if rec5.Code != 400 {
 		t.Fatalf("非法 id 应 400，实际 %d", rec5.Code)
+	}
+}
+
+// seedEnrollSession 建 session + transcript + 指定段，并把 speech20s.wav 放到
+// {dir}/transcoded/{sid}.wav 供 EnrollFromSegment 切片。段的 TranscriptID 由本函数回填。
+// 返回 sid + transcript + 落库后（含 id、按 sequence_no 升序）的段。
+func seedEnrollSession(t *testing.T, transcripts *repo.TranscriptRepo, dir string, segs []repo.TranscriptSegment) (ids.ID, *repo.Transcript, []repo.TranscriptSegment) {
+	t.Helper()
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: transcripts.DB}
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "m.wav",
+		StoragePath: "../../testdata/speech20s.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tc); err != nil {
+		t.Fatal(err)
+	}
+	for i := range segs {
+		segs[i].TranscriptID = tc.ID
+	}
+	if err := transcripts.InsertSegments(ctx, segs); err != nil {
+		t.Fatal(err)
+	}
+	// 放置切片源 wav：{dir}/transcoded/{sid}.wav
+	tdir := filepath.Join(dir, "transcoded")
+	if err := os.MkdirAll(tdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src, err := os.Open("../../testdata/speech20s.wav")
+	if err != nil {
+		t.Skip("无 testdata/speech20s.wav")
+	}
+	defer src.Close()
+	dst, err := os.Create(filepath.Join(tdir, sid.String()+".wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		t.Fatal(err)
+	}
+	dst.Close()
+	saved, err := transcripts.ListSegments(ctx, tc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sid, tc, saved
+}
+
+func enrollFromSegment(t *testing.T, r http.Handler, sid, segID ids.ID, name string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/sessions/"+sid.String()+"/segments/"+segID.String()+"/enroll",
+		bytes.NewBufferString(`{"name":"`+name+`"}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestEnrollFromSegmentReassignsSameSpeaker：timeline「用此段录音纹」录入后，该段 + 本会话中
+// 与它当前 speaker_id 相同的所有段，都改判到新录入的说话人；其他说话人的段不受影响。
+func TestEnrollFromSegmentReassignsSameSpeaker(t *testing.T) {
+	requireFFmpegAPI(t)
+	r, speakers, transcripts, dir := setupSpeakerAPI(t)
+	ctx := context.Background()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	spX := &repo.Speaker{Name: "说话人x", Source: "auto"}
+	spY := &repo.Speaker{Name: "说话人y", Source: "auto"}
+	must(speakers.Create(ctx, spX))
+	must(speakers.Create(ctx, spY))
+
+	sid, tc, segs := seedEnrollSession(t, transcripts, dir, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "甲一", StartMS: 0, EndMS: 4000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "甲二", StartMS: 4000, EndMS: 8000},
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "乙", StartMS: 8000, EndMS: 12000},
+	})
+	// 段1、段2 → X；段3 → Y
+	must(transcripts.SetSegmentSpeakerByID(ctx, tc.ID, segs[0].ID, spX.ID))
+	must(transcripts.SetSegmentSpeakerByID(ctx, tc.ID, segs[1].ID, spX.ID))
+	must(transcripts.SetSegmentSpeakerByID(ctx, tc.ID, segs[2].ID, spY.ID))
+
+	if rec := enrollFromSegment(t, r, sid, segs[0].ID, "张三"); rec.Code != 200 {
+		t.Fatalf("enroll code %d body %s", rec.Code, rec.Body.String())
+	}
+
+	got, _ := transcripts.ListSegments(ctx, tc.ID)
+	newID := got[0].SpeakerID
+	if newID == nil || *newID == spX.ID || *newID == spY.ID {
+		t.Fatalf("段1 应改判为新录入的说话人（非 X/Y）, got %+v", newID)
+	}
+	if got[1].SpeakerID == nil || *got[1].SpeakerID != *newID {
+		t.Fatalf("段2（同属 X）应一并改判到新说话人, got %+v", got[1].SpeakerID)
+	}
+	if got[2].SpeakerID == nil || *got[2].SpeakerID != spY.ID {
+		t.Fatalf("段3（Y）不应受影响, got %+v", got[2].SpeakerID)
+	}
+	np, err := speakers.Get(ctx, *newID)
+	must(err)
+	if np.Name != "张三" || np.Source != "enrolled" {
+		t.Fatalf("新说话人应为 张三/enrolled, got %s/%s", np.Name, np.Source)
+	}
+}
+
+// TestEnrollFromSegmentReassignsByLabelWhenUnresolved：该段尚未识别出说话人(speaker_id 为空)时，
+// 退回按 ASR 说话人标签分组——同标签的未解析段一并归到新说话人，其他标签的段不动。
+func TestEnrollFromSegmentReassignsByLabelWhenUnresolved(t *testing.T) {
+	requireFFmpegAPI(t)
+	r, speakers, transcripts, dir := setupSpeakerAPI(t)
+	ctx := context.Background()
+
+	sid, tc, segs := seedEnrollSession(t, transcripts, dir, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "甲一", StartMS: 0, EndMS: 4000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "甲二", StartMS: 4000, EndMS: 8000},
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "乙", StartMS: 8000, EndMS: 12000},
+	})
+	// 三段 speaker_id 全为 NULL（未解析）
+	if rec := enrollFromSegment(t, r, sid, segs[0].ID, "李四"); rec.Code != 200 {
+		t.Fatalf("enroll code %d body %s", rec.Code, rec.Body.String())
+	}
+
+	got, _ := transcripts.ListSegments(ctx, tc.ID)
+	if got[0].SpeakerID == nil || got[1].SpeakerID == nil || *got[0].SpeakerID != *got[1].SpeakerID {
+		t.Fatalf("未解析场景应按 ASR 标签把 label 1 的两段归到同一新说话人, got %+v %+v", got[0].SpeakerID, got[1].SpeakerID)
+	}
+	if got[2].SpeakerID != nil {
+		t.Fatalf("label 2 的段不应被改判, got %+v", got[2].SpeakerID)
+	}
+	np, err := speakers.Get(ctx, *got[0].SpeakerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if np.Name != "李四" {
+		t.Fatalf("新说话人名应为 李四, got %s", np.Name)
 	}
 }
