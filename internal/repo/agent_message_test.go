@@ -32,7 +32,7 @@ func TestAgentMessageAppendAndList(t *testing.T) {
 
 	// 助手消息（带 citations JSON）
 	cites := json.RawMessage(`[{"memory_id":"123","reason":"相关"}]`)
-	am := &AgentMessage{ConversationID: &conv.ID, Role: "assistant", Content: "找到 1 条", Citations: cites}
+	am := &AgentMessage{ConversationID: &conv.ID, Role: "assistant", Content: "找到 1 条", Citations: &cites}
 	if err := mr.Append(ctx, am); err != nil {
 		t.Fatalf("Append assistant: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestAgentMessageAppendAndList(t *testing.T) {
 	if list[0].Role != "user" || list[1].Role != "assistant" {
 		t.Errorf("顺序应按 id 升序（user 先）: %q,%q", list[0].Role, list[1].Role)
 	}
-	if len(list[1].Citations) == 0 {
+	if list[1].Citations == nil || len(*list[1].Citations) == 0 {
 		t.Error("assistant 的 citations 未持久化")
 	}
 }
