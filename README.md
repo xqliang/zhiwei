@@ -23,6 +23,8 @@ AI 全时生活记忆与个人智能体的云端服务。当前为 **Sprint 0-1*
   - `ZW_ASR_PROVIDER`（`file` 默认｜`realtime`；file 走 StepFun 异步文件 ASR 原生 diarization+ms 时间戳更准，realtime 走 WSS + prompt diarization 免 TOS）
   - `ZW_VOICEPRINT_SIDECAR_URL`（声纹 sidecar 地址，默认 `http://127.0.0.1:8010`）
   - `ZW_VOICEPRINT_THRESHOLD`（1:N 余弦匹配阈值，默认 `0.5`，需用真实录音 benchmark 实调）
+  - `ZW_NAME_INFER_WINDOW_MIN`（说话人名字推断回看窗口，分钟，默认 `10`）
+  - `ZW_NAME_INFER_MAX_SEGMENTS`（名字推断上下文段数上限，默认 `400`）
 
 ## 快速开始
 
@@ -91,6 +93,7 @@ GET/PATCH /api/memories      记忆列表（type/topic_id 过滤）/ 修正与�
 GET/PATCH /api/todos         待办列表 / 状态流转（确认/完成/忽略）
 GET/POST/PATCH /api/topics   主题计数列表 / 新建 / 确认/改名/忽略
 GET/POST/PATCH/DELETE /api/speakers  说话人名册 / 录入声纹(multipart file+name) / 改名 / 删除
+DELETE /api/speakers/{id}/name-candidates?name=…   忽略单个建议名字候选
 GET  /api/sessions/{id}/speakers     会话内已解析说话人列表（面板用）
 PATCH /api/sessions/{id}/segments/{seg}/speaker  单段换人（手动纠正说话人）
 ```
