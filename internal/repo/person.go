@@ -149,8 +149,9 @@ func (r *PersonRepo) FindByName(ctx context.Context, userID int64, name string) 
 	return r.FindByNameExt(ctx, r.DB, userID, name)
 }
 
-// Update 手动编辑：改名/换绑声纹/改备注。speakerID/summary 传 nil 即清空。
-func (r *PersonRepo) Update(ctx context.Context, id ids.ID, name string, speakerID *ids.ID, summary *string) error {
+// UpdateExt 手动编辑：改名/换绑声纹/改备注（speakerID/summary 传 nil 即清空）。
+// 可在指定执行器上执行（ext 传 *sqlx.Tx 即与审计同事务，避免变更已提交而审计丢失）。
+func (r *PersonRepo) UpdateExt(ctx context.Context, ext ExecerContext, id ids.ID, name string, speakerID *ids.ID, summary *string) error {
 	var sp any
 	if speakerID != nil {
 		sp = speakerID.Int64()
@@ -159,15 +160,24 @@ func (r *PersonRepo) Update(ctx context.Context, id ids.ID, name string, speaker
 	if summary != nil {
 		sm = *summary
 	}
-	_, err := r.DB.ExecContext(ctx,
+	_, err := ext.ExecContext(ctx,
 		`UPDATE person SET display_name = ?, speaker_id = ?, summary = ? WHERE id = ?`,
 		name, sp, sm, id.Int64())
 	return err
 }
 
-func (r *PersonRepo) SetStatus(ctx context.Context, id ids.ID, status string) error {
-	_, err := r.DB.ExecContext(ctx, `UPDATE person SET status = ? WHERE id = ?`, status, id.Int64())
+func (r *PersonRepo) Update(ctx context.Context, id ids.ID, name string, speakerID *ids.ID, summary *string) error {
+	return r.UpdateExt(ctx, r.DB, id, name, speakerID, summary)
+}
+
+// SetStatusExt 人物状态流转，可在指定执行器上执行（ext 传 *sqlx.Tx 即与审计同事务）。
+func (r *PersonRepo) SetStatusExt(ctx context.Context, ext ExecerContext, id ids.ID, status string) error {
+	_, err := ext.ExecContext(ctx, `UPDATE person SET status = ? WHERE id = ?`, status, id.Int64())
 	return err
+}
+
+func (r *PersonRepo) SetStatus(ctx context.Context, id ids.ID, status string) error {
+	return r.SetStatusExt(ctx, r.DB, id, status)
 }
 
 // RecentSessionIDs 该人物画像信息溯源涉及的 session（人物页「最近互动」入口），

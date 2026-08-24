@@ -45,7 +45,7 @@ func (s *Service) ManualUpdatePerson(ctx context.Context, id ids.ID, name string
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := s.Persons.Update(ctx, id, name, speakerID, summary); err != nil {
+	if err := s.Persons.UpdateExt(ctx, tx, id, name, speakerID, summary); err != nil {
 		return err
 	}
 	old := snap(p.DisplayName)
@@ -73,7 +73,7 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, id ids.ID, status s
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := s.Persons.SetStatus(ctx, id, status); err != nil {
+	if err := s.Persons.SetStatusExt(ctx, tx, id, status); err != nil {
 		return err
 	}
 	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{

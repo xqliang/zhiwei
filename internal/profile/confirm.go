@@ -30,7 +30,7 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 		if p.Status != "pending" {
 			return fmt.Errorf("仅 pending 状态可确认（当前 %s）", p.Status)
 		}
-		if err := s.Persons.SetStatus(ctx, id, "active"); err != nil {
+		if err := s.Persons.SetStatusExt(ctx, tx, id, "active"); err != nil {
 			return err
 		}
 		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
@@ -69,7 +69,7 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
 			PersonID: a.PersonID, EntityKind: "attribute", EntityID: &id,
 			AttrKey: strPtr(a.AttrKey), ChangeType: "confirm", ChangedBy: "user",
-			NewValue: snap(a.ValueText), OldValue: snap(""),
+			NewValue:   snap(a.ValueText),
 			Confidence: fp(a.Confidence), EpistemicType: strPtr(a.EpistemicType),
 		}); err != nil {
 			return err
@@ -87,6 +87,13 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 		}
 		if rel.SupersedesID != nil {
 			if err := s.Relationships.SetStatusExt(ctx, tx, *rel.SupersedesID, "superseded"); err != nil {
+				return err
+			}
+			if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+				PersonID: rel.PersonID, EntityKind: "relationship", EntityID: rel.SupersedesID,
+				ChangeType: "supersede", ChangedBy: "user",
+				Note: strPtr("冲突确认：旧关系被新关系替换"),
+			}); err != nil {
 				return err
 			}
 		}
@@ -123,7 +130,7 @@ func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) er
 		if p == nil {
 			return ErrNotFound
 		}
-		if err := s.Persons.SetStatus(ctx, id, "dismissed"); err != nil {
+		if err := s.Persons.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
 			return err
 		}
 		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{

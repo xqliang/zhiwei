@@ -111,11 +111,14 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	}
 
 	// ---- 确认 pending 人物 ----
+	// 低置信（0.6<0.75）：自动新建的人物「确认人物测试」是 pending，
+	// 且这条朋友关系边也落 pending（关系闸门无冲突路径，不会带 supersedes_id）——
+	// 正好给下面的「确认 pending 关系」提供素材。
 	sess3 := ids.New()
 	_, _ = svc.ApplyFacts(ctx, sess3, 1, []Fact{
 		{Plane: "relationship", Subject: Subject{Kind: "self"},
 			Related: Subject{Kind: "mentioned", Name: "确认人物测试"}, RelationType: "朋友",
-			Confidence: 0.9, EpistemicType: "observed"},
+			Confidence: 0.6, EpistemicType: "observed"},
 	})
 	cand, _ := svc.Persons.FindByName(ctx, 1, "确认人物测试")
 	if cand == nil || cand.Status != "pending" {
@@ -126,6 +129,39 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	}
 	if c2, _ := svc.Persons.Get(ctx, cand.ID); c2.Status != "active" {
 		t.Fatalf("人物确认后应 active: %+v", c2)
+	}
+
+	// ---- 确认 pending 关系 → active ----
+	relPend, _ := svc.Relationships.ListPending(ctx, 1)
+	if len(relPend) == 0 {
+		t.Fatal("应有 pending 关系")
+	}
+	relPendID := relPend[0].ID
+	if err := svc.ConfirmPending(ctx, "relationship", relPendID); err != nil {
+		t.Fatal(err)
+	}
+	if rc, _ := svc.Relationships.Get(ctx, relPendID); rc == nil || rc.Status != "active" {
+		t.Fatalf("关系确认后应 active: %+v", rc)
+	}
+
+	// ---- 手动编辑/归档人物 + 手动删关系（最小覆盖）----
+	if err := svc.ManualUpdatePerson(ctx, p.ID, "Bob2", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := svc.Persons.Get(ctx, p.ID); b == nil || b.DisplayName != "Bob2" {
+		t.Fatalf("改名后应为 Bob2: %+v", b)
+	}
+	if err := svc.ManualSetPersonStatus(ctx, p.ID, "dismissed"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := svc.Persons.Get(ctx, p.ID); b == nil || b.Status != "dismissed" {
+		t.Fatalf("归档后应 dismissed: %+v", b)
+	}
+	if err := svc.ManualDeleteRelationship(ctx, rel.ID); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := svc.Relationships.Get(ctx, rel.ID); r == nil || r.Status != "dismissed" {
+		t.Fatalf("删关系后应 dismissed: %+v", r)
 	}
 
 	// ---- 不存在/状态非法 → 错误 ----
