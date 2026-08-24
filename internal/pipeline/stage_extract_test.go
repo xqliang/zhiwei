@@ -41,6 +41,7 @@ func newExtractDeps(t *testing.T, llm provider.LLMProvider) StageDeps {
 	return StageDeps{
 		Sessions:     &repo.SessionRepo{DB: db},
 		Transcripts:  &repo.TranscriptRepo{DB: db},
+		Speakers:     &repo.SpeakerRepo{DB: db},
 		DB:           db,
 		Memories:     &repo.MemoryRepo{DB: db},
 		Todos:        &repo.TodoRepo{DB: db},
