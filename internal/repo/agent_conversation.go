@@ -23,6 +23,7 @@ type AgentConversation struct {
 type AgentConversationRepo struct{ DB *sqlx.DB }
 
 // Create 新建会话：生成雪花 ID，UserID 默认 1，DSHSessionID 为空时回退成会话 ID 字符串。
+// 注意：DB 默认列（status/created_at/last_active_at）不会回填到 c，需要读回请 Create 后再 Get；且预设 c.Status 会被忽略（INSERT 未含该列）。
 func (r *AgentConversationRepo) Create(ctx context.Context, c *AgentConversation) error {
 	c.ID = ids.New()
 	if c.UserID == 0 {
@@ -60,7 +61,7 @@ func (r *AgentConversationRepo) Touch(ctx context.Context, id ids.ID) error {
 	return err
 }
 
-// SetDSHSession 更新映射的 dsh sessionId（边车重启后换新 session 时用）。
+// SetDSHSession 更新映射的 dsh sessionId（边车重启后换新 session 时用）。不存在返回 nil（UPDATE 0 行）。
 func (r *AgentConversationRepo) SetDSHSession(ctx context.Context, id ids.ID, dshSessionID string) error {
 	_, err := r.DB.ExecContext(ctx,
 		`UPDATE agent_conversation SET dsh_session_id = ? WHERE id = ?`, dshSessionID, id.Int64())
