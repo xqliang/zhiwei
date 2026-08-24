@@ -1,1 +1,1 @@
-DROP TABLE speaker_name_candidate;
+DROP TABLE IF EXISTS speaker_name_candidate;
