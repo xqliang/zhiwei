@@ -146,7 +146,8 @@ CREATE TABLE speaker_name_candidate (
 包装成 `stageSpeakerName(d) Handler`，注册进 `BuildStages`。
 
 - **幂等**：候选 upsert（GREATEST 置信），重跑不产生重复行；无待识别说话人 no-op。
-- **错误**：LLM/解析失败 → 返回 error，走 pool 现有重试 3 次 → `failed` 可重跑。不影响已落库转写与说话人归属（本 stage 只写候选表）。
+- **错误（2026-08-24 质量审查修订：尽力而为语义）**：LLM 调用失败与输出解析失败只记日志 + job.trace（`speakername` 错误条目），**不返回 error、不 fail session**——候选仅建议，不该阻塞后续 extract；说话人仍是随机名时下一段录音会自然重试推断，恢复路径天然存在。DB 类错误（段/候选读写）仍走 pool 现有重试 3 次 → `failed`。不影响已落库转写与说话人归属（本 stage 只写候选表）。
+- **trace**：LLM 调用写 `speakername:llm` 条目（model/耗时/tokens，对齐 extract stage 的 `extract:llm`）。
 - **成本**：每 session 至多 1 次 LLM 调用，且仅在存在待识别说话人时。数据仍只发给现有 Ark LLM（与 extract 同），无新增外部暴露。
 
 新增 repo 查询 `TranscriptRepo.ListSegmentsInWallClockWindow`（跨 session 墙钟窗口）：
@@ -225,3 +226,5 @@ LLM 复用 `LLMFastModel`（`doubao-seed-1-6-flash`）。
 - 多人（>2）场景称呼指向可能有歧义，靠模型 + 低置信兜底，用户确认为最终裁决。
 - 候选仅建议、不自动改名（本设计既定）；若后续想要「高置信自动改名」，只需在 stage 末尾按阈值调用 `UpdateName` + 清候选，数据模型无需改。
 - 说话人若在 `reidentify` 后被重建为新 speaker_id，旧候选成为孤儿（其 speaker 仍在，属边角情况），可接受。
+- 候选只累积不删除：后续 run 收窄候选集时，模型不再支持的旧候选会残留（用户可手动忽略）；后续可做「重跑时整组替换」。
+- 「当前录音段天然优先保留」的裁剪保证在**录音重叠**场景不严格成立（前置录音的段墙钟可能晚于当前录音开头，DESC 排序在其前）；需重叠录音 + 10 分钟窗口内 >400 段才触发，实际罕见。
