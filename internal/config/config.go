@@ -45,6 +45,8 @@ type Config struct {
 	VoiceprintSidecarURL string  // 声纹 sidecar 地址（http://127.0.0.1:8010）
 	VoiceprintThreshold  float64 // 1:N 余弦匹配阈值，低于则视为未命中→自动登记
 	EnrollMinDurationMS  int64   // 从转写段音频录入声纹的最小时长（毫秒，默认 3000=3s；WeSpeaker LM 对 >3s 更稳）
+	NameInferWindowMin   int     // 名字推断上下文回看窗口（分钟，ZW_NAME_INFER_WINDOW_MIN，默认 10）
+	NameInferMaxSegments int     // 名字推断上下文段数上限（ZW_NAME_INFER_MAX_SEGMENTS，默认 400）
 }
 
 func getenv(k, def string) string {
@@ -95,6 +97,8 @@ func Load() (*Config, error) {
 		VoiceprintSidecarURL: getenv("ZW_VOICEPRINT_SIDECAR_URL", "http://127.0.0.1:8010"),
 		VoiceprintThreshold:  getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.8),
 		EnrollMinDurationMS:  int64(getenvInt("ZW_ENROLL_MIN_DURATION_MS", 3000)),
+		NameInferWindowMin:   getenvInt("ZW_NAME_INFER_WINDOW_MIN", 10),
+		NameInferMaxSegments: getenvInt("ZW_NAME_INFER_MAX_SEGMENTS", 400),
 	}, nil
 }
 

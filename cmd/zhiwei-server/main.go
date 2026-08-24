@@ -26,6 +26,9 @@ import (
 // （如 extraction_v1），运行时从文件名推导并写进 job.trace。
 const promptPath = "prompts/extraction_v3.md"
 
+// nameInferPromptPath 说话人名字推断 prompt（speakername stage 用，版本号见文件名）。
+const nameInferPromptPath = "prompts/speaker_naming_v1.md"
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -58,6 +61,7 @@ func main() {
 	memoryTopics := &repo.MemoryTopicRepo{DB: db}
 	todoTopics := &repo.TodoTopicRepo{DB: db}
 	speakers := &repo.SpeakerRepo{DB: db}
+	nameCandidates := &repo.SpeakerNameCandidateRepo{DB: db}
 
 	// 抽取 prompt（版本化文件，运行时读取；版本号见文件名与文件首行）
 	promptBytes, err := os.ReadFile(promptPath)
@@ -77,6 +81,12 @@ func main() {
 	memoryConsolidateBytes, err := os.ReadFile("prompts/memory_consolidate_v1.md")
 	if err != nil {
 		log.Fatal("读取记忆整理 prompt 失败: ", err)
+	}
+
+	// 说话人名字推断 prompt（版本化文件，speakername stage 用）
+	nameInferBytes, err := os.ReadFile(nameInferPromptPath)
+	if err != nil {
+		log.Fatal("读取名字推断 prompt 失败: ", err)
 	}
 
 	// pipeline 装配：ASR 默认 file（StepFun 异步文件 ASR，原生 diarization + ms 时间戳）。
@@ -114,8 +124,12 @@ func main() {
 		ExtractWindow: cfg.ExtractWindow,
 		Gate:          memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
 		Voiceprint:    voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
+		NameInferPrompt:       string(nameInferBytes),
+		SpeakerNameCandidates: nameCandidates,
+		NameInferWindowMin:    cfg.NameInferWindowMin,
+		NameInferMaxSegments:  cfg.NameInferMaxSegments,
 	})
-	flow := pipeline.Flow{Stages: []string{"asr", "segment", "speaker", "extract"}}
+	flow := pipeline.Flow{Stages: []string{"asr", "segment", "speaker", "speakername", "extract"}}
 	pool := pipeline.NewPool(jobs, flow, stages)
 	pool.OnDone(func(ctx context.Context, sid ids.ID) {
 		_ = sessions.UpdateStatus(ctx, sid, "completed")
