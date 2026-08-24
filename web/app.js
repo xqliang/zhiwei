@@ -720,13 +720,20 @@ const app = createApp({
       // preload="none"：首次未加载 → 先 play 触发加载，等 loadedmetadata 再 seek（切源后立即 seek 会被忽略）
       if (a.readyState >= 1) go();
       else { a.addEventListener('loadedmetadata', go, { once: true }); a.play().catch(() => {}); }
-      a.addEventListener('ended', () => { tlPlayingSegId.value = null; }, { once: true });
+      // 分段播完或文件播完时，复位播放头到 0，确保下次点整段播放从头开始
+      const resetHead = () => { a.currentTime = 0; };
+      a.addEventListener('ended', () => { tlPlayingSegId.value = null; delete a.dataset.end; resetHead(); }, { once: true });
     }
-    // <audio> 的 timeupdate：播到当前段 end_ms 即暂停并复位高亮。
+    // <audio> 的 timeupdate：播到当前段 end_ms 即暂停并复位高亮 + 播放头归零。
     function onTimelineAudioTimeUpdate() {
       const a = tlAudio();
       if (!a || !a.dataset.end) return;
-      if (a.currentTime >= parseFloat(a.dataset.end)) { a.pause(); tlPlayingSegId.value = null; }
+      if (a.currentTime >= parseFloat(a.dataset.end)) {
+        a.pause();
+        tlPlayingSegId.value = null;
+        delete a.dataset.end;
+        a.currentTime = 0; // 复位播放头，确保下次点整段播放从头开始
+      }
     }
 
     // 合并模式：选多段「拆开」的转写 → 一起 PATCH 归到同一说话人（同人统一，纠正 ASR 把一人拆成多 spk）。
