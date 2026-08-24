@@ -30,7 +30,7 @@ type ExtractResult struct {
 // 链路只实现一次。
 //
 // 边界处理：
-//   - session 不存在 → ErrNotFound（API 层映射 404）；
+//   - session 不存在 → ErrNotFound（API 回填端点将其记入批次结果条目；单查接口映射 404）；
 //   - session 无转写（还没跑 ASR / 空录音）或无有效文字 → 返回零值 res 且不报错
 //     （低价值不进抽取，与 pipeline extract stage 一致；回填端点批量重放历史
 //     session 时可安全跳过这类 session，不因个别缺转写而整批失败）。
