@@ -47,6 +47,10 @@ type Fact struct {
 
 var validPlanes = map[string]bool{"attribute": true, "relationship": true}
 
+// validSubjectKinds 是人物指代 Subject.Kind（也用于 Related.Kind）的合法取值。
+// 非法或缺失的指代无法归属到具体人物，直接丢弃该条（宁少勿错）。
+var validSubjectKinds = map[string]bool{"self": true, "speaker": true, "mentioned": true, "relation": true}
+
 var validEpistemic = map[string]bool{
 	"observed": true, "inferred": true, "predicted": true, "suggested": true,
 }
@@ -119,6 +123,9 @@ func ParseFacts(raw string) ([]Fact, error) {
 		if !validPlanes[f.Plane] || !validDirections[f.Direction] {
 			continue
 		}
+		if !validSubjectKinds[f.Subject.Kind] {
+			continue // 主体指代非法/缺失：无法归属，宁少勿错直接丢
+		}
 		if f.EpistemicType == "" {
 			f.EpistemicType = "observed"
 		}
@@ -131,7 +138,8 @@ func ParseFacts(raw string) ([]Fact, error) {
 				continue
 			}
 		case "relationship":
-			if !ValidRelations[f.RelationType] || f.Related.Kind == "" {
+			// 关系对端也须是合法人物指代（成员校验，已含非空判断）
+			if !ValidRelations[f.RelationType] || !validSubjectKinds[f.Related.Kind] {
 				continue
 			}
 		}

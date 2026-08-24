@@ -6,7 +6,7 @@ func TestParseFacts(t *testing.T) {
 	// 正常输出（带 markdown 围栏，容错剥掉）
 	raw := "```json\n{\"facts\":[\n" +
 		"{\"plane\":\"attribute\",\"subject\":{\"kind\":\"self\"},\"attr_key\":\"occupation\"," +
-		"\"value\":\"工程师\",\"confidence\":0.9,\"epistemic_type\":\" observed \",\"block_index\":1},\n" +
+		"\"value\":\"工程师\",\"value_type\":\" text \",\"confidence\":0.9,\"epistemic_type\":\" observed \",\"block_index\":1},\n" +
 		"{\"plane\":\"attribute\",\"subject\":{\"kind\":\"mentioned\",\"name\":\" Alice \"}," +
 		"\"attr_key\":\"occupation\",\"value\":\"医生\",\"confidence\":0.6,\"epistemic_type\":\"observed\",\"block_index\":2},\n" +
 		"{\"plane\":\"relationship\",\"subject\":{\"kind\":\"self\"}," +
@@ -22,7 +22,7 @@ func TestParseFacts(t *testing.T) {
 	f0 := facts[0]
 	if f0.Plane != "attribute" || f0.Subject.Kind != "self" || f0.AttrKey != "occupation" ||
 		f0.Value != "工程师" || f0.Confidence != 0.9 || f0.BlockIndex != 1 ||
-		f0.EpistemicType != "observed" { // 前后空格应被归一化为 "observed"（不被 validEpistemic 拒掉）
+		f0.EpistemicType != "observed" || f0.ValueType != "text" { // 前后空格应被归一化（epistemic/value_type 均 trim）
 		t.Fatalf("fact0 错误: %+v", f0)
 	}
 	// subject/related 的名字应 TrimSpace（否则后续人物归属匹配不上）
@@ -42,13 +42,18 @@ func TestParseFactsDropsInvalid(t *testing.T) {
 		{"plane":"bogus","subject":{"kind":"self"},"attr_key":"city","value":"北京","confidence":0.9},
 		{"plane":"relationship","subject":{"kind":"self"},"related":{"kind":"mentioned","name":"X"},"relation_type":"师徒","confidence":0.9},
 		{"plane":"attribute","subject":{"kind":"self"},"attr_key":"city","value":"北京","confidence":1.7},
-		{"plane":"attribute","subject":{"kind":"self"},"attr_key":"gender","value":"男","confidence":0.9,"epistemic_type":"神谕"}
+		{"plane":"attribute","subject":{"kind":"self"},"attr_key":"gender","value":"男","confidence":0.9,"epistemic_type":"神谕"},
+		{"plane":"attribute","subject":{"kind":"self"},"attr_key":"city","value":"北京","direction":"diagonal","confidence":0.9},
+		{"plane":"relationship","subject":{"kind":"self"},"related":{},"relation_type":"配偶","confidence":0.9},
+		{"plane":"attribute","subject":{"kind":"bogus"},"attr_key":"city","value":"北京","confidence":0.9}
 	]}`
 	facts, err := ParseFacts(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 前 5 条非法被丢弃（空 key/空值/非法 plane/非法关系类型/非法 epistemic）；置信度越界被钳制保留
+	// 除「置信度越界」那条被钳制保留外，其余全部因条目级非法被丢弃：空 key / 空值 /
+	// 非法 plane / 非法关系类型 / 非法 epistemic / 非法 direction / related.kind 空 /
+	// subject.kind 非法。共保留 1 条（confidence 钳制到 1.0）。
 	if len(facts) != 1 {
 		t.Fatalf("应保留 1 条: %+v", facts)
 	}
