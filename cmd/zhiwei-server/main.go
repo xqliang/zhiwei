@@ -16,6 +16,7 @@ import (
 	"zhiwei/internal/ids"
 	"zhiwei/internal/memory"
 	"zhiwei/internal/pipeline"
+	"zhiwei/internal/profile"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
 	"zhiwei/internal/storage"
@@ -59,6 +60,15 @@ func main() {
 	todoTopics := &repo.TodoTopicRepo{DB: db}
 	speakers := &repo.SpeakerRepo{DB: db}
 
+	persons := &repo.PersonRepo{DB: db}
+	personAttrs := &repo.PersonAttributeRepo{DB: db}
+	personRels := &repo.PersonRelationshipRepo{DB: db}
+	personLogs := &repo.PersonChangeLogRepo{DB: db}
+	// 画像回填：owner「我」+ speaker→person（幂等，见 repo.EnsurePersonBootstrap）
+	if err := repo.EnsurePersonBootstrap(context.Background(), persons, speakers); err != nil {
+		log.Fatal("画像 bootstrap 失败: ", err)
+	}
+
 	// 抽取 prompt（版本化文件，运行时读取；版本号见文件名与文件首行）
 	promptBytes, err := os.ReadFile(promptPath)
 	if err != nil {
@@ -78,6 +88,13 @@ func main() {
 	if err != nil {
 		log.Fatal("读取记忆整理 prompt 失败: ", err)
 	}
+
+	// 画像抽取 prompt（版本化文件；版本号见文件名）
+	profilePromptBytes, err := os.ReadFile("prompts/profile_extraction_v1.md")
+	if err != nil {
+		log.Fatal("读取画像抽取 prompt 失败: ", err)
+	}
+	profilePromptVersion := strings.TrimSuffix(filepath.Base("prompts/profile_extraction_v1.md"), ".md")
 
 	// pipeline 装配：ASR 默认 file（StepFun 异步文件 ASR，原生 diarization + ms 时间戳）。
 	// ZW_ASR_PROVIDER=realtime 切回 WebSocket 方案（免 TOS、靠 prompt diarization）。
@@ -104,6 +121,14 @@ func main() {
 	}
 	voiceprintCli := voiceprint.NewClient(cfg.VoiceprintSidecarURL)
 	llm := provider.NewArkLLM(cfg.ARKBaseURL, cfg.ARKAPIKey)
+	profileSvc := &profile.Service{
+		DB: db, Sessions: sessions, Transcripts: transcripts, Memories: memories,
+		Speakers: speakers, Persons: persons, Attributes: personAttrs,
+		Relationships: personRels, ChangeLogs: personLogs,
+		LLM: llm, Model: cfg.LLMFastModel, Prompt: string(profilePromptBytes),
+		PromptVersion: profilePromptVersion,
+		Window:        cfg.ProfileExtractWindow, Gate: profile.GateConfig{AutoConf: cfg.ProfileAutoConfidence},
+	}
 	stages := pipeline.BuildStages(pipeline.StageDeps{
 		Sessions: sessions, Transcripts: transcripts, ASR: asr, DataDir: cfg.DataDir,
 		DB: db, Memories: memories, Todos: todos, Topics: topics,
@@ -114,8 +139,14 @@ func main() {
 		ExtractWindow: cfg.ExtractWindow,
 		Gate:          memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
 		Voiceprint:    voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
+		Profile: profileSvc,
 	})
-	flow := pipeline.Flow{Stages: []string{"asr", "segment", "speaker", "extract"}}
+	// profile stage 按开关追加（ZW_PROFILE_EXTRACT_ENABLED=false 时仅手动+回填端点）
+	stagesList := []string{"asr", "segment", "speaker", "extract"}
+	if cfg.ProfileExtractEnabled {
+		stagesList = append(stagesList, "profile")
+	}
+	flow := pipeline.Flow{Stages: stagesList}
 	pool := pipeline.NewPool(jobs, flow, stages)
 	pool.OnDone(func(ctx context.Context, sid ids.ID) {
 		_ = sessions.UpdateStatus(ctx, sid, "completed")
@@ -148,6 +179,10 @@ func main() {
 	api.RegisterTopic(r, &api.TopicHandler{
 		Topics: topics, Memories: memories, Todos: todos,
 		LLM: llm, LLMModel: cfg.LLMFastModel, ConsolidatePrompt: string(consolidateBytes),
+	})
+	api.RegisterPerson(r, &api.PersonHandler{
+		Persons: persons, Attributes: personAttrs, Relationships: personRels,
+		ChangeLogs: personLogs, Service: profileSvc,
 	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
