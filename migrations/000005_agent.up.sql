@@ -8,7 +8,7 @@ CREATE TABLE agent_conversation (
   user_id        BIGINT NOT NULL DEFAULT 1,
   title          VARCHAR(256) NOT NULL DEFAULT '',
   dsh_session_id VARCHAR(64) NOT NULL,
-  status         VARCHAR(16) NOT NULL DEFAULT 'active',
+  status         VARCHAR(16) NOT NULL DEFAULT 'active', -- active|archived
   created_at     DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   last_active_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_user_active (user_id, last_active_at)
@@ -20,12 +20,12 @@ CREATE TABLE agent_proposal (
   user_id         BIGINT NOT NULL DEFAULT 1,
   conversation_id BIGINT NULL,
   message_id      BIGINT NULL,
-  kind            VARCHAR(32) NOT NULL,
-  target_kind     VARCHAR(16) NOT NULL,
+  kind            VARCHAR(32) NOT NULL, -- memory_update|memory_dismiss|topic_rename|topic_confirm|topic_dismiss|todo_create|todo_status
+  target_kind     VARCHAR(16) NOT NULL, -- memory|topic|todo
   target_id       BIGINT NULL,
   payload         JSON NOT NULL,
   rationale       TEXT NOT NULL,
-  status          VARCHAR(16) NOT NULL DEFAULT 'pending',
+  status          VARCHAR(16) NOT NULL DEFAULT 'pending', -- pending|applied|dismissed|expired
   applied_ref     BIGINT NULL,
   created_at      DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   resolved_at     DATETIME(3) NULL,
@@ -57,7 +57,7 @@ CREATE TABLE topic_status (
 
 -- 扩展现有 agent_message（原列：id,user_id,role,content,citations,created_at）。
 ALTER TABLE agent_message ADD COLUMN conversation_id BIGINT NULL AFTER user_id;
-ALTER TABLE agent_message ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'text' AFTER role;
+ALTER TABLE agent_message ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'text' AFTER role; -- text|tool_call|tool_result|card
 ALTER TABLE agent_message ADD COLUMN tool_payload JSON NULL AFTER citations;
 ALTER TABLE agent_message ADD COLUMN dsh_seq INT NULL AFTER tool_payload;
 ALTER TABLE agent_message ADD KEY idx_am_conversation (conversation_id, id);
