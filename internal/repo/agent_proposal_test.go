@@ -52,14 +52,18 @@ func TestAgentProposalCRUDAndResolve(t *testing.T) {
 	}
 
 	// 非法状态被拒
-	if err := pr.Resolve(ctx, db, p.ID, "confirmed", nil); err == nil {
+	if _, err := pr.Resolve(ctx, db, p.ID, "confirmed", nil); err == nil {
 		t.Error("Resolve 非法状态应报错")
 	}
 
 	// 合法：applied + 回填 applied_ref
 	ref := ids.New()
-	if err := pr.Resolve(ctx, db, p.ID, "applied", &ref); err != nil {
+	applied, err := pr.Resolve(ctx, db, p.ID, "applied", &ref)
+	if err != nil {
 		t.Fatalf("Resolve applied: %v", err)
+	}
+	if !applied {
+		t.Error("首次 applied 应返回 true")
 	}
 	got, err := pr.Get(ctx, p.ID)
 	if err != nil {
@@ -73,6 +77,12 @@ func TestAgentProposalCRUDAndResolve(t *testing.T) {
 	}
 	if got.ResolvedAt == nil {
 		t.Error("resolved_at 未设置")
+	}
+
+	// apply-once：已 applied 的提议再 resolve 应返回 (false, nil)（CAS 未命中）
+	again, err := pr.Resolve(ctx, db, p.ID, "dismissed", nil)
+	if err != nil || again {
+		t.Errorf("已终态提议再 resolve 应为 (false,nil), got (%v,%v)", again, err)
 	}
 
 	// applied 后不再出现在 pending

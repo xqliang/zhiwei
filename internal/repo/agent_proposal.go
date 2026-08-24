@@ -78,18 +78,26 @@ ORDER BY id DESC LIMIT 200`, userID)
 // Resolve 把 pending 提议置为终态（applied/dismissed/expired），设 resolved_at；
 // applied 时回填 appliedRef。收 ExecerContext：确认端点会在「落库到
 // memory/topic/todo」的同一事务内调用（事务外调用传 r.DB）。
-// 仅对仍处 pending 的行生效（幂等：重复 resolve 已终态行不改动）。
-func (r *AgentProposalRepo) Resolve(ctx context.Context, ext ExecerContext, id ids.ID, status string, appliedRef *ids.ID) error {
+// 返回 (true,nil) 表示本次确实把一条 pending 行转为终态；(false,nil) 表示该行
+// 已非 pending（并发确认/重复确认的输方）——调用方据此回滚其领域写入，保证 apply-once。
+func (r *AgentProposalRepo) Resolve(ctx context.Context, ext ExecerContext, id ids.ID, status string, appliedRef *ids.ID) (bool, error) {
 	if status == "pending" || !ValidProposalStatus(status) {
-		return fmt.Errorf("非法提议终态: %q", status)
+		return false, fmt.Errorf("非法提议终态: %q", status)
 	}
 	var ref any
 	if appliedRef != nil {
 		ref = appliedRef.Int64()
 	}
-	_, err := ext.ExecContext(ctx, `
+	res, err := ext.ExecContext(ctx, `
 UPDATE agent_proposal
 SET status = ?, applied_ref = ?, resolved_at = CURRENT_TIMESTAMP(3)
 WHERE id = ? AND status = 'pending'`, status, ref, id.Int64())
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }

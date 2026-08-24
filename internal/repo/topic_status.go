@@ -29,9 +29,13 @@ func (r *TopicStatusRepo) Insert(ctx context.Context, userID int64, topicID ids.
 	if userID == 0 {
 		userID = 1
 	}
+	var c any
+	if len(content) > 0 {
+		c = []byte(content)
+	}
 	_, err := r.DB.ExecContext(ctx, `
 INSERT INTO topic_status (id, user_id, topic_id, content)
-VALUES (?, ?, ?, ?)`, ids.New().Int64(), userID, topicID.Int64(), []byte(content))
+VALUES (?, ?, ?, ?)`, ids.New().Int64(), userID, topicID.Int64(), c)
 	return err
 }
 

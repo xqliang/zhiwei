@@ -76,3 +76,25 @@ func TestReviewGetDailyMissing(t *testing.T) {
 		t.Errorf("不存在的日报应返回 nil, got %+v", got)
 	}
 }
+
+// TestReviewGetDailyNonMidnight：带时分秒的时间也应命中当天日报（DATE(?) 截断）。
+func TestReviewGetDailyNonMidnight(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := &ReviewRepo{DB: db}
+	ctx := t.Context()
+	day := time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC)
+	if err := rr.UpsertDaily(ctx, 1, day, json.RawMessage(`{"headline":"x"}`), "ready"); err != nil {
+		t.Fatalf("UpsertDaily: %v", err)
+	}
+	// 用带时分秒的同一天时间查询
+	got, err := rr.GetDaily(ctx, 1, time.Date(2026, 8, 25, 14, 35, 22, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("GetDaily: %v", err)
+	}
+	if got == nil {
+		t.Fatal("带时分秒的同日查询应命中，却返回 nil")
+	}
+}
