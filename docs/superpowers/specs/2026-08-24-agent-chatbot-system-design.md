@@ -55,7 +55,7 @@
 ### 3.1 组件拓扑（两条正交接缝）
 
 ```
-┌──────────────┐   HTTP + SSE    ┌───────────────────────────┐
+┌──────────────┐   HTTP + WS     ┌───────────────────────────┐
 │   Vue3 前端   │ ◀────────────▶ │        Go 后端 (zhiwei)     │
 │ 问知微 / 报告  │   /api/agent/*  │                            │
 │  卡片渲染     │   /api/reviews/* │  internal/agent            │
@@ -79,10 +79,10 @@
 ### 3.2 一次对话轮次（chat turn）时序
 
 ```
-用户在「问知微」输入 → 前端 POST /api/agent/conversations/{cid}/messages {text}
+用户在「问知微」输入 → 前端经 WS 发 {type:user_message, text}（连 /api/agent/conversations/{cid}/ws）
   → Go：① 建 user agent_message；② 组装上下文头（日期/owner概要/最近N轮摘要/检索种子）
         ③ 向 dsh 发 session/prompt {sessionId=cid, contentBlocks:[上下文头, 用户文本]}
-  → 前端另开 GET /api/agent/conversations/{cid}/stream (SSE)  ← 事件下行
+  →（事件经同一条 WS 下推前端，无需另开连接）
   → dsh agent 循环：
         - assistant/chunk  ── Go 转发 → 前端流式渲染助手气泡（markdown）
         - tool/call {name, args}  ── agent 调 mcp__zhiwei__search_memory 等
@@ -90,7 +90,7 @@
         - tool/result {message}   ── Go 转发 → 前端按 name 映射到卡片组件渲染
         - （写类工具 tool/result 携带 proposal → 前端渲染「确认卡」）
         - assistant/message       ── Go 落库 assistant agent_message + citations + tool_calls
-        - turn/end {reason} / session.status: idle  ── Go 关闭本轮，SSE 发 done
+        - turn/end {reason} / session.status: idle  ── Go 关闭本轮，WS 发 done 帧
   → 用户点确认卡[确认] → 前端 POST /api/agent/proposals/{pid}/confirm
         → Go 经现有 repo 落库（memory/topic/todo 更新）→ 返回新状态 → 卡片转「已确认」
 ```
@@ -142,19 +142,19 @@ plugins:
 
 | dsh `session.event` 类型 | Go / 前端处理 |
 |---|---|
-| `assistant/chunk {chunk}` | SSE 转发 → 前端流式追加助手气泡（`text-delta`/`reasoning-delta`） |
+| `assistant/chunk {chunk}` | WS 推送 → 前端流式追加助手气泡（`text-delta`/`reasoning-delta`） |
 | `assistant/message {message, usage}` | 落库 assistant `agent_message`；抽取 citations（§8.2）与 tool_calls |
-| `tool/call {callId, name, arguments}` | SSE 转发 → 前端起一张「工具进行中」卡（按 name 选组件） |
-| `tool/result {message, error?}` | SSE 转发 → 前端把结构化结果填进对应卡；写类工具结果含 `proposal` → 确认卡 |
+| `tool/call {callId, name, arguments}` | WS 推送 → 前端起一张「工具进行中」卡（按 name 选组件） |
+| `tool/result {message, error?}` | WS 推送 → 前端把结构化结果填进对应卡；写类工具结果含 `proposal` → 确认卡 |
 | `turn/end {reason}` | reason∈{completed,aborted,blocked,max-tokens,error,interrupted}；异常 reason → 错误卡 |
-| `session.status: idle` | 本轮结束，SSE `event: done` |
+| `session.status: idle` | 本轮结束，WS 发 `done` 帧 |
 | `subagent.started/finished` | P1 忽略（如启用 dsh 子代理，后续展示） |
 
 ### 4.4 已知 wire 限制与对策
 
 | 限制 | 对策（P1） |
 |---|---|
-| 无 `cancel`：不能中止进行中的一轮 | 「停止」= 前端断开 SSE + Go kill 并重启边车（粗粒度；后续可上 ACP 的 cancel 或 wrapper） |
+| 无 `cancel`：不能中止进行中的一轮 | 「停止」= 前端断开 WS + Go kill 并重启边车（粗粒度；后续可上 ACP 的 cancel 或 wrapper） |
 | 无 `seed`/`resume`（wire 层）：不能塞历史 | 我方存历史（§6）；重启用上下文头重播（§3.3） |
 | system prompt 进程级、非每请求 | 单用户 MVP 一个 persona（`DSH_SYSTEM_PROMPT`）即可；多用户 / 多人设留后续（presets 或 wrapper） |
 | 检索上下文无每请求字段 | 注入进 `session/prompt` 的 `contentBlocks`（作为用户消息前的上下文块，逐字送达） |
@@ -171,10 +171,10 @@ plugins:
 | `runtime.go` | spawn/监管 dsh 子进程；JSON-RPC 编解码；`initialize`/`session/prompt`/`shutdown`；事件分发 | `os/exec`、config |
 | `runtime_fake.go`（test） | 脚本化事件的假运行时，单测编排不需真 dsh | — |
 | `mcp_server.go` | `/internal/mcp` MCP-over-HTTP 端点；注册 `mcp__zhiwei__*` 工具（§7） | repo、review |
-| `orchestrator.go` | 一轮对话编排：上下文头组装、发 prompt、消费事件、落库、SSE 广播 | runtime、repo |
+| `orchestrator.go` | 一轮对话编排：上下文头组装、发 prompt、消费事件、落库、WS 广播 | runtime、repo |
 | `context.go` | 上下文头构造（日期 / owner 概要 / 最近 N 轮摘要 / 检索种子） | repo |
 | `citations.go` | 从 assistant 消息 / 工具结果收集引用；剔除指向不存在 memory/session 的引用（防幻觉） | repo |
-| `handlers.go` | HTTP：`/api/agent/*`（含 SSE 流、proposal 确认） | orchestrator |
+| `handlers.go` | HTTP：`/api/agent/*`（含 WS 流、proposal 确认） | orchestrator |
 
 - `AgentRuntime` 接口：`Initialize(ctx, cfg) / Prompt(ctx, sessionID, blocks) (<-chan Event, error) / Shutdown()`；`runtime.go` 与 `runtime_fake.go` 两实现（D7）。
 
@@ -344,10 +344,10 @@ CREATE TABLE topic_status (
 
 ### 9.3 前端落点（`web/`，Vue3 CDN 无构建）
 
-- 新 tab **「问知微」**：消息流（用户气泡 / 助手 markdown / 内联工具卡）+ 输入框 + SSE 流式；复用现有设计系统（暖白纸 + 靛蓝、卡片 / 徽标）。
+- 新 tab **「问知微」**：消息流（用户气泡 / 助手 markdown / 内联工具卡）+ 输入框 + WS 流式；复用现有设计系统（暖白纸 + 靛蓝、卡片 / 徽标）。
 - 新 tab **「报告」**：日报 / 周报切换，报告卡；topic 状态卡在 topic 详情页可触发。
 - 图表：无构建环境用**内联 SVG**（柱：topic 分布；折线：趋势）或 vendor 一个极小图表库；走 `dataviz` skill 定色板与规范。
-- SSE 客户端 + 卡片组件加进 `web/app.js`；`index.html` 视需要 vendor 图表库与 markdown 渲染器（皆放 `web/vendor/`，无构建）。
+- WS 客户端 + 卡片组件加进 `web/app.js`；`index.html` 视需要 vendor 图表库与 markdown 渲染器（皆放 `web/vendor/`，无构建）。
 
 ---
 
@@ -399,8 +399,8 @@ CREATE TABLE topic_status (
 POST   /api/agent/conversations                      新建对话
 GET    /api/agent/conversations                       对话列表
 GET    /api/agent/conversations/{cid}                 对话历史（agent_message）
-POST   /api/agent/conversations/{cid}/messages        发用户消息（触发一轮）
-GET    /api/agent/conversations/{cid}/stream          事件下行（SSE）
+POST   /api/agent/conversations/{cid}/messages        发用户消息（也可走 WS 上行）
+GET    /api/agent/conversations/{cid}/ws              WebSocket：上行发消息 + 下行流式事件
 POST   /api/agent/proposals/{pid}/confirm|dismiss     确认/放弃一处修改提议
 
 # 报告
@@ -441,7 +441,7 @@ persona / prompt 走版本化文件：`prompts/agent_persona_v1.md`、`prompts/c
 沿用 `make test`（mock provider，无 MySQL）+ `make test-integration`（真 MySQL）+ `make spike-*`（真 LLM，手动不进 CI）：
 
 - **纯逻辑单测**：上下文头组装、citation 校验、检索打分、proposal 闸门（pending→applied/dismissed/幂等）、对话抽取 dedup。
-- **`runtime_fake` 编排单测**：脚本化 dsh 事件（chunk/tool_call/tool_result/idle），验证落库 + SSE 广播 + 卡片映射数据，不需真 dsh。
+- **`runtime_fake` 编排单测**：脚本化 dsh 事件（chunk/tool_call/tool_result/idle），验证落库 + WS 广播 + 卡片映射数据，不需真 dsh。
 - **MCP 工具单测**：工具即 Go 函数覆 repo，验证读结果 schema、写工具只建 proposal 不 mutate。
 - **repo 单测**（integration）：agent_conversation/agent_proposal/weekly_review/topic_status CRUD、confirm 事务。
 - **review 单测**：mock LLM 返回结构化报告，验证 daily/weekly/topic_status schema 与持久化。
