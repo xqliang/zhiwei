@@ -14,6 +14,7 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/memory"
+	"zhiwei/internal/profile"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
 	"zhiwei/internal/voiceprint"
@@ -44,6 +45,9 @@ type StageDeps struct {
 	Voiceprint          voiceprint.Client
 	Speakers            *repo.SpeakerRepo
 	VoiceprintThreshold float64 // ZW_VOICEPRINT_THRESHOLD，0 表示用默认 0.5
+
+	// ---- profile stage（用户画像 P1）----
+	Profile *profile.Service // 画像编排服务（ExtractSession / 手动 CRUD / 确认队列）
 }
 
 // BuildStages 返回 stage 名 -> handler 的映射，供 Pool 装配。
@@ -53,6 +57,7 @@ func BuildStages(d StageDeps) map[string]Handler {
 		"segment": stageSegment(d),
 		"speaker": stageSpeaker(d),
 		"extract": stageExtract(d),
+		"profile": stageProfile(d),
 	}
 }
 
