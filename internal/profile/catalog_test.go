@@ -23,17 +23,15 @@ func TestCatalogDefs(t *testing.T) {
 	if u.Group != "其他" || u.ValueType != "text" || u.Cardinality != CardinalitySingle {
 		t.Fatalf("未知 key 默认定义错误: %+v", u)
 	}
-	// 分组顺序：GroupOrder 覆盖所有目录里出现过的分组
+	// 分组顺序：目录里出现过的每个分组都必须在 GroupOrder 中
 	seen := map[string]bool{}
 	for _, d := range All() {
 		seen[d.Group] = true
 	}
 	for _, g := range GroupOrder {
-		if g != "其他" {
-			delete(seen, g)
-		}
+		delete(seen, g)
 	}
-	if len(seen) > 1 { // 只允许剩「其他」（目录内不显式用它）
+	if len(seen) > 0 { // 删掉 GroupOrder 里的全部分组后应无残留
 		t.Fatalf("有分组未列入 GroupOrder: %v", seen)
 	}
 	// key 不重复

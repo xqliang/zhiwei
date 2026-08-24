@@ -23,6 +23,15 @@ const (
 	CardinalityList   = "list"
 )
 
+// ValueType 取值（值的类型；列表与否看 Cardinality）。
+const (
+	ValueTypeText   = "text"
+	ValueTypeEnum   = "enum"
+	ValueTypeBool   = "bool"
+	ValueTypeDate   = "date"
+	ValueTypeNumber = "number"
+)
+
 func def(key, label, group, vt, card string, enum ...string) AttrDef {
 	return AttrDef{Key: key, Label: label, Group: group, ValueType: vt, EnumOptions: enum, Cardinality: card}
 }
@@ -30,73 +39,73 @@ func def(key, label, group, vt, card string, enum ...string) AttrDef {
 // catalog 是已知属性全集（spec §4.9 的字段映射）。
 var catalog = []AttrDef{
 	// ---- 基本 ----
-	def("aliases", "别名", "基本", "text", CardinalityList),
-	def("birthday", "生日", "基本", "date", CardinalitySingle),
-	def("gender", "性别", "基本", "enum", CardinalitySingle, "男", "女", "其他"),
-	def("zodiac", "星座", "基本", "enum", CardinalitySingle,
+	def("aliases", "别名", "基本", ValueTypeText, CardinalityList),
+	def("birthday", "生日", "基本", ValueTypeDate, CardinalitySingle),
+	def("gender", "性别", "基本", ValueTypeEnum, CardinalitySingle, "男", "女", "其他"),
+	def("zodiac", "星座", "基本", ValueTypeEnum, CardinalitySingle,
 		"白羊座", "金牛座", "双子座", "巨蟹座", "狮子座", "处女座",
 		"天秤座", "天蝎座", "射手座", "摩羯座", "水瓶座", "双鱼座"),
-	def("mbti", "MBTI", "基本", "enum", CardinalitySingle,
+	def("mbti", "MBTI", "基本", ValueTypeEnum, CardinalitySingle,
 		"INTJ", "INTP", "ENTJ", "ENTP", "INFJ", "INFP", "ENFJ", "ENFP",
 		"ISTJ", "ISFJ", "ESTJ", "ESFJ", "ISTP", "ISFP", "ESTP", "ESFP"),
-	def("education", "学历", "基本", "enum", CardinalitySingle, "高中及以下", "大专", "本科", "硕士", "博士"),
-	def("school", "学校", "基本", "text", CardinalityList),
-	def("city", "城市", "基本", "text", CardinalitySingle),
-	def("address", "住址", "基本", "text", CardinalitySingle),
-	def("phone", "手机号", "基本", "text", CardinalitySingle),
+	def("education", "学历", "基本", ValueTypeEnum, CardinalitySingle, "高中及以下", "大专", "本科", "硕士", "博士"),
+	def("school", "学校", "基本", ValueTypeText, CardinalityList),
+	def("city", "城市", "基本", ValueTypeText, CardinalitySingle),
+	def("address", "住址", "基本", ValueTypeText, CardinalitySingle),
+	def("phone", "手机号", "基本", ValueTypeText, CardinalitySingle),
 
 	// ---- 工作 ----
-	def("occupation", "职业", "工作", "text", CardinalitySingle),
-	def("industry", "所属行业", "工作", "text", CardinalitySingle),
-	def("office_location", "办公地点", "工作", "text", CardinalitySingle),
-	def("work_start_time", "上班时间", "工作", "text", CardinalitySingle),
-	def("work_end_time", "下班时间", "工作", "text", CardinalitySingle),
-	def("commute_mode", "通勤方式", "工作", "enum", CardinalitySingle,
+	def("occupation", "职业", "工作", ValueTypeText, CardinalitySingle),
+	def("industry", "所属行业", "工作", ValueTypeText, CardinalitySingle),
+	def("office_location", "办公地点", "工作", ValueTypeText, CardinalitySingle),
+	def("work_start_time", "上班时间", "工作", ValueTypeText, CardinalitySingle),
+	def("work_end_time", "下班时间", "工作", ValueTypeText, CardinalitySingle),
+	def("commute_mode", "通勤方式", "工作", ValueTypeEnum, CardinalitySingle,
 		"步行", "自行车", "电动车", "地铁", "公交", "开车", "打车", "班车", "火车", "高铁", "飞机"),
-	def("often_travel", "是否经常出差", "工作", "bool", CardinalitySingle),
-	def("current_projects", "正在进行的项目", "工作", "text", CardinalityList),
+	def("often_travel", "是否经常出差", "工作", ValueTypeBool, CardinalitySingle),
+	def("current_projects", "正在进行的项目", "工作", ValueTypeText, CardinalityList),
 
 	// ---- 生活习惯 ----
-	def("meal_time", "吃饭时间", "生活习惯", "text", CardinalitySingle),
-	def("cuisine", "喜欢的菜系", "生活习惯", "enum", CardinalityList,
+	def("meal_time", "吃饭时间", "生活习惯", ValueTypeText, CardinalitySingle),
+	def("cuisine", "喜欢的菜系", "生活习惯", ValueTypeEnum, CardinalityList,
 		"川菜", "粤菜", "湘菜", "鲁菜", "苏菜", "浙菜", "闽菜", "徽菜",
 		"火锅", "烧烤", "西餐", "日料", "韩餐", "家常菜"),
-	def("eats_spicy", "是否吃辣", "生活习惯", "bool", CardinalitySingle),
-	def("eats_numbing", "是否吃麻", "生活习惯", "bool", CardinalitySingle),
-	def("smokes", "是否吸烟", "生活习惯", "bool", CardinalitySingle),
-	def("drinks", "是否喝酒", "生活习惯", "bool", CardinalitySingle),
-	def("wears_makeup", "是否化妆", "生活习惯", "bool", CardinalitySingle),
-	def("perfume", "香水", "生活习惯", "text", CardinalitySingle),
+	def("eats_spicy", "是否吃辣", "生活习惯", ValueTypeBool, CardinalitySingle),
+	def("eats_numbing", "是否吃麻", "生活习惯", ValueTypeBool, CardinalitySingle),
+	def("smokes", "是否吸烟", "生活习惯", ValueTypeBool, CardinalitySingle),
+	def("drinks", "是否喝酒", "生活习惯", ValueTypeBool, CardinalitySingle),
+	def("wears_makeup", "是否化妆", "生活习惯", ValueTypeBool, CardinalitySingle),
+	def("perfume", "香水", "生活习惯", ValueTypeText, CardinalitySingle),
 
 	// ---- 兴趣 ----
-	def("hobbies", "爱好", "兴趣", "text", CardinalityList),
-	def("skills", "学的技能", "兴趣", "text", CardinalityList),
-	def("reading_now", "正在看的书", "兴趣", "text", CardinalityList),
-	def("books_read", "看过的书", "兴趣", "text", CardinalityList),
-	def("movies_watched", "看过的影视", "兴趣", "text", CardinalityList),
-	def("music_listened", "听过的音乐", "兴趣", "text", CardinalityList),
-	def("games_played", "玩过的游戏", "兴趣", "text", CardinalityList),
-	def("fav_celebrities", "喜欢的明星", "兴趣", "text", CardinalityList),
-	def("fav_anime", "喜欢的动漫", "兴趣", "text", CardinalityList),
-	def("fav_movie_genres", "喜欢的电影类型", "兴趣", "text", CardinalityList),
-	def("catchphrases", "口头禅", "兴趣", "text", CardinalityList),
-	def("invests_stocks", "是否炒股", "兴趣", "bool", CardinalitySingle),
+	def("hobbies", "爱好", "兴趣", ValueTypeText, CardinalityList),
+	def("skills", "学的技能", "兴趣", ValueTypeText, CardinalityList),
+	def("reading_now", "正在看的书", "兴趣", ValueTypeText, CardinalityList),
+	def("books_read", "看过的书", "兴趣", ValueTypeText, CardinalityList),
+	def("movies_watched", "看过的影视", "兴趣", ValueTypeText, CardinalityList),
+	def("music_listened", "听过的音乐", "兴趣", ValueTypeText, CardinalityList),
+	def("games_played", "玩过的游戏", "兴趣", ValueTypeText, CardinalityList),
+	def("fav_celebrities", "喜欢的明星", "兴趣", ValueTypeText, CardinalityList),
+	def("fav_anime", "喜欢的动漫", "兴趣", ValueTypeText, CardinalityList),
+	def("fav_movie_genres", "喜欢的电影类型", "兴趣", ValueTypeText, CardinalityList),
+	def("catchphrases", "口头禅", "兴趣", ValueTypeText, CardinalityList),
+	def("invests_stocks", "是否炒股", "兴趣", ValueTypeBool, CardinalitySingle),
 
 	// ---- 出行物品 ----
-	def("cities_visited", "去过的城市", "出行物品", "text", CardinalityList),
-	def("places_traveled", "旅游过的地方", "出行物品", "text", CardinalityList),
-	def("has_car", "是否有车", "出行物品", "bool", CardinalitySingle),
-	def("car_brand", "车品牌", "出行物品", "text", CardinalitySingle),
-	def("phone_brand", "手机品牌", "出行物品", "text", CardinalitySingle),
+	def("cities_visited", "去过的城市", "出行物品", ValueTypeText, CardinalityList),
+	def("places_traveled", "旅游过的地方", "出行物品", ValueTypeText, CardinalityList),
+	def("has_car", "是否有车", "出行物品", ValueTypeBool, CardinalitySingle),
+	def("car_brand", "车品牌", "出行物品", ValueTypeText, CardinalitySingle),
+	def("phone_brand", "手机品牌", "出行物品", ValueTypeText, CardinalitySingle),
 
 	// ---- 关注性格 ----
-	def("recent_concerns", "最近关心的事情", "关注性格", "text", CardinalityList),
-	def("attention_topics", "关注领域", "关注性格", "enum", CardinalityList,
+	def("recent_concerns", "最近关心的事情", "关注性格", ValueTypeText, CardinalityList),
+	def("attention_topics", "关注领域", "关注性格", ValueTypeEnum, CardinalityList,
 		"政治", "军事", "体育", "三农", "科技", "财经", "娱乐", "教育", "健康"),
-	def("personality", "性格", "关注性格", "text", CardinalitySingle),
+	def("personality", "性格", "关注性格", ValueTypeText, CardinalitySingle),
 
 	// ---- 健康（P3 深化，先占位属性） ----
-	def("chronic_diseases", "慢性病", "健康", "text", CardinalityList),
+	def("chronic_diseases", "慢性病", "健康", ValueTypeText, CardinalityList),
 }
 
 var catalogMap = func() map[string]AttrDef {
@@ -112,7 +121,7 @@ func Def(key string) AttrDef {
 	if d, ok := catalogMap[key]; ok {
 		return d
 	}
-	return AttrDef{Key: key, Label: key, Group: "其他", ValueType: "text", Cardinality: CardinalitySingle}
+	return AttrDef{Key: key, Label: key, Group: "其他", ValueType: ValueTypeText, Cardinality: CardinalitySingle}
 }
 
 // IsList 判断 key 是否列表型属性。
