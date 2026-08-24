@@ -138,11 +138,13 @@ func getenvFloat(key string, def float64) float64 {
 	return def
 }
 
-// getenvBool 读取布尔环境变量；"false"/"0" 视为 false，其余非空视为 true，未设置返回默认值。
+// getenvBool 读取布尔环境变量；用 strconv.ParseBool 解析（接受 1/t/T/TRUE/true/False 等），
+// 解析失败或未设置返回默认值——与 getenvInt/getenvFloat 的回退语义一致。
 func getenvBool(key string, def bool) bool {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
 	}
-	return v != "false" && v != "0"
+	return def
 }

@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("ARK_API_KEY", "test-key")
@@ -94,6 +97,9 @@ func TestAgentConfigDefaults(t *testing.T) {
 	if cfg.AgentCordisConfig != "services/agent-sidecar/cordis.yml" {
 		t.Errorf("AgentCordisConfig 默认错误: %q", cfg.AgentCordisConfig)
 	}
+	if cfg.AgentSidecarCmd != "node services/agent-sidecar/node_modules/.bin/dsh-jsonrpc-agent" {
+		t.Errorf("AgentSidecarCmd 默认错误: %q", cfg.AgentSidecarCmd)
+	}
 	if cfg.AgentMCPURL != "http://127.0.0.1:8080/internal/mcp" {
 		t.Errorf("AgentMCPURL 默认错误: %q", cfg.AgentMCPURL)
 	}
@@ -126,4 +132,40 @@ func TestAgentConfigOverride(t *testing.T) {
 	if cfg.AgentRetrieveTopK != 20 {
 		t.Errorf("AgentRetrieveTopK 覆盖失败: %d", cfg.AgentRetrieveTopK)
 	}
+}
+
+func TestGetenvBool(t *testing.T) {
+	t.Run("unset_returns_default", func(t *testing.T) {
+		os.Unsetenv("ZW_TEST_BOOL")
+		if !getenvBool("ZW_TEST_BOOL", true) {
+			t.Error("未设置应返回 def=true")
+		}
+		if getenvBool("ZW_TEST_BOOL", false) {
+			t.Error("未设置应返回 def=false")
+		}
+	})
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"true", true}, {"false", false}, {"1", true}, {"0", false},
+		{"True", true}, {"False", false}, {"TRUE", true},
+	}
+	for _, c := range cases {
+		t.Run(c.val, func(t *testing.T) {
+			t.Setenv("ZW_TEST_BOOL", c.val)
+			if got := getenvBool("ZW_TEST_BOOL", !c.want); got != c.want {
+				t.Errorf("getenvBool(%q) = %v, want %v", c.val, got, c.want)
+			}
+		})
+	}
+	t.Run("garbage_returns_default", func(t *testing.T) {
+		t.Setenv("ZW_TEST_BOOL", "notabool")
+		if !getenvBool("ZW_TEST_BOOL", true) {
+			t.Error("无法解析应回退 def=true")
+		}
+		if getenvBool("ZW_TEST_BOOL", false) {
+			t.Error("无法解析应回退 def=false")
+		}
+	})
 }
