@@ -45,6 +45,16 @@ type Config struct {
 	VoiceprintSidecarURL string  // 声纹 sidecar 地址（http://127.0.0.1:8010）
 	VoiceprintThreshold  float64 // 1:N 余弦匹配阈值，低于则视为未命中→自动登记
 	EnrollMinDurationMS  int64   // 从转写段音频录入声纹的最小时长（毫秒，默认 3000=3s；WeSpeaker LM 对 >3s 更稳）
+
+	// ---- Agent / Chatbot（P1；设计见 agent-chatbot spec §14）----
+	AgentEnabled      bool   // ZW_AGENT_ENABLED，关掉则不 spawn dsh（报告等仍可用）
+	AgentModel        string // ZW_AGENT_MODEL：Ark 上的 DeepSeek 模型/endpoint id（agent 与报告/抽取共用）
+	AgentSidecarCmd   string // ZW_AGENT_SIDECAR_CMD：dsh 边车启动命令
+	AgentCordisConfig string // ZW_AGENT_CORDIS_CONFIG：cordis.yml 路径
+	AgentMCPURL       string // ZW_AGENT_MCP_URL：供 cordis.yml 连回的 MCP-HTTP 地址
+	DSHSessionRoot    string // DSH_SESSION_ROOT：dsh 内部会话日志目录
+	AgentRetrieveTopK int    // ZW_AGENT_RETRIEVE_TOPK：上下文头检索种子条数
+	ReviewDailyCron   string // ZW_REVIEW_DAILY_CRON：日报定时
 }
 
 func getenv(k, def string) string {
@@ -95,6 +105,16 @@ func Load() (*Config, error) {
 		VoiceprintSidecarURL: getenv("ZW_VOICEPRINT_SIDECAR_URL", "http://127.0.0.1:8010"),
 		VoiceprintThreshold:  getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.5),
 		EnrollMinDurationMS:  int64(getenvInt("ZW_ENROLL_MIN_DURATION_MS", 3000)),
+
+		// ---- Agent / Chatbot ----
+		AgentEnabled:      getenvBool("ZW_AGENT_ENABLED", true),
+		AgentModel:        getenv("ZW_AGENT_MODEL", ""),
+		AgentSidecarCmd:   getenv("ZW_AGENT_SIDECAR_CMD", "node services/agent-sidecar/node_modules/.bin/dsh-jsonrpc-agent"),
+		AgentCordisConfig: getenv("ZW_AGENT_CORDIS_CONFIG", "services/agent-sidecar/cordis.yml"),
+		AgentMCPURL:       getenv("ZW_AGENT_MCP_URL", "http://127.0.0.1:8080/internal/mcp"),
+		DSHSessionRoot:    getenv("DSH_SESSION_ROOT", "./data/dsh-sessions"),
+		AgentRetrieveTopK: getenvInt("ZW_AGENT_RETRIEVE_TOPK", 10),
+		ReviewDailyCron:   getenv("ZW_REVIEW_DAILY_CRON", "0 22 * * *"),
 	}, nil
 }
 
@@ -116,4 +136,13 @@ func getenvFloat(key string, def float64) float64 {
 		}
 	}
 	return def
+}
+
+// getenvBool 读取布尔环境变量；"false"/"0" 视为 false，其余非空视为 true，未设置返回默认值。
+func getenvBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	return v != "false" && v != "0"
 }

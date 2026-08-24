@@ -81,3 +81,49 @@ func TestLoadExtractInvalidFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentConfigDefaults(t *testing.T) {
+	t.Setenv("ARK_API_KEY", "test-key") // Load 要求 ARK_API_KEY
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.AgentEnabled {
+		t.Error("AgentEnabled 默认应为 true")
+	}
+	if cfg.AgentCordisConfig != "services/agent-sidecar/cordis.yml" {
+		t.Errorf("AgentCordisConfig 默认错误: %q", cfg.AgentCordisConfig)
+	}
+	if cfg.AgentMCPURL != "http://127.0.0.1:8080/internal/mcp" {
+		t.Errorf("AgentMCPURL 默认错误: %q", cfg.AgentMCPURL)
+	}
+	if cfg.DSHSessionRoot != "./data/dsh-sessions" {
+		t.Errorf("DSHSessionRoot 默认错误: %q", cfg.DSHSessionRoot)
+	}
+	if cfg.AgentRetrieveTopK != 10 {
+		t.Errorf("AgentRetrieveTopK 默认应为 10, got %d", cfg.AgentRetrieveTopK)
+	}
+	if cfg.ReviewDailyCron != "0 22 * * *" {
+		t.Errorf("ReviewDailyCron 默认错误: %q", cfg.ReviewDailyCron)
+	}
+}
+
+func TestAgentConfigOverride(t *testing.T) {
+	t.Setenv("ARK_API_KEY", "test-key")
+	t.Setenv("ZW_AGENT_ENABLED", "false")
+	t.Setenv("ZW_AGENT_MODEL", "deepseek-v3-250324")
+	t.Setenv("ZW_AGENT_RETRIEVE_TOPK", "20")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentEnabled {
+		t.Error("ZW_AGENT_ENABLED=false 应关闭")
+	}
+	if cfg.AgentModel != "deepseek-v3-250324" {
+		t.Errorf("AgentModel 覆盖失败: %q", cfg.AgentModel)
+	}
+	if cfg.AgentRetrieveTopK != 20 {
+		t.Errorf("AgentRetrieveTopK 覆盖失败: %d", cfg.AgentRetrieveTopK)
+	}
+}
