@@ -227,6 +227,40 @@ func (r *MemoryRepo) ListActive(ctx context.Context, userID int64, limit int) ([
 	return rows, err
 }
 
+// Search 按关键词（title/content LIKE）检索该用户 active 记忆，可选 type 过滤，
+// 按 event_at 倒序。空 query 退化为仅 type 过滤。limit 默认/上限 50。
+// 关键词做 LIKE 转义（% _ \），防止用户词里的通配符改变语义。
+func (r *MemoryRepo) Search(ctx context.Context, userID int64, query, typ string, limit int) ([]Memory, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 50
+	}
+	conds := []string{"user_id = ?", "status = 'active'"}
+	args := []any{userID}
+	if q := strings.TrimSpace(query); q != "" {
+		esc := escapeLike(q)
+		conds = append(conds, "(title LIKE ? OR content LIKE ?)")
+		args = append(args, "%"+esc+"%", "%"+esc+"%")
+	}
+	if typ != "" {
+		conds = append(conds, "type = ?")
+		args = append(args, typ)
+	}
+	args = append(args, limit)
+	var rows []Memory
+	err := r.DB.SelectContext(ctx, &rows, `
+SELECT * FROM memory WHERE `+strings.Join(conds, " AND ")+`
+ORDER BY event_at DESC, id DESC LIMIT ?`, args...)
+	return rows, err
+}
+
+// escapeLike 转义 LIKE 通配符，使用户输入按字面量匹配（配合 SQL 默认 \ 转义符）。
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return s
+}
+
 // ConsolidationReq 是 D2 整理落库请求（用户编辑后的 LLM 提议）。
 type ConsolidationReq struct {
 	Merges      []MemoryMerge      `json:"merges"`
