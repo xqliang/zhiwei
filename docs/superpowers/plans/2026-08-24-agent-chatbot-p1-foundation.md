@@ -139,12 +139,12 @@ DROP TABLE IF EXISTS agent_proposal;
 DROP TABLE IF EXISTS agent_conversation;
 ```
 
-- [ ] **Step 3: 应用迁移验证 SQL 合法**
+- [ ] **Step 3: 在全新测试库验证 SQL 合法**
 
-Run: `make migrate-up`
-Expected: 无报错，输出迁移到 version 5（或 `5/u agent`）。若失败，读报错修 SQL。
+Run: `make init-testdb`（在全新的 `zhiwei_test` 上从头应用全部迁移，含 000005；隔离于共享 dev 库）
+Expected: 无报错，迁移应用到最新版（新建 4 表 + `agent_message` 扩展列均生效）。若失败，读报错修 SQL。
 
-补充验证（可选）：`make migrate-down` 回滚一版再 `make migrate-up`，确认 down/up 均可执行；随后保持在最新版。
+> 不用 `make migrate-up`：它作用于共享 dev 库；若别的并行分支已占用迁移版本 5，golang-migrate 按「版本号」记账会误判 5 已应用而跳过本迁移（见 Plan 头注与 spec §17 的撞号说明）。
 
 - [ ] **Step 4: Commit**
 
