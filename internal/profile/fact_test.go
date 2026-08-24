@@ -6,11 +6,11 @@ func TestParseFacts(t *testing.T) {
 	// 正常输出（带 markdown 围栏，容错剥掉）
 	raw := "```json\n{\"facts\":[\n" +
 		"{\"plane\":\"attribute\",\"subject\":{\"kind\":\"self\"},\"attr_key\":\"occupation\"," +
-		"\"value\":\"工程师\",\"confidence\":0.9,\"epistemic_type\":\"observed\",\"block_index\":1},\n" +
-		"{\"plane\":\"attribute\",\"subject\":{\"kind\":\"mentioned\",\"name\":\"Alice\"}," +
+		"\"value\":\"工程师\",\"confidence\":0.9,\"epistemic_type\":\" observed \",\"block_index\":1},\n" +
+		"{\"plane\":\"attribute\",\"subject\":{\"kind\":\"mentioned\",\"name\":\" Alice \"}," +
 		"\"attr_key\":\"occupation\",\"value\":\"医生\",\"confidence\":0.6,\"epistemic_type\":\"observed\",\"block_index\":2},\n" +
 		"{\"plane\":\"relationship\",\"subject\":{\"kind\":\"self\"}," +
-		"\"related\":{\"kind\":\"mentioned\",\"name\":\"Alice\"},\"relation_type\":\"配偶\"," +
+		"\"related\":{\"kind\":\"mentioned\",\"name\":\" Alice \"},\"relation_type\":\"配偶\"," +
 		"\"label\":\"老婆\",\"confidence\":0.85,\"block_index\":2}\n]}\n```"
 	facts, err := ParseFacts(raw)
 	if err != nil {
@@ -21,8 +21,13 @@ func TestParseFacts(t *testing.T) {
 	}
 	f0 := facts[0]
 	if f0.Plane != "attribute" || f0.Subject.Kind != "self" || f0.AttrKey != "occupation" ||
-		f0.Value != "工程师" || f0.Confidence != 0.9 || f0.BlockIndex != 1 {
+		f0.Value != "工程师" || f0.Confidence != 0.9 || f0.BlockIndex != 1 ||
+		f0.EpistemicType != "observed" { // 前后空格应被归一化为 "observed"（不被 validEpistemic 拒掉）
 		t.Fatalf("fact0 错误: %+v", f0)
+	}
+	// subject/related 的名字应 TrimSpace（否则后续人物归属匹配不上）
+	if facts[1].Subject.Name != "Alice" {
+		t.Fatalf("subject.name 未 TrimSpace: %q", facts[1].Subject.Name)
 	}
 	f2 := facts[2]
 	if f2.Plane != "relationship" || f2.RelationType != "配偶" || f2.Related.Name != "Alice" || f2.Label != "老婆" {

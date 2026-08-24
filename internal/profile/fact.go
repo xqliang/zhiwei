@@ -103,17 +103,17 @@ func ParseFacts(raw string) ([]Fact, error) {
 	for _, rf := range out.Facts {
 		f := Fact{
 			Plane:         rf.Plane,
-			Subject:       Subject(rf.Subject),
+			Subject:       trimSubject(rf.Subject),
 			AttrKey:       strings.TrimSpace(rf.AttrKey),
 			Value:         strings.TrimSpace(rf.Value),
-			ValueType:     rf.ValueType,
+			ValueType:     strings.TrimSpace(rf.ValueType),
 			RelationType:  strings.TrimSpace(rf.RelationType),
-			Related:       Subject(rf.Related),
+			Related:       trimSubject(rf.Related),
 			Direction:     strings.TrimSpace(rf.Direction),
 			OrgName:       strings.TrimSpace(rf.OrgName),
 			Label:         strings.TrimSpace(rf.Label),
 			Confidence:    clamp01(rf.Confidence),
-			EpistemicType: rf.EpistemicType,
+			EpistemicType: strings.TrimSpace(rf.EpistemicType),
 			BlockIndex:    rf.BlockIndex,
 		}
 		if !validPlanes[f.Plane] || !validDirections[f.Direction] {
@@ -148,4 +148,15 @@ func clamp01(v float64) float64 {
 		return 1
 	}
 	return v
+}
+
+// trimSubject 对 Subject 的每个子字段做 TrimSpace。Kind/Relation 要参与枚举校验，
+// Name 要用于后续人物归属解析（见 service.go resolveSubject）——带空格的 " Alice "
+// 必须先归一化成 "Alice"，否则匹配不上同一人物。Subject 与 Related 复用同一处理。
+func trimSubject(s rawSubject) Subject {
+	return Subject{
+		Kind:     strings.TrimSpace(s.Kind),
+		Name:     strings.TrimSpace(s.Name),
+		Relation: strings.TrimSpace(s.Relation),
+	}
 }
