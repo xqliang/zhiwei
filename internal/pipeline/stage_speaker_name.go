@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -68,7 +69,9 @@ func ParseNameCandidates(raw string) (map[string][]nameCandidate, error) {
 			cands = append(cands, c)
 		}
 		sort.SliceStable(cands, func(i, j int) bool { return cands[i].Confidence > cands[j].Confidence })
-		m[sp.Ref] = cands
+		// ref 先 TrimSpace 再作 key：模型输出带杂散空格时仍能与本 stage 分配的占位符匹配，
+		// 不至于因空白差异静默丢弃整组候选（M4）。
+		m[strings.TrimSpace(sp.Ref)] = cands
 	}
 	return m, nil
 }
@@ -91,7 +94,12 @@ func clampConfidence(v float64) float64 {
 // → 单次 LLM 调用（批处理：T 共享同一上下文，模型可跨说话人联合推理）
 // → ref 映射回 speaker_id，逐候选 upsert（GREATEST 累积置信度，幂等）。
 // LLM/候选 repo 未装配时 no-op（兼容旧装配/纯 ASR 测试）。
-func runSpeakerNameStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *repo.Transcript) error {
+//
+// 尽力而为语义（I2）：LLM 调用失败 / 候选解析失败**不返回 error**，只 log + trace 后
+// 返回 nil。理由：候选仅是建议，说话人仍是随机名时下一段录音会自然重试；不该让建议性
+// 功能 fail 整个 session、阻塞下游 extract。真基础设施问题（读 session/segments/speakers、
+// 读上下文段、写候选等 DB 操作）仍返回 error，交 pool 重试。
+func runSpeakerNameStage(ctx context.Context, d StageDeps, j *repo.Job, sessionID ids.ID, tr *repo.Transcript) error {
 	if d.LLM == nil || d.SpeakerNameCandidates == nil {
 		return nil // 依赖未装配（测试/降级）→ no-op
 	}
@@ -138,6 +146,11 @@ func runSpeakerNameStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr 
 	refToID := make(map[string]ids.ID, len(order))
 	for i, spID := range order {
 		ref := fmt.Sprintf("待识别人物%c", 'A'+i)
+		if i >= 26 {
+			// 防御性兜底：'A'+i 越过 'Z'（i≥26）会产出非字母字符，破坏 prompt 契约里
+			// 「待识别人物X」的形态。实际单次录音不可能出现 26+ 说话人，仅防越界。
+			ref = fmt.Sprintf("待识别人物%d", i+1)
+		}
 		refOf[spID] = ref
 		refToID[ref] = spID
 	}
@@ -180,20 +193,27 @@ func runSpeakerNameStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr 
 		fmt.Fprintf(&sb, "%s|%s|%s\n", cs.WallTime.Format("15:04:05"), token, cs.Text)
 	}
 
-	// 4) 单次 LLM 调用（批处理）+ 解析
+	// 4) 单次 LLM 调用（批处理）+ 解析。LLM/解析失败按尽力而为吞错（log + trace，返回 nil）。
+	begin := time.Now()
 	resp, err := d.LLM.Chat(ctx, provider.ChatRequest{
 		Model:  d.LLMModel,
 		System: d.NameInferPrompt,
 		User:   sb.String(),
 	})
 	if err != nil {
-		return fmt.Errorf("LLM 调用: %w", err)
+		log.Printf("[speakername] session=%s LLM 调用失败（尽力而为，不阻塞）: %v", sessionID, err)
+		appendTrace(j, repo.TraceEntry{Stage: "speakername", Error: fmt.Sprintf("名字推断失败（尽力而为，不阻塞）: %v", err)})
+		return nil
 	}
+	appendTrace(j, repo.TraceEntry{Stage: "speakername:llm", Model: d.LLMModel, MS: msSince(begin), Tokens: resp.TotalTokens})
 	parsed, err := ParseNameCandidates(resp.Content)
 	if err != nil {
-		return fmt.Errorf("解析名字候选: %w", err)
+		log.Printf("[speakername] session=%s 解析名字候选失败（尽力而为，不阻塞）: %v", sessionID, err)
+		appendTrace(j, repo.TraceEntry{Stage: "speakername", Error: fmt.Sprintf("名字推断失败（尽力而为，不阻塞）: %v", err)})
+		return nil
 	}
-	// 5) ref → speaker_id 回填候选；未知 ref（模型编造的占位符）忽略
+	// 5) ref → speaker_id 回填候选；未知 ref（模型编造的占位符）忽略。
+	//    Upsert 是 DB 写，失败返回 error 走 pool 重试（真基础设施问题，非建议性）。
 	for ref, cands := range parsed {
 		spID, ok := refToID[ref]
 		if !ok {
@@ -210,11 +230,11 @@ func runSpeakerNameStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr 
 
 // stageSpeakerName 是 pool 用的 Handler 包装。
 func stageSpeakerName(d StageDeps) Handler {
-	return func(ctx context.Context, _ *repo.Job, sessionID ids.ID) error {
+	return func(ctx context.Context, j *repo.Job, sessionID ids.ID) error {
 		tr, err := d.Transcripts.GetBySession(ctx, sessionID)
 		if err != nil {
 			return fmt.Errorf("读 transcript: %w", err)
 		}
-		return runSpeakerNameStage(ctx, d, sessionID, tr)
+		return runSpeakerNameStage(ctx, d, j, sessionID, tr)
 	}
 }

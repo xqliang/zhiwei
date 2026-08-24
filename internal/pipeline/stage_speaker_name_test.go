@@ -4,7 +4,10 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/provider"
@@ -92,14 +95,21 @@ func TestParseNameCandidates(t *testing.T) {
 	}
 }
 
-// fakeNameLLM 可配置响应的 LLM fake（记录调用次数，验证「无待识别不调 LLM」）。
+// fakeNameLLM 可配置响应的 LLM fake：记录调用次数（验证「无待识别不调 LLM」）、
+// 记录最后收到的 user message（验证上下文组装）、可配置返回错误（验证「失败不阻塞」）。
 type fakeNameLLM struct {
-	calls int
-	resp  string
+	calls    int
+	resp     string
+	err      error  // 非 nil 时 Chat 返回该错误
+	lastUser string // 最近一次收到的 req.User（上下文组装断言用）
 }
 
-func (f *fakeNameLLM) Chat(_ context.Context, _ provider.ChatRequest) (provider.ChatResponse, error) {
+func (f *fakeNameLLM) Chat(_ context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
 	f.calls++
+	f.lastUser = req.User
+	if f.err != nil {
+		return provider.ChatResponse{}, f.err
+	}
 	return provider.ChatResponse{Content: f.resp, TotalTokens: 100}, nil
 }
 
@@ -165,7 +175,7 @@ func TestStageSpeakerNameInfersAndUpserts(t *testing.T) {
 		{"name":"张总","confidence":0.82,"evidence":"对方说『张总，您看这个方案』"},
 		{"name":"张明","confidence":0.4,"evidence":"上下文推断"}]}]}`}
 	d := newNameDeps(&repo.SessionRepo{DB: transcripts.DB}, transcripts, speakers, candidates, llm)
-	if err := runSpeakerNameStage(context.Background(), d, sid, tr); err != nil {
+	if err := runSpeakerNameStage(context.Background(), d, &repo.Job{}, sid, tr); err != nil {
 		t.Fatalf("stage: %v", err)
 	}
 	if llm.calls != 1 {
@@ -182,7 +192,7 @@ func TestStageSpeakerNameInfersAndUpserts(t *testing.T) {
 	llm2 := &fakeNameLLM{resp: `{"speakers":[{"ref":"待识别人物A","candidates":[
 		{"name":"张总","confidence":0.5,"evidence":"重跑证据"}]}]}`}
 	d2 := newNameDeps(&repo.SessionRepo{DB: transcripts.DB}, transcripts, speakers, candidates, llm2)
-	if err := runSpeakerNameStage(context.Background(), d2, sid, tr); err != nil {
+	if err := runSpeakerNameStage(context.Background(), d2, &repo.Job{}, sid, tr); err != nil {
 		t.Fatalf("重跑: %v", err)
 	}
 	list, _ = candidates.ListBySpeakers(context.Background(), []ids.ID{randSp.ID})
@@ -198,7 +208,7 @@ func TestStageSpeakerNameNoopWithoutPending(t *testing.T) {
 	_ = speakers.UpdateName(context.Background(), randSp.ID, "王五")
 	llm := &fakeNameLLM{resp: `{"speakers":[]}`}
 	d := newNameDeps(&repo.SessionRepo{DB: transcripts.DB}, transcripts, speakers, candidates, llm)
-	if err := runSpeakerNameStage(context.Background(), d, sid, tr); err != nil {
+	if err := runSpeakerNameStage(context.Background(), d, &repo.Job{}, sid, tr); err != nil {
 		t.Fatalf("stage: %v", err)
 	}
 	if llm.calls != 0 {
@@ -216,11 +226,125 @@ func TestStageSpeakerNameIgnoresUnknownRef(t *testing.T) {
 	llm := &fakeNameLLM{resp: `{"speakers":[{"ref":"待识别人物Z","candidates":[
 		{"name":"编造","confidence":0.9,"evidence":""}]}]}`}
 	d := newNameDeps(&repo.SessionRepo{DB: transcripts.DB}, transcripts, speakers, candidates, llm)
-	if err := runSpeakerNameStage(context.Background(), d, sid, tr); err != nil {
+	if err := runSpeakerNameStage(context.Background(), d, &repo.Job{}, sid, tr); err != nil {
 		t.Fatalf("stage: %v", err)
 	}
 	list, _ := candidates.ListBySpeakers(context.Background(), []ids.ID{randSp.ID})
 	if len(list) != 0 {
 		t.Fatalf("未知 ref 的候选应忽略，实际 %d 条", len(list))
+	}
+}
+
+// TestStageSpeakerNameContextAssembly 验证本 stage 的核心价值——喂给 LLM 的 user message
+// 组装正确：跨 session 墙钟窗口拼上下文，待识别者用占位符 token、已确认真名用真名、
+// 未解析段用「未知」，格式为「时间|说话人|文本」按墙钟正序。
+func TestStageSpeakerNameContextAssembly(t *testing.T) {
+	transcripts, speakers, candidates, sid, tr, randSp, namedSp := seedNameStage(t, "说话人kk7z2", "李明")
+	ctx := context.Background()
+	db := transcripts.DB
+	sessions := &repo.SessionRepo{DB: db}
+
+	// 取当前 session 的 created_at，前置 session 定时到它前 5 分钟（落在 10min 回看窗口内）。
+	cur, err := sessions.Get(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevSid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: prevSid, Source: "web_upload", Filename: "prev.wav",
+		StoragePath: "/tmp/prev.wav", Status: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Create 落库 created_at=NOW，需显式回拨到当前 session 前 5 分钟。
+	if _, err := db.ExecContext(ctx,
+		`UPDATE audio_session SET created_at = ? WHERE id = ?`,
+		cur.CreatedAt.Add(-5*time.Minute), prevSid.Int64()); err != nil {
+		t.Fatal(err)
+	}
+	trPrev := &repo.Transcript{SessionID: prevSid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, trPrev); err != nil {
+		t.Fatal(err)
+	}
+	// 前置录音三段：真名说话人 / speaker_id NULL（未解析）/ 当前 session 的随机名说话人。
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: trPrev.ID, SequenceNo: 1, SpeakerLabel: "9", Text: "前置录音里真名说话人说的话", StartMS: 0, EndMS: 2000},
+		{TranscriptID: trPrev.ID, SequenceNo: 2, SpeakerLabel: "", Text: "前置录音里未解析说话人的话", StartMS: 2500, EndMS: 4000},
+		{TranscriptID: trPrev.ID, SequenceNo: 3, SpeakerLabel: "1", Text: "前置录音里待识别人物说的话", StartMS: 4500, EndMS: 6000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// label 9 → 真名说话人(李明)；label 1 → 当前 session 的随机名说话人(同一 speaker)；label "" 段留 NULL。
+	_ = transcripts.SetSegmentSpeaker(ctx, trPrev.ID, "9", namedSp.ID)
+	_ = transcripts.SetSegmentSpeaker(ctx, trPrev.ID, "1", randSp.ID)
+
+	llm := &fakeNameLLM{resp: `{"speakers":[]}`}
+	d := newNameDeps(sessions, transcripts, speakers, candidates, llm)
+	if err := runSpeakerNameStage(ctx, d, &repo.Job{}, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if llm.calls != 1 {
+		t.Fatalf("应恰好 1 次 LLM 调用，实际 %d", llm.calls)
+	}
+	user := llm.lastUser
+
+	// 待识别清单只列占位符 A（当前 session 唯一待识别者）
+	if !strings.Contains(user, "- 待识别人物A") {
+		t.Fatalf("user 应含待识别清单行『- 待识别人物A』，实际=\n%s", user)
+	}
+	// 真名说话人 → 真名 token；NULL 段 → 未知 token
+	if !strings.Contains(user, "|李明|") {
+		t.Fatalf("真名说话人应以真名『李明』作 token，实际=\n%s", user)
+	}
+	if !strings.Contains(user, "|未知|") {
+		t.Fatalf("NULL speaker_id 段应以『未知』作 token，实际=\n%s", user)
+	}
+	// 跨 session 两段都在（前置 + 当前）
+	if !strings.Contains(user, "前置录音里真名说话人说的话") {
+		t.Fatalf("应含前置 session 段文本，实际=\n%s", user)
+	}
+	if !strings.Contains(user, "张总，您看这个方案怎么样") {
+		t.Fatalf("应含当前 session 段文本，实际=\n%s", user)
+	}
+	// 待识别说话人在两个 session 的段都以占位符 token 出现（token 稳定可指认）
+	if !strings.Contains(user, "|待识别人物A|前置录音里待识别人物说的话") {
+		t.Fatalf("前置 session 待识别段应以占位符 token 出现，实际=\n%s", user)
+	}
+	if !strings.Contains(user, "|待识别人物A|张总，您看这个方案怎么样") {
+		t.Fatalf("当前 session 待识别段应以占位符 token 出现，实际=\n%s", user)
+	}
+	// 「时间|说话人|文本」形态：定位当前 session 待识别段那行，校验 HH:MM:SS| 前缀（不用正则）。
+	var line string
+	for _, ln := range strings.Split(user, "\n") {
+		if strings.Contains(ln, "张总，您看这个方案怎么样") {
+			line = ln
+			break
+		}
+	}
+	if len(line) < 9 || line[2] != ':' || line[5] != ':' || line[8] != '|' {
+		t.Fatalf("对话行应形如 HH:MM:SS|说话人|文本，实际行=%q", line)
+	}
+}
+
+// TestStageSpeakerNameLLMFailureDoesNotBlock 验证 I2 尽力而为语义：LLM 返回错误时
+// stage 吞错返回 nil（不阻塞 session/下游 extract），不写候选，且 trace 记一条吞错条目。
+func TestStageSpeakerNameLLMFailureDoesNotBlock(t *testing.T) {
+	transcripts, speakers, candidates, sid, tr, randSp, _ := seedNameStage(t, "说话人ab3x9", "李明")
+	llm := &fakeNameLLM{err: fmt.Errorf("模拟 LLM 超时")}
+	d := newNameDeps(&repo.SessionRepo{DB: transcripts.DB}, transcripts, speakers, candidates, llm)
+	j := &repo.Job{}
+	if err := runSpeakerNameStage(context.Background(), d, j, sid, tr); err != nil {
+		t.Fatalf("LLM 失败应尽力而为返回 nil，实际 err=%v", err)
+	}
+	if llm.calls != 1 {
+		t.Fatalf("应尝试 1 次 LLM 调用，实际 %d", llm.calls)
+	}
+	list, _ := candidates.ListBySpeakers(context.Background(), []ids.ID{randSp.ID})
+	if len(list) != 0 {
+		t.Fatalf("LLM 失败不应写候选，实际 %d 条", len(list))
+	}
+	// 尽力而为吞错也记 trace 一条（便于排查为何没产候选）
+	if j.Trace == nil || len(*j.Trace) == 0 {
+		t.Fatal("尽力而为吞错应写入 trace 条目")
 	}
 }
