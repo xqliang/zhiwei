@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"testing"
 
 	"zhiwei/internal/ids"
@@ -15,6 +16,7 @@ func TestMemorySearch(t *testing.T) {
 	ctx := t.Context()
 
 	sid := ids.New()
+	t.Cleanup(func() { _ = mr.DeleteBySessionExt(context.Background(), db, sid) })
 	kw := "量子隧穿实验" // 独特词，避免与库里既有数据碰撞
 	ms := []*Memory{
 		{Type: "fact", Title: kw + "记录", Content: "今天讨论了" + kw + "的进展", SessionID: sid, Status: "active", Importance: 0.6, Confidence: 0.8},
@@ -60,6 +62,7 @@ func TestMemorySearchEscapesWildcards(t *testing.T) {
 	mr := &MemoryRepo{DB: db}
 	ctx := t.Context()
 	sid := ids.New()
+	t.Cleanup(func() { _ = mr.DeleteBySessionExt(context.Background(), db, sid) })
 	lit := "进度100%达成X9Z"     // 含字面量 %
 	other := "进度100abc达成X9Z" // % 若被当通配符, 会误命中它
 	ms := []*Memory{

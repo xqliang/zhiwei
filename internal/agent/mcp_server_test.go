@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -56,7 +57,9 @@ func TestSearchMemoryTool(t *testing.T) {
 	d := testDeps(t)
 	ctx := t.Context()
 	kw := "工具层检索验证词"
-	ms := []*repo.Memory{{Type: "fact", Title: kw, Content: kw, SessionID: ids.New(), Status: "active", Confidence: 0.8}}
+	sid := ids.New()
+	t.Cleanup(func() { _ = d.Memory.DeleteBySessionExt(context.Background(), d.Memory.DB, sid) })
+	ms := []*repo.Memory{{Type: "fact", Title: kw, Content: kw, SessionID: sid, Status: "active", Confidence: 0.8}}
 	if err := d.Memory.InsertExt(ctx, d.Memory.DB, ms); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +115,7 @@ func TestGetTimelineRecentTool(t *testing.T) {
 	if err := d.Session.Create(ctx, sess); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = d.Session.Delete(context.Background(), sess.ID, nil) })
 	res, _, err := getTimelineHandler(d)(ctx, nil, getTimelineArgs{Limit: 50})
 	if err != nil {
 		t.Fatalf("handler: %v", err)
@@ -138,6 +142,7 @@ func TestGetTimelineBySessionTool(t *testing.T) {
 	if err := d.Session.Create(ctx, sess); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = d.Session.Delete(context.Background(), sess.ID, nil) })
 	tr := &repo.Transcript{SessionID: sess.ID, Language: "zh-CN"}
 	if err := d.Transcript.Create(ctx, tr); err != nil {
 		t.Fatal(err)
