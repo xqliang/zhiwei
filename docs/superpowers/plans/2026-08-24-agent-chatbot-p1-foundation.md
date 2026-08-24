@@ -13,7 +13,7 @@
 **约定（贯穿全计划，务必一致）：**
 - 可空外键/引用列 → Go `*ids.ID`；可空时间 → `*time.Time`；可空整型 → `*int`。
 - 可空「文本」列一律 `NOT NULL DEFAULT ''` 配 Go `string`（MySQL `NULL`→`string` 扫描会报错）。
-- JSON 列 → Go `json.RawMessage`（`NULL`→`nil` 安全；非空写 JSON 文本）。
+- 可空 JSON 列 → Go `*json.RawMessage`（**指针**，对齐 `internal/repo/job.go` 的 `Trace`）：值类型 `json.RawMessage` 扫描 `NULL` 会报错（Go database/sql 限制），故可空 JSON 一律用指针（`NULL`→`nil`，可 `SELECT *`）。`NOT NULL` 的 JSON 列（如 `agent_proposal.payload`）才用值类型 `json.RawMessage`。此约定适用于 Task 4（citations/tool_payload）、Task 6（daily/weekly content）、Task 7（topic_status content）。
 - 写方法凡需入事务的，签名收 `ExecerContext`（事务外传 `r.DB`，事务内传 `*sqlx.Tx`），对齐 `TodoRepo.InsertExt`。
 - 插入前 `ids.New()` 生成主键，`UserID==0` 则置 `1`（对齐 `TodoRepo.InsertExt`）。
 - 集成测试用 `NewDB(TestDSN(t))` + `t.Context()`；未设 `TEST_MYSQL_DSN` 自动 skip。红灯以「`go test` 编译失败：undefined」体现，绿灯跑 `make test-integration`（自动重建 `zhiwei_test` + 迁移 + 真连 MySQL）。
