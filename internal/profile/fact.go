@@ -18,10 +18,10 @@ type Subject struct {
 	Relation string `json:"relation"` // kind=relation 时的关系类型（如 配偶）
 }
 
-// Fact 是 LLM 输出的一条画像事实（闸门前后通用载体）。P1 两个平面：
-// attribute（属性）/ relationship（关系）。P2+ 扩 event/metric/cycle/activity。
+// Fact 是 LLM 输出的一条画像事实（闸门前后通用载体）。P1-P2 三个平面：
+// attribute（属性）/ relationship（关系）/ event（大事记）。P2+ 续扩 metric/cycle/activity。
 type Fact struct {
-	Plane   string  // attribute|relationship
+	Plane   string  // attribute|relationship|event
 	Subject Subject // 信息归属的人物指代
 
 	// ---- attribute 平面 ----
@@ -36,6 +36,14 @@ type Fact struct {
 	OrgName      string  // 组织名（组织关系）
 	Label        string  // 自由称呼（「大儿子」）
 
+	// ---- event 平面（P2 大事记）----
+	EventType        string // 里程碑|聚会|会议|旅行|健康|成就|挫折|负面|其他
+	EventTitle       string
+	EventDescription string
+	OccurredAt       string // 原始字符串（YYYY-MM-DD / YYYY-MM / RFC3339），时间解析放 service 层（parseEventAt）
+	EndAt            string
+	EventLocation    string
+
 	// ---- 通用 ----
 	Confidence    float64
 	EpistemicType string // observed|inferred|predicted|suggested
@@ -45,7 +53,7 @@ type Fact struct {
 	SegmentIDs []ids.ID // provenance：来源块的 segment id
 }
 
-var validPlanes = map[string]bool{"attribute": true, "relationship": true}
+var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true}
 
 // validSubjectKinds 是人物指代 Subject.Kind（也用于 Related.Kind）的合法取值。
 // 非法或缺失的指代无法归属到具体人物，直接丢弃该条（宁少勿错）。
@@ -64,6 +72,12 @@ var ValidRelations = map[string]bool{
 
 var validDirections = map[string]bool{"upstream": true, "downstream": true, "peer": true, "": true}
 
+// ValidEventTypes 事件类型枚举（spec §4.4：开放分类，解析层收敛为 9 类）。
+var ValidEventTypes = map[string]bool{
+	"里程碑": true, "聚会": true, "会议": true, "旅行": true, "健康": true,
+	"成就": true, "挫折": true, "负面": true, "其他": true,
+}
+
 type rawSubject struct {
 	Kind     string `json:"kind"`
 	Name     string `json:"name"`
@@ -71,19 +85,25 @@ type rawSubject struct {
 }
 
 type rawFact struct {
-	Plane         string     `json:"plane"`
-	Subject       rawSubject `json:"subject"`
-	AttrKey       string     `json:"attr_key"`
-	Value         string     `json:"value"`
-	ValueType     string     `json:"value_type"`
-	RelationType  string     `json:"relation_type"`
-	Related       rawSubject `json:"related"`
-	Direction     string     `json:"direction"`
-	OrgName       string     `json:"org_name"`
-	Label         string     `json:"label"`
-	Confidence    float64    `json:"confidence"`
-	EpistemicType string     `json:"epistemic_type"`
-	BlockIndex    int        `json:"block_index"`
+	Plane            string     `json:"plane"`
+	Subject          rawSubject `json:"subject"`
+	AttrKey          string     `json:"attr_key"`
+	Value            string     `json:"value"`
+	ValueType        string     `json:"value_type"`
+	RelationType     string     `json:"relation_type"`
+	Related          rawSubject `json:"related"`
+	Direction        string     `json:"direction"`
+	OrgName          string     `json:"org_name"`
+	Label            string     `json:"label"`
+	EventType        string     `json:"event_type"`
+	EventTitle       string     `json:"title"`
+	EventDescription string     `json:"description"`
+	OccurredAt       string     `json:"occurred_at"`
+	EndAt            string     `json:"end_at"`
+	EventLocation    string     `json:"location"`
+	Confidence       float64    `json:"confidence"`
+	EpistemicType    string     `json:"epistemic_type"`
+	BlockIndex       int        `json:"block_index"`
 }
 
 // ParseFacts 解析 LLM 输出。容错风格同 memory.ParseCandidates：截取首个 { 到末个 }，
@@ -106,19 +126,25 @@ func ParseFacts(raw string) ([]Fact, error) {
 	facts := make([]Fact, 0, len(out.Facts))
 	for _, rf := range out.Facts {
 		f := Fact{
-			Plane:         rf.Plane,
-			Subject:       trimSubject(rf.Subject),
-			AttrKey:       strings.TrimSpace(rf.AttrKey),
-			Value:         strings.TrimSpace(rf.Value),
-			ValueType:     strings.TrimSpace(rf.ValueType),
-			RelationType:  strings.TrimSpace(rf.RelationType),
-			Related:       trimSubject(rf.Related),
-			Direction:     strings.TrimSpace(rf.Direction),
-			OrgName:       strings.TrimSpace(rf.OrgName),
-			Label:         strings.TrimSpace(rf.Label),
-			Confidence:    clamp01(rf.Confidence),
-			EpistemicType: strings.TrimSpace(rf.EpistemicType),
-			BlockIndex:    rf.BlockIndex,
+			Plane:            rf.Plane,
+			Subject:          trimSubject(rf.Subject),
+			AttrKey:          strings.TrimSpace(rf.AttrKey),
+			Value:            strings.TrimSpace(rf.Value),
+			ValueType:        strings.TrimSpace(rf.ValueType),
+			RelationType:     strings.TrimSpace(rf.RelationType),
+			Related:          trimSubject(rf.Related),
+			Direction:        strings.TrimSpace(rf.Direction),
+			OrgName:          strings.TrimSpace(rf.OrgName),
+			Label:            strings.TrimSpace(rf.Label),
+			EventType:        strings.TrimSpace(rf.EventType),
+			EventTitle:       strings.TrimSpace(rf.EventTitle),
+			EventDescription: strings.TrimSpace(rf.EventDescription),
+			OccurredAt:       strings.TrimSpace(rf.OccurredAt),
+			EndAt:            strings.TrimSpace(rf.EndAt),
+			EventLocation:    strings.TrimSpace(rf.EventLocation),
+			Confidence:       clamp01(rf.Confidence),
+			EpistemicType:    strings.TrimSpace(rf.EpistemicType),
+			BlockIndex:       rf.BlockIndex,
 		}
 		if !validPlanes[f.Plane] || !validDirections[f.Direction] {
 			continue
@@ -141,6 +167,10 @@ func ParseFacts(raw string) ([]Fact, error) {
 			// 关系对端也须是合法人物指代（成员校验，已含非空判断）
 			if !ValidRelations[f.RelationType] || !validSubjectKinds[f.Related.Kind] {
 				continue
+			}
+		case "event":
+			if !ValidEventTypes[f.EventType] || f.EventTitle == "" {
+				continue // 非法事件类型或空标题：无法落库
 			}
 		}
 		facts = append(facts, f)
