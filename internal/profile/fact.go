@@ -57,7 +57,7 @@ type Fact struct {
 	PeriodDays    int
 	DurationDays  int
 	Dosage        string
-	FrequencyText string
+	FrequencyText string // 频次（'每日两次'）；rawFact 的 json 标签是 frequency（非 frequency_text），对齐 prompt 契约
 
 	// ---- 通用 ----
 	Confidence    float64

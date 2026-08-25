@@ -88,32 +88,49 @@ func factProvenance(win []memory.Block, idx int) []ids.ID {
 	return segs
 }
 
-// factKey 批内去重自然键：平面 + 主体身份(kind/name/relation) + 内容(attr_key/value)
-// + 关系类型 + 关系对端身份(kind/name/relation) + 事件判别(event_type/title)。
+// factKey 批内去重自然键：**按平面镜像各自的 DB 自然键**（各平面只取该平面的判别字段），
+// 与 ParseFacts 的 plane switch 对称演进——新增平面须同时加两处 case（此处 + ParseFacts）。
 //
-// 主体与对端的 Relation 字段必须纳入：kind=relation 的指代其身份藏在 Relation 里
-// （「我老婆」→ Relation=配偶，Name 为空）。若只取 Kind+Name，「我老婆是老师」与
-// 「我妈是老师」的键都会退化成 attribute|relation||occupation|老师 而被误判为同一条、
-// 静默塌缩——这比下游 DB 自然键（含 resolveSubject 解析后的 person_id，两个不同人）
-// 更激进，去重方向反了。故补 Subject.Relation / Related.Kind / Related.Relation 三个判别字段。
+// 为何按平面而非统一全字段 join：统一 join 会不断追加字段，某个字段选错就静默塌缩或
+// 过度区分（cycle 曾误纳 AnchorDate，与 DB 自然键 (session,person,type,label) 不一致——
+// 同 type/label 不同 anchor 的两条在此不塌缩、却在 Service 单事务里被 DB 自然键 dedup 成
+// 「先到的赢」而非「高置信赢」）。按平面镜像 DB 自然键根除此类漂移。各平面的键：
 //
-// event 平面同理：主体多为 self、attr/relation 字段全空，若不纳入 event_type/title
-// 判别，「旅行·去云南」与「聚会·同学会」两条都会塌缩成 event|self||... 被误判同一条。
-// 故末尾追加 EventType/EventTitle 两个判别字段（防批内塌缩：同 key 不同事件）。
+//	attribute    : subject + attr_key + value
+//	relationship : subject + related(subject) + relation_type
+//	event        : subject + event_type + title
+//	metric       : subject + metric_key + metric_value + measured_at（测点流：同键多采样各自成行）
+//	cycle        : subject + cycle_type + cycle_label（镜像 DB 自然键，**不含 anchor**）
 //
-// metric/cycle 平面（P3）同样追加判别（追加式不破坏既有键）：metric 主体多为 self
-// 且 attr/relation/event 字段全空，靠 MetricKey/MetricValue/MeasuredAt 区分不同测点
-// （体重·72.5·8-20 与 情绪·焦虑·8-21 不能塌缩）；cycle 靠 CycleType/CycleLabel/AnchorDate
-// 区分不同周期安排（降压药与胰岛素两条 medication 不能塌缩）。
+// subjectKey 纳入 Kind/Name/Relation 三段：kind=relation 的指代身份藏在 Relation 里
+// （「我老婆」→ Relation=配偶，Name 空）。若只取 Kind+Name，「我老婆是老师」与「我妈是老师」
+// 会塌缩成同键——比下游 DB 自然键（resolveSubject 解析后是两个不同 person_id）更激进，方向反了。
+//
+// default 兜底：未来新增平面若漏写 case，用全字段 join 而非塌缩成某个已知平面的键——
+// 宁可过度区分（漏去重）也不静默误判两条不同事实为同一条（错误模式更安全、更易发现）。
 func factKey(f Fact) string {
-	return f.Plane + "\x00" +
-		f.Subject.Kind + "\x00" + f.Subject.Name + "\x00" + f.Subject.Relation + "\x00" +
-		f.AttrKey + "\x00" + f.Value + "\x00" +
-		f.RelationType + "\x00" +
-		f.Related.Kind + "\x00" + f.Related.Name + "\x00" + f.Related.Relation + "\x00" +
-		f.EventType + "\x00" + f.EventTitle + "\x00" +
-		f.MetricKey + "\x00" + f.MetricValue + "\x00" + f.MeasuredAt + "\x00" +
-		f.CycleType + "\x00" + f.CycleLabel + "\x00" + f.AnchorDate
+	subj := subjectKey(f.Subject)
+	switch f.Plane {
+	case "attribute":
+		return "attribute\x00" + subj + "\x00" + f.AttrKey + "\x00" + f.Value
+	case "relationship":
+		return "relationship\x00" + subj + "\x00" + subjectKey(f.Related) + "\x00" + f.RelationType
+	case "event":
+		return "event\x00" + subj + "\x00" + f.EventType + "\x00" + f.EventTitle
+	case "metric":
+		return "metric\x00" + subj + "\x00" + f.MetricKey + "\x00" + f.MetricValue + "\x00" + f.MeasuredAt
+	case "cycle":
+		return "cycle\x00" + subj + "\x00" + f.CycleType + "\x00" + f.CycleLabel
+	default:
+		return f.Plane + "\x00" + subj + "\x00" + f.AttrKey + f.Value + f.RelationType + f.Related.Name +
+			f.EventType + f.EventTitle + f.MetricKey + f.MetricValue + f.CycleType + f.CycleLabel
+	}
+}
+
+// subjectKey Subject 的去重序列化（Subject 与 Related 共用）：Kind/Name/Relation 三段
+// 均纳入——见 factKey 顶注释对 kind=relation 指代的说明。
+func subjectKey(s Subject) string {
+	return s.Kind + "\x00" + s.Name + "\x00" + s.Relation
 }
 
 // buildProfileUserMessage 组装用户消息：对话块 + 已知人物名单。
