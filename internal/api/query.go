@@ -134,11 +134,12 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 		type speakerWithCands struct {
 			repo.SpeakerInSegment
 			NameCandidates []NameCandidateView `json:"name_candidates"`
+			VoiceMatches   []voiceMatch       `json:"voice_matches"` // 声纹相似度 top-3（含本人），审计识别质量用
 		}
 		sisView := make([]speakerWithCands, len(sis))
 		spIDs := make([]ids.ID, len(sis))
 		for i := range sis {
-			sisView[i] = speakerWithCands{SpeakerInSegment: sis[i], NameCandidates: []NameCandidateView{}}
+			sisView[i] = speakerWithCands{SpeakerInSegment: sis[i], NameCandidates: []NameCandidateView{}, VoiceMatches: []voiceMatch{}}
 			spIDs[i] = sis[i].SpeakerID
 		}
 		if h.SpeakerNameCandidates != nil {
@@ -154,6 +155,19 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 					if i, ok := idx[c.SpeakerID]; ok {
 						sisView[i].NameCandidates = append(sisView[i].NameCandidates,
 							NameCandidateView{Name: c.Name, Confidence: c.Confidence, Evidence: c.Evidence})
+					}
+				}
+			}
+		}
+		// 声纹相似度 top-3（含本人，自相似 1.00 居首）：一次拉全量说话人在 Go 侧
+		// 用灾备 BLOB 算余弦，无 sidecar 往返。失败降级为空，不阻断详情。
+		if h.Speakers != nil {
+			if all, err := h.Speakers.List(r.Context()); err != nil {
+				log.Printf("[speaker] 声纹相似度富化失败: %v", err)
+			} else {
+				for i := range sisView {
+					if vm := topVoiceMatches(all, sisView[i].SpeakerID, 3); vm != nil {
+						sisView[i].VoiceMatches = vm
 					}
 				}
 			}

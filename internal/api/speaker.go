@@ -730,6 +730,47 @@ func cosine(a, b []float32) float64 {
 	return s
 }
 
+// voiceMatch 单条相似声纹（top-N 之一）。
+type voiceMatch struct {
+	SpeakerID  string  `json:"speaker_id"`
+	Name       string  `json:"name"`
+	Similarity float64 `json:"similarity"`
+}
+
+// topVoiceMatches 计算目标说话人声纹与全库（含本人）最相近的 top-n（调用方传 3）。
+// 用各 speaker 的灾备 BLOB 逐个余弦（与 FAISS 同向量，结果等价，同 MatchPreview）。
+// 含本人：自相似 1.00 排首位，恰好确认「自己的声纹在库中」；其后为最相近的他人，
+// 用于 timeline 详情审计识别质量——自动登记的新声纹若与某人明显相似（如 0.75，
+// 区分性弱命中的量级），说明识别时本应命中那个人，可据此「切换声纹」纠正。
+// 目标无有效向量或库中无有效声纹时返回 nil。
+func topVoiceMatches(all []repo.Speaker, targetID ids.ID, n int) []voiceMatch {
+	var target []float32
+	for _, sp := range all {
+		if sp.ID == targetID {
+			if emb, ok := decodeEmbedding(sp.Embedding); ok && len(emb) == 256 {
+				target = emb
+			}
+			break
+		}
+	}
+	if target == nil {
+		return nil
+	}
+	var ms []voiceMatch
+	for _, sp := range all {
+		emb, ok := decodeEmbedding(sp.Embedding)
+		if !ok || len(emb) != 256 {
+			continue // 无灾备向量或维度异常的跳过
+		}
+		ms = append(ms, voiceMatch{SpeakerID: sp.ID.String(), Name: sp.Name, Similarity: cosine(target, emb)})
+	}
+	sort.SliceStable(ms, func(i, j int) bool { return ms[i].Similarity > ms[j].Similarity })
+	if len(ms) > n {
+		ms = ms[:n]
+	}
+	return ms
+}
+
 // float32BlobAPI 256×float32 → []byte（Little-Endian），存 speaker.embedding 灾备 BLOB。
 // 内联而非 import pipeline（避免 api→pipeline 反向依赖；同 repo.RecomputeFullText 模式）。
 func float32BlobAPI(v []float32) []byte {

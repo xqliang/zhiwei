@@ -54,7 +54,12 @@ const app = createApp({
     function statusText(status, stage) {
       if (status === 'done' || status === 'completed') return '已完成';
       if (status === 'failed') return '失败';
-      if (status === 'running') return '处理中 · ' + (stage || '');
+      // 处理中标注当前阶段（中文）：pipeline 各 stage 的用户可读名
+      const stageNames = {
+        asr: '语音转写', segment: '全文汇总', speaker: '声纹识别',
+        speakername: '名字推断', extract: '记忆抽取',
+      };
+      if (status === 'running') return '处理中 · ' + (stageNames[stage] || stage || '');
       return '排队中';
     }
     // 待办状态 → 中文标签（模板多处复用，集中一处避免散落的三元）
@@ -708,7 +713,7 @@ const app = createApp({
     }
     const segDirty = computed(() => Object.keys(segDraft.value).length > 0);
     // 原始 ASR 视图开关：true 时转写段以只读方式展示 ASR 原始 spk 标签 + 毫秒时间戳 + 文本，
-    // 便于排查「同人被拆成 spk0/spk1」类 diarization 问题（speaker stage 会用声纹聚类兜底合并）。
+    // 便于排查「同人被拆成 spk0/spk1」类 diarization 问题（跨录音同人靠声纹 1:N 识别归并）。
     const rawAsrView = ref(false);
     // 切换函数（与 toggleSpeakerFilter/toggleEnrollForm 一致用函数式，避免内联赋值在某些 Vue 编译路径下不触发响应）
     function toggleRawAsr() { rawAsrView.value = !rawAsrView.value; }

@@ -310,6 +310,21 @@
             <label class="chip-add" v-if="!enrollOpen" @click="openEnroll">+ 新加说话人</label>
             <span v-if="speakerFilter" class="chip" style="cursor:pointer; opacity:.8" @click="speakerFilter=null">显示全部 ✕</span>
           </div>
+          <!-- 相似声纹 top-3（含本人，自相似 1.00 居首确认声纹在库）：审计识别质量——
+               自动登记的新声纹若与某人明显相似（如 0.75），说明识别时本应命中，
+               可用说话人 chip 的 ⇄ 切换声纹一键纠正 -->
+          <div v-if="(detail.speakers||[]).some(sp => (sp.voice_matches||[]).length)" style="margin:-4px 0 8px; display:flex; flex-direction:column; gap:2px">
+            <div v-for="sp in detail.speakers.filter(sp => (sp.voice_matches||[]).length)" :key="'vm-'+sp.speaker_id"
+                 style="display:flex; align-items:center; gap:5px; flex-wrap:wrap">
+              <span class="muted" style="font-size:var(--fs-xs)">相似声纹 · {{ sp.name }} ≈</span>
+              <span v-for="(m, mi) in sp.voice_matches" :key="m.speaker_id"
+                    class="muted" style="font-size:var(--fs-xs)"
+                    :style="m.similarity >= 0.72 ? { color: 'var(--accent-2)', fontWeight: 600 } : {}"
+                    :title="m.similarity >= 0.72 ? '相似度 ≥ 0.72（区分性弱命中的量级）：识别时可能本应命中此人，可考虑 ⇄ 切换声纹' : ''">
+                {{ mi > 0 ? '·' : '' }} {{ m.name }} {{ m.similarity.toFixed(2) }}
+              </span>
+            </div>
+          </div>
           <!-- 建议名字：speakername stage 用 LLM 从对话推断的候选（名称+置信度数值，倒排）。
                仅随机名说话人展示；✓ 采纳（改名+清候选）· ✕ 忽略该候选；悬浮看依据。 -->
           <div v-if="(detail.speakers||[]).some(hasNameCandidates)" style="margin:0 0 8px; display:flex; flex-direction:column; gap:4px">
@@ -419,7 +434,7 @@
           <div v-if="segDirty" class="muted" style="margin-top:4px">有未保存的转写修改，点上方「保存转写修改」生效后即可「重新提取」。</div>
           </template>
           <template v-else>
-          <div class="muted" style="margin:4px 0 6px; font-size:var(--fs-xs)">原始 ASR 结果：spk 标签为模型/接口原始输出，同人可能被拆成 spk0/spk1（speaker stage 会用声纹聚类合并同人）</div>
+          <div class="muted" style="margin:4px 0 6px; font-size:var(--fs-xs)">原始 ASR 结果：spk 标签为模型/接口原始输出，同人可能被拆成 spk0/spk1（同一人跨录音靠声纹 1:N 识别归并；本录音内误拆可用上方「合并」按钮手动合并）</div>
           <div v-for="(sg, i) in detail.segments" :key="'r'+i" class="seg raw-asr">
             <span class="raw-spk">spk{{ sg.speaker_label || '—' }}</span>
             <span class="raw-time">{{ fmtSec(sg.start_ms) }} – {{ fmtSec(sg.end_ms) }}</span>
@@ -990,6 +1005,6 @@
   </div>
 </div>
 
-<script src="/app/app.0d6ebbd2.js"></script>
+<script src="/app/app.4196ee10.js"></script>
 </body>
 </html>
