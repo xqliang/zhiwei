@@ -738,6 +738,7 @@
           </div>
           <div v-if="it.kind !== 'person'" class="muted" style="font-size:var(--fs-xs)">
             置信度 {{ (it.confidence * 100).toFixed(0) }}%
+            <span v-if="it.occurred_at"> · {{ fmtEventDate(it.occurred_at, true) }}</span>
             <span v-if="it.session_id" style="cursor:pointer; text-decoration:underline" @click="jumpToSession(it.session_id)">来源录音</span>
           </div>
         </div>

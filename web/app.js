@@ -1323,14 +1323,15 @@ const app = createApp({
       } catch (e) { showError(e); }
       finally { delete queueBusyIds[k]; }
     }
-    // 队列条目摘要（kind 不同字段不同：attribute=建议值，relationship=类型+称呼，person=名字）
+    // 队列条目摘要（kind 不同字段不同：attribute=建议值，relationship=类型+称呼，event=类型+标题，person=名字）
     function pendingSummary(it) {
       if (it.kind === 'attribute') return (it.attr_key || '') + '：' + (it.value || '');
       if (it.kind === 'relationship') return (it.relation_type || '') + (it.label ? '（' + it.label + '）' : '');
+      if (it.kind === 'event') return (it.event_type || '') + '：' + (it.value || ''); // event：event_type + title（value 后端映射为 title）
       return it.value || it.person_name; // person：名字
     }
     function pendingKindText(k) {
-      return { attribute: '属性', relationship: '关系', person: '新人物' }[k] || k;
+      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记' }[k] || k;
     }
 
     // ---------- 从历史回填抽取（POST /api/profile/extract：不带 session_id = 最近 50 个 completed，同步） ----------
