@@ -1396,6 +1396,134 @@ const app = createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 报告（日报/周报 + 话题状态；后端 internal/api/review.go + internal/review/types.go） ----------
+    // 契约（读源确认）：
+    //   日报  GET  /api/reviews/daily?date=YYYY-MM-DD       → DailyReview 行 {content, status, review_date, created_at}
+    //         POST /api/reviews/daily/generate {date}       强制重生成
+    //   周报  GET  /api/reviews/weekly?week_start=YYYY-MM-DD → WeeklyReview 行 {content, status, week_start, week_end, created_at}
+    //         POST /api/reviews/weekly/generate {week_start} 强制重生成
+    //   话题状态 GET /api/topics/{id}/status[?refresh=1]      → TopicStatus 行 {content, generated_at}
+    // content 为 *json.RawMessage（omitempty）：有则是对象，无则整个字段缺失（JS 里 undefined）。
+    // DailyContent:  headline / highlights[] / decisions[] / todos{new,done,open} / insights[] / tomorrow[] / topic_distribution[{topic,count}]
+    // WeeklyContent: headline / by_topic[{topic,progress,key_events[],open_todos[],risks[]}] / trends[{metric,labels?,series[]}] / risks[] / next_week[]
+    // TopicStatus:   summary / progress / milestones[] / decisions[] / open_todos[] / risks[{desc,severity}] / blockers[]
+    // 失败语义：LLM/解析失败 handler 返回 502（api() 抛错→reportError）；日报/周报另落一行 status='failed'。
+    // 故 UI 双保险：抛错、或 status==='failed'、或 content 为空 → 友好「生成失败，请重试」。所有数组字段兜底 []。
+    const reportKind = ref('daily');                    // 'daily' | 'weekly'
+    const reportDate = ref(fmtDate(new Date()));        // 日报日期 YYYY-MM-DD
+    const reportWeekStart = ref(fmtDate(thisMonday())); // 周报周起始（默认本周一）
+    const reportRow = ref(null);                        // 当前报告行（含 content/status）
+    const reportLoading = ref(false);
+    const reportError = ref('');                        // 502/网络等抛错信息
+
+    // 本周一 00:00（周报默认周起始；与后端 mondayOf 一致：周一为周首）。函数声明，供上面 ref 初始化时提升引用。
+    function thisMonday() {
+      const d = new Date(); d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+      return d;
+    }
+    // content 为对象或 undefined → 统一成对象或 null
+    const reportContent = computed(() => (reportRow.value && reportRow.value.content) || null);
+    // 失败判定：加载中不算失败；有抛错 / 状态 failed / 有行但无 content → 失败
+    const reportFailed = computed(() => {
+      if (reportLoading.value) return false;
+      if (reportError.value) return true;
+      const r = reportRow.value;
+      if (!r) return false;
+      return r.status === 'failed' || !r.content;
+    });
+    async function loadReport() {
+      // 先清 reportRow：切类型/刷新时先落到骨架，避免用旧类型 content 渲染新类型模板
+      reportLoading.value = true; reportError.value = ''; reportRow.value = null;
+      try {
+        const url = reportKind.value === 'daily'
+          ? '/api/reviews/daily?date=' + encodeURIComponent(reportDate.value)
+          : '/api/reviews/weekly?week_start=' + encodeURIComponent(reportWeekStart.value);
+        reportRow.value = await api('GET', url);
+      } catch (e) { reportError.value = (e && e.message) || String(e); }
+      finally { reportLoading.value = false; }
+    }
+    async function regenReport() {
+      if (reportLoading.value) return;
+      reportLoading.value = true; reportError.value = ''; reportRow.value = null;
+      try {
+        const [url, body] = reportKind.value === 'daily'
+          ? ['/api/reviews/daily/generate', { date: reportDate.value }]
+          : ['/api/reviews/weekly/generate', { week_start: reportWeekStart.value }];
+        reportRow.value = await api('POST', url, body);
+        toast.value = '报告已重新生成'; setTimeout(() => { toast.value = ''; }, 2000);
+      } catch (e) { reportError.value = (e && e.message) || String(e); }
+      finally { reportLoading.value = false; }
+    }
+    // 日报/周报切换：切类型即重载（loadReport 内部先清 reportRow）
+    function switchReportKind(k) { if (reportKind.value === k) return; reportKind.value = k; loadReport(); }
+
+    // 周报趋势图：把每条 trend {metric, labels?, series[]} 预计算成 SVG 就绪坐标（模板只读，不重复计算）。
+    const weeklyCharts = computed(() => {
+      const c = reportContent.value;
+      if (!c || !Array.isArray(c.trends)) return [];
+      return c.trends.map(tr => ({ metric: tr.metric, geom: chartGeom(tr.series, tr.labels) }));
+    });
+    // chartGeom：等距 x、0..max 线性 y 的折线图坐标。viewBox 固定坐标系，svg 宽 100% 自适应容器。
+    function chartGeom(series, labels) {
+      const vals = (Array.isArray(series) ? series : []).map(v => Number(v) || 0);
+      const n = vals.length;
+      const W = 520, H = 150, padL = 30, padR = 14, padT = 14, padB = 26;
+      const innerW = W - padL - padR, innerH = H - padT - padB;
+      const max = Math.max(1, ...(n ? vals : [1]));       // 避免除 0，基准至少 1
+      const baselineY = padT + innerH;
+      const xAt = i => n <= 1 ? padL + innerW / 2 : padL + innerW * i / (n - 1);
+      const yAt = v => baselineY - innerH * (v / max);
+      const pts = vals.map((v, i) => ({
+        x: +xAt(i).toFixed(1), y: +yAt(v).toFixed(1), v,
+        label: shortLabel(labels && labels[i] != null ? String(labels[i]) : String(i + 1)),
+      }));
+      return {
+        W, H, padL, padT, padB, baselineY, max, maxLabel: fmtNum(max),
+        pts, polyline: pts.map(p => p.x + ',' + p.y).join(' '),
+      };
+    }
+    // 数值格式化：整数原样，小数保留 1 位（趋势值 / y 轴标注）
+    function fmtNum(v) { const n = Number(v) || 0; return Number.isInteger(n) ? String(n) : n.toFixed(1); }
+    // x 轴标签精简：YYYY-MM-DD → MM-DD，其余原样（7 点日期串防过挤）
+    function shortLabel(s) { return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(5, 10) : String(s); }
+    // 0..1 → 百分比整数（进度条宽度 + 文字）
+    function pct(x) { return Math.round((Number(x) || 0) * 100); }
+    // 迷你条形缩放基准：一组 {count} 里的最大计数（至少 1，避免除 0）
+    function maxCount(arr) { return Math.max(1, ...(arr || []).map(t => Number(t && t.count) || 0)); }
+    // 风险严重度 → 中文标签 + 徽标类（枚举 low|medium|high，其余原样降级到 low 样式）
+    function sevMeta(sev) {
+      return ({
+        high: { label: '高', cls: 'sev-high' },
+        medium: { label: '中', cls: 'sev-medium' },
+        low: { label: '低', cls: 'sev-low' },
+      })[sev] || { label: sev || '—', cls: 'sev-low' };
+    }
+
+    // 话题状态：选主题 → GET /api/topics/{id}/status（refresh=1 强制重算）。topic_status 行无 status 列，只按 content 判空。
+    const statusTopicId = ref('');
+    const topicStatusRow = ref(null);
+    const topicStatusLoading = ref(false);
+    const topicStatusError = ref('');
+    const topicStatusContent = computed(() => (topicStatusRow.value && topicStatusRow.value.content) || null);
+    const topicStatusFailed = computed(() => {
+      if (topicStatusLoading.value) return false;
+      if (topicStatusError.value) return true;
+      const r = topicStatusRow.value;
+      return !!(r && !r.content);
+    });
+    async function loadTopicStatus(refresh) {
+      if (!statusTopicId.value) { topicStatusRow.value = null; return; }
+      topicStatusLoading.value = true; topicStatusError.value = ''; topicStatusRow.value = null;
+      try {
+        const url = '/api/topics/' + statusTopicId.value + '/status' + (refresh ? '?refresh=1' : '');
+        topicStatusRow.value = await api('GET', url);
+      } catch (e) { topicStatusError.value = (e && e.message) || String(e); }
+      finally { topicStatusLoading.value = false; }
+    }
+    // 选主题：清旧结果并按最新快照加载（无快照则后端现算）
+    function onPickStatusTopic() { topicStatusRow.value = null; topicStatusError.value = ''; loadTopicStatus(false); }
+
     // ---------- 标签页切换 ----------
     function switchTab(name) {
       const prev = tab.value;
@@ -1410,6 +1538,8 @@ const app = createApp({
       if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; loadAllSpeakers(); }
       // 问知微 tab：拉会话列表；若已有选中会话，重拉历史 + 重连 WS（切回时恢复现场）。
       if (name === 'agent') { loadAgentConversations(); if (agentConvId.value) { const cid = agentConvId.value; loadAgentHistory(cid); openAgentWS(cid); } }
+      // 报告 tab：拉主题列表（话题状态选择器数据源）+ 按当前日报/周报类型加载报告。
+      if (name === 'reports') { loadTopics(); loadReport(); }
     }
     loadSessions();
     // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
@@ -1453,9 +1583,25 @@ const app = createApp({
       agentConversations, agentConvId, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
       loadAgentConversations, newAgentConversation, selectAgentConversation, sendAgentMessage,
       renderMarkdown, reportSections, prettyJSON,
+      // 报告（日报/周报 + 话题状态）
+      reportKind, reportDate, reportWeekStart, reportRow, reportLoading, reportError, reportContent, reportFailed,
+      loadReport, regenReport, switchReportKind, weeklyCharts, fmtNum, pct, maxCount, sevMeta,
+      statusTopicId, topicStatusRow, topicStatusLoading, topicStatusError, topicStatusContent, topicStatusFailed,
+      loadTopicStatus, onPickStatusTopic,
     };
   }
 });
 // v-focus：表单展开时自动聚焦输入框（v-if 挂载即触发 mounted）
 app.directive('focus', { mounted: el => el.focus() });
+// report-list：报告分节列表（小标题 + 字符串数组；空数组回退「（无）」）。
+// 每项只用 Vue 文本插值 {{ it }} 渲染（自动转义，LLM 文本安全），复用报告页 CSS 类。
+// 用于日报/周报/话题状态里多处「字符串数组」字段，避免模板重复。
+app.component('report-list', {
+  props: { label: { type: String, default: '' }, items: { type: Array, default: () => [] } },
+  template: `<div class="report-sec">
+    <div class="report-sec-title">{{ label }}</div>
+    <ul v-if="items && items.length" class="report-ul"><li v-for="(it, i) in items" :key="i">{{ it }}</li></ul>
+    <div v-else class="muted">（无）</div>
+  </div>`,
+});
 app.mount('#app');

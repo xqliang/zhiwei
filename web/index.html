@@ -248,6 +248,46 @@
   /* 输入区：贴底，多行自适应 */
   .agent-input { display: flex; gap: 8px; align-items: flex-end; margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
   .agent-input textarea { flex: 1; resize: none; min-height: 44px; max-height: 160px; }
+
+  /* ===== 报告（日报 / 周报 + 话题状态） =====
+     沿用卡片/徽标/CSS 变量：日报/周报切换用 .preset 胶囊；进展用进度条；
+     数组字段用分节列表（空→「（无）」）；周报趋势用手绘内联 SVG（无图表库）。 */
+  .report-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .report-toolbar .spacer { flex: 1; }
+  /* 报告主标题（headline / summary，走 renderMarkdown 转义后注入） */
+  .report-headline { font-size: var(--fs-lg); font-weight: 700; line-height: 1.5; }
+  .report-headline p { margin: 0 0 6px; }
+  .report-headline p:last-child { margin-bottom: 0; }
+  /* 分节：小标题 + 列表；空数组回退「（无）」 */
+  .report-sec { margin-top: 14px; }
+  .report-sec-title { font-size: var(--fs-xs); font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+  .report-ul { margin: 0; padding-left: 20px; }
+  .report-ul li { margin: 3px 0; line-height: 1.6; }
+  /* 进度条（0..1）：概略进展 / 按话题进展 */
+  .progress-row { display: flex; align-items: center; gap: 10px; margin: 4px 0 2px; }
+  .progress-track { flex: 1; height: 8px; background: var(--surface-sunken); border-radius: 99px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); border-radius: 99px; transition: width .3s ease; }
+  .progress-pct { font-size: var(--fs-sm); font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; min-width: 42px; text-align: right; }
+  /* 风险严重度徽标（复用 .badge 基类） */
+  .badge.sev-high { background: var(--danger-soft); color: var(--danger); }
+  .badge.sev-medium { background: var(--warn-soft); color: var(--warn); }
+  .badge.sev-low { background: var(--surface-sunken); color: var(--muted); }
+  .risk-item { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; }
+  .risk-item .risk-desc { flex: 1; min-width: 0; }
+  /* 周报「按话题」块 */
+  .bytopic { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; margin: 8px 0; background: var(--surface-2); }
+  .bytopic-name { font-weight: 600; margin-bottom: 2px; }
+  /* 手绘趋势图（inline SVG，折线 + 圆点 + 基线 + 轴标签，品牌靛蓝） */
+  .trend-chart { margin: 10px 0 4px; }
+  .trend-metric { font-size: var(--fs-sm); font-weight: 600; color: var(--text-2); margin-bottom: 2px; }
+  .trend-chart svg { width: 100%; height: auto; display: block; }
+  .trend-chart .axis { stroke: var(--border-strong); stroke-width: 1; }
+  .trend-chart .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .trend-chart .dot { fill: var(--accent); }
+  .trend-chart .lbl { fill: var(--muted); font-size: 10px; }
+  .trend-chart .val { fill: var(--text-2); font-size: 9px; }
+  /* 话题分布迷你条形（日报） */
+  .mini-bar-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
 </style>
 </head>
 <body>
@@ -256,6 +296,7 @@
     <span class="brand">知微</span>
     <button :class="{active: tab==='timeline'}" @click="switchTab('timeline')">时间线</button>
     <button :class="{active: tab==='agent'}" @click="switchTab('agent')">问知微</button>
+    <button :class="{active: tab==='reports'}" @click="switchTab('reports')">报告</button>
     <button :class="{active: tab==='record'}" @click="switchTab('record')">录音</button>
     <button :class="{active: tab==='voiceprint'}" @click="switchTab('voiceprint')">声纹</button>
     <button :class="{active: tab==='topics'}" @click="switchTab('topics')">主题</button>
@@ -633,6 +674,174 @@
           </div>
         </template>
       </div>
+    </div>
+  </div>
+
+  <!-- ============ 报告（日报/周报 + 话题状态） ============ -->
+  <!-- 内容全部来自 LLM：headline/summary 经 renderMarkdown（转义优先）注入；其余字段走 {{ }} 自动转义。
+       所有数组字段都对 null/undefined 兜底为 []，空时显示「（无）」。 -->
+  <div class="wrap" v-if="tab==='reports'">
+    <!-- 工具栏：日报/周报切换 + 日期选择 + 重新生成 -->
+    <div class="report-toolbar">
+      <button class="preset" :class="{active: reportKind==='daily'}" @click="switchReportKind('daily')">日报</button>
+      <button class="preset" :class="{active: reportKind==='weekly'}" @click="switchReportKind('weekly')">周报</button>
+      <input v-if="reportKind==='daily'" type="date" class="mini" v-model="reportDate" title="日报日期" @change="loadReport">
+      <input v-else type="date" class="mini" v-model="reportWeekStart" title="周报周起始（任填本周任一天，后端归一到周一）" @change="loadReport">
+      <div class="spacer"></div>
+      <button class="btn mini" :disabled="reportLoading" @click="regenReport" title="强制调用模型重新生成">
+        <span v-if="reportLoading" class="spinner"></span>{{ reportLoading ? '生成中…' : '重新生成' }}
+      </button>
+    </div>
+
+    <!-- 加载骨架（首次生成需调模型，稍候） -->
+    <div class="card" v-if="reportLoading && !reportContent">
+      <div class="muted" style="margin-bottom:8px"><span class="spinner"></span> 正在加载报告…（若首次生成需调用模型，请稍候）</div>
+      <div class="skeleton-line med"></div><div class="skeleton-line"></div><div class="skeleton-line short"></div>
+    </div>
+
+    <!-- 生成失败 / 内容为空 → 友好提示 + 重新生成 -->
+    <div class="card" v-else-if="reportFailed">
+      <div class="kv">
+        <div style="min-width:0">
+          <b>生成失败，请重试</b>
+          <div class="muted" v-if="reportError">{{ reportError }}</div>
+          <div class="muted" v-else>报告内容为空或未成功生成。</div>
+        </div>
+        <button class="btn primary" style="padding:7px 16px" :disabled="reportLoading" @click="regenReport">
+          <span v-if="reportLoading" class="spinner"></span>{{ reportLoading ? '生成中…' : '重新生成' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- 报告卡 -->
+    <div class="card" v-else-if="reportContent">
+      <div class="report-headline" v-html="renderMarkdown(reportContent.headline || '')"></div>
+
+      <!-- ===== 日报 ===== -->
+      <template v-if="reportKind==='daily'">
+        <report-list label="要点" :items="reportContent.highlights || []"></report-list>
+        <report-list label="决定" :items="reportContent.decisions || []"></report-list>
+        <report-list label="待办 · 新增" :items="(reportContent.todos || {}).new || []"></report-list>
+        <report-list label="待办 · 完成" :items="(reportContent.todos || {}).done || []"></report-list>
+        <report-list label="待办 · 未完成" :items="(reportContent.todos || {}).open || []"></report-list>
+        <report-list label="洞察" :items="reportContent.insights || []"></report-list>
+        <report-list label="明日计划" :items="reportContent.tomorrow || []"></report-list>
+        <!-- 话题分布：迷你条形（按当天计数缩放） -->
+        <div class="report-sec">
+          <div class="report-sec-title">话题分布</div>
+          <template v-if="(reportContent.topic_distribution || []).length">
+            <div class="mini-bar-row" v-for="(t, ti) in reportContent.topic_distribution" :key="ti">
+              <b style="min-width:80px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">{{ t.topic }}</b>
+              <div class="progress-track"><div class="progress-fill" :style="{width: Math.max(3, (t.count || 0) / maxCount(reportContent.topic_distribution) * 100) + '%'}"></div></div>
+              <span class="progress-pct">{{ t.count || 0 }}</span>
+            </div>
+          </template>
+          <div v-else class="muted">（无）</div>
+        </div>
+      </template>
+
+      <!-- ===== 周报 ===== -->
+      <template v-else>
+        <!-- 趋势图：每条 trend 一张手绘 SVG 折线图 -->
+        <div class="report-sec">
+          <div class="report-sec-title">趋势</div>
+          <template v-if="weeklyCharts.length">
+            <div class="trend-chart" v-for="(ch, ci) in weeklyCharts" :key="ci">
+              <div class="trend-metric">{{ ch.metric || ('趋势 ' + (ci + 1)) }}</div>
+              <!-- viewBox 写死常量（chartGeom 恒为 520x150）：避开 in-DOM 模板把 :viewBox 小写成 :viewbox 的坑 -->
+              <svg viewBox="0 0 520 150" role="img" :aria-label="ch.metric || '趋势图'">
+                <!-- y 轴标注：顶部 max，底部 0 -->
+                <text class="val" x="4" :y="ch.geom.padT + 4">{{ ch.geom.maxLabel }}</text>
+                <text class="val" x="4" :y="ch.geom.baselineY + 3">0</text>
+                <!-- 基线 -->
+                <line class="axis" :x1="ch.geom.padL" :y1="ch.geom.baselineY" x2="506" :y2="ch.geom.baselineY"></line>
+                <!-- 折线（≥2 点才画线） -->
+                <polyline v-if="ch.geom.pts.length > 1" class="line" :points="ch.geom.polyline"></polyline>
+                <!-- 每个点一组（用 SVG 原生 <g>，避免 <template> 在内联 svg 里被 HTML 解析器错解） -->
+                <g v-for="(p, pi) in ch.geom.pts" :key="pi">
+                  <circle class="dot" :cx="p.x" :cy="p.y" r="2.5"></circle>
+                  <text class="val" :x="p.x" :y="p.y - 6" text-anchor="middle">{{ fmtNum(p.v) }}</text>
+                  <text class="lbl" :x="p.x" :y="ch.geom.baselineY + 14" text-anchor="middle">{{ p.label }}</text>
+                </g>
+              </svg>
+            </div>
+          </template>
+          <div v-else class="muted">（无）</div>
+        </div>
+        <!-- 按话题：名称 + 进度条 + 关键事件/未完成待办/风险 -->
+        <div class="report-sec">
+          <div class="report-sec-title">按话题</div>
+          <div v-if="!(reportContent.by_topic || []).length" class="muted">（无）</div>
+          <div class="bytopic" v-for="(bt, bi) in (reportContent.by_topic || [])" :key="bi">
+            <div class="bytopic-name">{{ bt.topic }}</div>
+            <div class="progress-row">
+              <div class="progress-track"><div class="progress-fill" :style="{width: pct(bt.progress) + '%'}"></div></div>
+              <span class="progress-pct">{{ pct(bt.progress) }}%</span>
+            </div>
+            <report-list label="关键事件" :items="bt.key_events || []"></report-list>
+            <report-list label="未完成待办" :items="bt.open_todos || []"></report-list>
+            <report-list label="风险" :items="bt.risks || []"></report-list>
+          </div>
+        </div>
+        <report-list label="全局风险" :items="reportContent.risks || []"></report-list>
+        <report-list label="下周计划" :items="reportContent.next_week || []"></report-list>
+      </template>
+      <div class="muted" style="margin-top:14px; font-size:var(--fs-xs)" v-if="reportRow && reportRow.created_at">生成于 {{ fmtTime(reportRow.created_at) }}</div>
+    </div>
+
+    <!-- 初始/未加载兜底 -->
+    <div class="card empty" v-else>选择日期后将自动加载报告。</div>
+
+    <!-- ===== 话题状态报告 ===== -->
+    <div class="todo-group-title">话题状态</div>
+    <div class="report-toolbar">
+      <select class="mini" v-model="statusTopicId" @change="onPickStatusTopic" style="min-width:200px">
+        <option value="">选择一个主题…</option>
+        <option v-for="t in topics" :key="t.id" :value="t.id">{{ t.name }}</option>
+      </select>
+      <div class="spacer"></div>
+      <button v-if="statusTopicId" class="btn mini" :disabled="topicStatusLoading" @click="loadTopicStatus(true)" title="强制重算">
+        <span v-if="topicStatusLoading" class="spinner"></span>{{ topicStatusLoading ? '生成中…' : '刷新' }}
+      </button>
+    </div>
+
+    <div v-if="!statusTopicId" class="card empty">选择一个主题，查看其状态报告（进展 / 未完成待办 / 风险等）。</div>
+    <div v-else-if="topicStatusLoading && !topicStatusContent" class="card">
+      <div class="muted" style="margin-bottom:8px"><span class="spinner"></span> 正在生成话题状态…（首次生成需调用模型）</div>
+      <div class="skeleton-line med"></div><div class="skeleton-line"></div>
+    </div>
+    <div v-else-if="topicStatusFailed" class="card">
+      <div class="kv">
+        <div style="min-width:0">
+          <b>生成失败，请重试</b>
+          <div class="muted" v-if="topicStatusError">{{ topicStatusError }}</div>
+          <div class="muted" v-else>状态内容为空或未成功生成。</div>
+        </div>
+        <button class="btn primary" style="padding:7px 16px" :disabled="topicStatusLoading" @click="loadTopicStatus(true)">
+          <span v-if="topicStatusLoading" class="spinner"></span>{{ topicStatusLoading ? '生成中…' : '重新生成' }}
+        </button>
+      </div>
+    </div>
+    <div v-else-if="topicStatusContent" class="card">
+      <div class="report-headline" v-html="renderMarkdown(topicStatusContent.summary || '')"></div>
+      <div class="progress-row" style="margin-top:8px">
+        <div class="progress-track"><div class="progress-fill" :style="{width: pct(topicStatusContent.progress) + '%'}"></div></div>
+        <span class="progress-pct">{{ pct(topicStatusContent.progress) }}%</span>
+      </div>
+      <report-list label="里程碑" :items="topicStatusContent.milestones || []"></report-list>
+      <report-list label="决定" :items="topicStatusContent.decisions || []"></report-list>
+      <report-list label="未完成待办" :items="topicStatusContent.open_todos || []"></report-list>
+      <!-- 风险：带严重度徽标 -->
+      <div class="report-sec">
+        <div class="report-sec-title">风险</div>
+        <div v-if="!(topicStatusContent.risks || []).length" class="muted">（无）</div>
+        <div class="risk-item" v-for="(rk, ri) in (topicStatusContent.risks || [])" :key="ri">
+          <span class="badge" :class="sevMeta(rk.severity).cls">{{ sevMeta(rk.severity).label }}</span>
+          <span class="risk-desc">{{ rk.desc }}</span>
+        </div>
+      </div>
+      <report-list label="阻塞" :items="topicStatusContent.blockers || []"></report-list>
+      <div class="muted" style="margin-top:14px; font-size:var(--fs-xs)" v-if="topicStatusRow && topicStatusRow.generated_at">生成于 {{ fmtTime(topicStatusRow.generated_at) }}</div>
     </div>
   </div>
 
@@ -1091,6 +1300,6 @@
   </div>
 </div>
 
-<script src="/app/app.1c39b595.js"></script>
+<script src="/app/app.4f16ae3b.js"></script>
 </body>
 </html>
