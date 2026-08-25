@@ -680,6 +680,14 @@ const app = createApp({
       return order.map(k => ({ day: k, label: dayLabel(k), items: map[k] }));
     });
 
+    // 详情区是否有「提取的记忆 / 待办 / 整理草稿」——决定转写与洞察是否分双栏：
+    // 有洞察时（宽屏）右侧栏展示记忆/待办卡片，转写列表在左；无则单栏全宽给转写。
+    const detailInsights = computed(() => {
+      const d = detail.value;
+      return !!(d && ((d.memories && d.memories.length) ||
+                      (d.todos && d.todos.length) || memoryDraft.value));
+    });
+
     // ---------- ASR 转写就地编辑 ----------
     // segDraft = { [segId]: text }：键存在即该段处于编辑态（点击进入、保存/取消清键）。
     const segDraft = ref({});
@@ -1194,7 +1202,7 @@ const app = createApp({
       tab, toast, switchTab,
       fmtTime, fmtDue, typeMeta, statusText, todoStatusText, spClass,
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissingMemId, askDismissMem, cancelDismissMem, confirmDismissMem, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
-      tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay,
+      tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay, detailInsights,
       segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript, rawAsrView, toggleRawAsr,
       sessionAudioEl, tlPlayingSegId, toggleTimelineSegPlay, onTimelineAudioTimeUpdate,
       mergeMode, mergeSelected, mergeCount, mergeTarget, enterMergeMode, cancelMerge, toggleMergeSelect, confirmMerge,

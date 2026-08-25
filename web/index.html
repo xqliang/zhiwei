@@ -76,6 +76,16 @@
   .tabs button:hover { color: var(--text-2); }
   .tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
   .wrap { max-width: 780px; margin: 0 auto; padding: 18px 16px 80px; animation: fadeup .28s ease both; }
+  /* 时间线页加宽版：宽屏下配合详情双栏（转写 | 记忆/待办）利用横向空间 */
+  .wrap.wrap-lg { max-width: 1100px; }
+  /* 会话详情双栏：默认（窄屏）单栏纵排；≥960px 且有洞察内容时转写在左、记忆/待办卡片在右。
+     无洞察（detailInsights=false）时 aside 不渲染，grid 退化为单列全宽。 */
+  .detail-cols { display: flex; flex-direction: column; gap: 0; }
+  .detail-aside { min-width: 0; }
+  @media (min-width: 960px) {
+    .detail-cols.has-aside { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 0 18px; align-items: start; }
+    .detail-aside { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; }
+  }
   @keyframes fadeup { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
   /* 卡片：分层阴影 + 描边 + 顶部高光 */
@@ -212,7 +222,7 @@
   <div v-if="toast" class="toast">{{ toast }}</div>
 
   <!-- ============ 时间线 ============ -->
-  <div class="wrap" v-if="tab==='timeline'">
+  <div class="wrap wrap-lg" v-if="tab==='timeline'">
     <!-- 工具栏：搜索 + 日期范围筛选 -->
     <div class="toolbar">
       <input class="txt" v-model="tlSearch" placeholder="搜索转写内容 / 文件名…">
@@ -322,6 +332,10 @@
               <button class="btn mini" @click="enrollOpen=false">取消</button>
             </div>
           </div>
+          <!-- 详情双栏（宽屏）：转写在左（detail-main）；有记忆/待办/整理草稿时
+               右栏（detail-aside，sticky）展示提取卡片——不用滚到转写列表底部才能看到 -->
+          <div class="detail-cols" :class="{ 'has-aside': detailInsights }">
+          <div class="detail-main">
           <div class="kv" style="margin-bottom:6px">
             <b>转写详情</b>
             <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap">
@@ -385,7 +399,10 @@
             <span class="raw-text">{{ sg.text }}</span>
           </div>
           </template>
-
+          </div><!-- /detail-main -->
+          <!-- 右栏：提取的记忆 / 记忆整理草稿 / 待办。detailInsights=false 时整栏不渲染，
+               detail-cols 退化为单列全宽（转写不被压缩） -->
+          <div class="detail-aside" v-if="detailInsights">
           <!-- memory 卡片 -->
           <template v-if="detail.memories && detail.memories.length">
             <div class="kv" style="margin-top:10px">
@@ -467,6 +484,8 @@
               <div class="muted" v-if="td.due_at">截止 {{ fmtDue(td.due_at) }} · 到「待办」页处理</div>
             </div>
           </template>
+          </div><!-- /detail-aside -->
+          </div><!-- /detail-cols -->
         </div>
       </div>
     </div>
@@ -938,6 +957,6 @@
   </div>
 </div>
 
-<script src="/app/app.b50b9172.js"></script>
+<script src="/app/app.9c5394dc.js"></script>
 </body>
 </html>
