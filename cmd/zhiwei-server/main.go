@@ -19,6 +19,7 @@ import (
 	"zhiwei/internal/pipeline"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/review"
 	"zhiwei/internal/storage"
 	"zhiwei/internal/voiceprint"
 )
@@ -59,6 +60,8 @@ func main() {
 	memoryTopics := &repo.MemoryTopicRepo{DB: db}
 	todoTopics := &repo.TodoTopicRepo{DB: db}
 	speakers := &repo.SpeakerRepo{DB: db}
+	reviews := &repo.ReviewRepo{DB: db}
+	topicStatuses := &repo.TopicStatusRepo{DB: db}
 
 	// 抽取 prompt（版本化文件，运行时读取；版本号见文件名与文件首行）
 	promptBytes, err := os.ReadFile(promptPath)
@@ -78,6 +81,24 @@ func main() {
 	memoryConsolidateBytes, err := os.ReadFile("prompts/memory_consolidate_v1.md")
 	if err != nil {
 		log.Fatal("读取记忆整理 prompt 失败: ", err)
+	}
+
+	// 报告 prompt（日/周/话题状态）+ 对话转记忆 prompt（版本化文件；版本号见文件名）。
+	reviewDailyBytes, err := os.ReadFile("prompts/review_daily_v1.md")
+	if err != nil {
+		log.Fatal("读取日报 prompt 失败: ", err)
+	}
+	reviewWeeklyBytes, err := os.ReadFile("prompts/review_weekly_v1.md")
+	if err != nil {
+		log.Fatal("读取周报 prompt 失败: ", err)
+	}
+	topicStatusBytes, err := os.ReadFile("prompts/topic_status_v1.md")
+	if err != nil {
+		log.Fatal("读取话题状态 prompt 失败: ", err)
+	}
+	convExtractBytes, err := os.ReadFile("prompts/conversation_extraction_v1.md")
+	if err != nil {
+		log.Fatal("读取对话转记忆 prompt 失败: ", err)
 	}
 
 	// pipeline 装配：ASR 默认 file（StepFun 异步文件 ASR，原生 diarization + ms 时间戳）。
@@ -105,6 +126,18 @@ func main() {
 	}
 	voiceprintCli := voiceprint.NewClient(cfg.VoiceprintSidecarURL)
 	llm := provider.NewArkLLM(cfg.ARKBaseURL, cfg.ARKAPIKey)
+
+	// Agent / 报告共用模型：ZW_AGENT_MODEL 优先，未配则回退强模型（见 config §14）。
+	agentModel := cfg.AgentModel
+	if agentModel == "" {
+		agentModel = cfg.LLMStrongModel
+	}
+	// 报告引擎（日/周报 + 话题状态）：直连 Ark LLM（非 dsh 边车），复用现有 repo。
+	reviewer := review.NewGenerator(llm, agentModel,
+		string(reviewDailyBytes), "review_daily_v1",
+		string(reviewWeeklyBytes), "review_weekly_v1",
+		string(topicStatusBytes), "topic_status_v1",
+		reviews, topicStatuses, memories, todos, topics, sessions, transcripts)
 	stages := pipeline.BuildStages(pipeline.StageDeps{
 		Sessions: sessions, Transcripts: transcripts, ASR: asr, DataDir: cfg.DataDir,
 		DB: db, Memories: memories, Todos: todos, Topics: topics,
@@ -129,6 +162,9 @@ func main() {
 	defer stop()
 	pool.Start(ctx)
 
+	// 日报 cron（内部 time.Timer；仅解析 cron 的时/分，见 review.NewScheduler 注释）。
+	review.NewScheduler(reviewer, cfg.ReviewDailyCron).Start(ctx)
+
 	r := api.NewRouter()
 	api.RegisterAudio(r, sessions, jobs, cfg.DataDir)
 	api.RegisterQuery(r, &api.QueryHandler{
@@ -150,6 +186,8 @@ func main() {
 		Topics: topics, Memories: memories, Todos: todos,
 		LLM: llm, LLMModel: cfg.LLMFastModel, ConsolidatePrompt: string(consolidateBytes),
 	})
+	// 报告 API：/api/reviews/daily|weekly（取最新或生成/强制重生）+ /api/topics/{id}/status。
+	api.RegisterReviews(r, reviewer)
 
 	// MCP 工具端点（仅供本机 dsh 边车经 streamable-http 连回；不对外）。
 	// 进程内运行、复用上面已开库的 repo 实例（同一个 DB 池）。
@@ -160,6 +198,8 @@ func main() {
 		Topic:      topics,
 		Todo:       todos,
 	})
+	// 报告工具（generate_report / get_topic_status）注册进同一 MCP server，供 dsh agent 调用。
+	review.RegisterReportTools(mcpSrv, reviewer)
 	mcpHandler := agent.MCPHandler(mcpSrv)
 	r.Handle("/internal/mcp", mcpHandler)
 	r.Handle("/internal/mcp/*", mcpHandler)
@@ -180,6 +220,14 @@ func main() {
 			Orch:          agent.NewOrchestrator(rt, agentConvs, agentMsgs),
 			Conversations: agentConvs,
 			Messages:      agentMsgs,
+		})
+		// 对话转记忆端点：POST /api/agent/conversations/{cid}/extract（幂等，直连 Ark LLM）。
+		agent.RegisterExtract(r, memory.ConversationExtractDeps{
+			DB: db, AgentMessages: agentMsgs, Topics: topics, Memories: memories, MemoryTopics: memoryTopics,
+			LLM: llm, Model: agentModel,
+			Prompt: string(convExtractBytes), PromptVersion: "conversation_extraction_v1",
+			Window: cfg.ExtractWindow,
+			Gate:   memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
 		})
 	}
 
