@@ -67,6 +67,7 @@ func main() {
 	persons := &repo.PersonRepo{DB: db}
 	personAttrs := &repo.PersonAttributeRepo{DB: db}
 	personRels := &repo.PersonRelationshipRepo{DB: db}
+	personEvents := &repo.PersonEventRepo{DB: db}
 	personLogs := &repo.PersonChangeLogRepo{DB: db}
 	// 画像回填：owner「我」+ speaker→person（幂等，见 repo.EnsurePersonBootstrap）
 	if err := repo.EnsurePersonBootstrap(context.Background(), persons, speakers); err != nil {
@@ -134,7 +135,7 @@ func main() {
 	profileSvc := &profile.Service{
 		DB: db, Sessions: sessions, Transcripts: transcripts, Memories: memories,
 		Speakers: speakers, Persons: persons, Attributes: personAttrs,
-		Relationships: personRels, ChangeLogs: personLogs,
+		Relationships: personRels, Events: personEvents, ChangeLogs: personLogs,
 		LLM: llm, Model: cfg.LLMFastModel, Prompt: string(profilePromptBytes),
 		PromptVersion: profilePromptVersion,
 		Window:        cfg.ProfileExtractWindow, Gate: profile.GateConfig{AutoConf: cfg.ProfileAutoConfidence},

@@ -34,6 +34,7 @@ func newTestService(t *testing.T) *Service {
 		Speakers:      &repo.SpeakerRepo{DB: db},
 		Attributes:    &repo.PersonAttributeRepo{DB: db},
 		Relationships: &repo.PersonRelationshipRepo{DB: db},
+		Events:        &repo.PersonEventRepo{DB: db},
 		ChangeLogs:    &repo.PersonChangeLogRepo{DB: db},
 		Gate:          GateConfig{AutoConf: 0.75},
 	}
@@ -174,5 +175,118 @@ func TestApplyFactsGatePaths(t *testing.T) {
 	}
 	if st4.Reaffirmed != 1 {
 		t.Fatalf("同值重申应 reaffirm: %+v", st4)
+	}
+}
+
+func TestApplyEventFacts(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+
+	// 本用例把旅行/升职/健康事件写到共享 owner（user_id=1），并经 related 自动新建 pending
+	// 人物「旅行同伴」。本包所有测试共用同一 zhiwei_test 库、不逐个重置；这些行若留到下一次
+	// -count=1 重跑（或后续 api/repo 包测试跑在本包之后），会让事件计数/reaffirm/审计断言失真。
+	// 收尾删掉 owner 的 person_event、owner 的 event 审计条目、以及「旅行同伴」人物，恢复干净
+	// 基线（模式参照 extract_session_test.go / TestApplyFactsGatePaths）。提前用 t.Cleanup 注册，
+	// 保证任一断言 t.Fatal 提前退出时也会清理。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			ownerPK := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_event WHERE person_id = ?`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'`, ownerPK)
+		}
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person WHERE user_id = 1 AND display_name = '旅行同伴'`)
+	})
+
+	sess := ids.New()
+
+	facts := []Fact{
+		// ① 高置信旅行事件 → active；occurred_at/end_at 解析成功
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "旅行", EventTitle: "去云南旅游",
+			EventDescription: "和家人自驾", OccurredAt: "2026-07-20", EndAt: "2026-07-27",
+			EventLocation: "云南", Related: Subject{Kind: "mentioned", Name: "旅行同伴"},
+			Confidence: 0.9, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+		// ② 低置信里程碑 → pending；occurred_at 烂串 → NULL 仍创建
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "里程碑", EventTitle: "升职",
+			OccurredAt: "去年夏天", Confidence: 0.6, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+	}
+	st, err := svc.ApplyFacts(ctx, sess, 1, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Active != 1 || st.Pending != 1 || st.Skipped != 0 {
+		t.Fatalf("统计错误: %+v", st)
+	}
+
+	evs, err := svc.Events.ListByPerson(ctx, oid)
+	if err != nil || len(evs) != 2 {
+		t.Fatalf("应 2 条事件: %d %v", len(evs), err)
+	}
+	// ListByPerson 时间倒序：有时间的旅行在前，NULL 的升职在后
+	trip := evs[0]
+	if trip.EventType != "旅行" || trip.Status != "active" || trip.Source != "llm" {
+		t.Fatalf("旅行事件错误: %+v", trip)
+	}
+	if trip.OccurredAt == nil || trip.EndAt == nil || trip.Location == nil || trip.Description == nil {
+		t.Fatalf("旅行事件可选字段应解析: %+v", trip)
+	}
+	// related 解析：自动新建 pending 人物「旅行同伴」
+	comp, _ := svc.Persons.FindByName(ctx, 1, "旅行同伴")
+	if comp == nil || comp.Status != "pending" {
+		t.Fatalf("related 应建 pending 人物: %+v", comp)
+	}
+	if len(trip.RelatedPersonIDs) != 1 || trip.RelatedPersonIDs[0] != comp.ID {
+		t.Fatalf("RelatedPersonIDs 错误: %v", trip.RelatedPersonIDs)
+	}
+	promo := evs[1]
+	if promo.Status != "pending" || promo.OccurredAt != nil {
+		t.Fatalf("升职应 pending 且时间为 NULL: %+v", promo)
+	}
+
+	// 幂等：同 session 重跑全 skip
+	st2, err := svc.ApplyFacts(ctx, sess, 1, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st2.Skipped != 2 || st2.Active != 0 || st2.Pending != 0 {
+		t.Fatalf("重跑应全 skip: %+v", st2)
+	}
+
+	// 佐证：另一 session 同键 → reaffirm（不 bump、不加行）
+	sess2 := ids.New()
+	st3, err := svc.ApplyFacts(ctx, sess2, 1, []Fact{
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "旅行", EventTitle: "去云南旅游",
+			Confidence: 0.9, EpistemicType: "observed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st3.Reaffirmed != 1 {
+		t.Fatalf("同键应 reaffirm: %+v", st3)
+	}
+	evs2, _ := svc.Events.ListByPerson(ctx, oid)
+	if len(evs2) != 2 {
+		t.Fatalf("reaffirm 不应加行: %d", len(evs2))
+	}
+
+	// 手动加/删事件
+	me, err := svc.ManualAddEvent(ctx, oid, "健康", "确诊高血压", "长期服药", "2025-06-01", "", "北京协和", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if me.Status != "active" || me.Source != "manual" || me.OccurredAt == nil {
+		t.Fatalf("手动事件错误: %+v", me)
+	}
+	if err := svc.ManualDeleteEvent(ctx, me.ID); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := svc.Events.Get(ctx, me.ID); d.Status != "dismissed" {
+		t.Fatalf("删除应 dismissed: %+v", d)
+	}
+	// 审计：event 平面条目（llm create×2 + reaffirm + user create + delete）
+	logs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "event", "")
+	if len(logs) < 5 {
+		t.Fatalf("event 审计不足: %d", len(logs))
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -28,6 +29,7 @@ type Service struct {
 	Persons       *repo.PersonRepo
 	Attributes    *repo.PersonAttributeRepo
 	Relationships *repo.PersonRelationshipRepo
+	Events        *repo.PersonEventRepo // event 平面（P2 大事记）
 	ChangeLogs    *repo.PersonChangeLogRepo
 
 	LLM           provider.LLMProvider // ExtractSession 用（Task 13）；手动 CRUD 不需要
@@ -99,6 +101,9 @@ func (s *Service) applyFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fa
 	}
 	memID := matchMemory(memRows, f.SegmentIDs)
 
+	if f.Plane == "event" {
+		return s.applyEventFact(ctx, tx, userID, f, personID, memID, prov, st)
+	}
 	if f.Plane == "relationship" {
 		return s.applyRelationshipFact(ctx, tx, userID, f, personID, memID, prov, st)
 	}
@@ -219,6 +224,62 @@ func (s *Service) applyRelationshipFact(ctx context.Context, tx *sqlx.Tx, userID
 			return err
 		}
 		if err := s.ChangeLogs.CreateExt(ctx, tx, createRelLog(personID, row, memID, prov)); err != nil {
+			return err
+		}
+		if status == "active" {
+			st.Active++
+		} else {
+			st.Pending++
+		}
+	}
+	return nil
+}
+
+// ---- 事件平面（P2 大事记）----
+
+// applyEventFact 事件落库：闸门（同键佐证/新键按置信度）+ 单事务 + 审计。
+// related 为可选增强（解析不到存空 RelatedPersonIDs，不阻断事件创建——见 fact.go 注释）。
+func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
+	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
+
+	existing, err := s.Events.FindActiveByKeyExt(ctx, tx, personID, f.EventType, f.EventTitle)
+	if err != nil {
+		return err
+	}
+	dedup, err := s.Events.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, f.EventType, f.EventTitle)
+	if err != nil {
+		return err
+	}
+
+	dec := DecideEvent(f, existing, dedup != nil, s.Gate)
+	switch dec {
+	case DecisionSkip:
+		st.Skipped++
+	case DecisionReaffirm:
+		// 事件无置信佐证语义（不 bump），持久化效果=审计条目——同 relationship reaffirm 模式
+		if err := s.ChangeLogs.CreateExt(ctx, tx, reaffirmEventLog(personID, existing, memID, prov)); err != nil {
+			return err
+		}
+		st.Reaffirmed++
+	default:
+		status := "pending"
+		if dec == DecisionCreateActive {
+			status = "active"
+		}
+		// related 解析（可选）：解析不到存空，不 skip 事件
+		var relatedIDs ids.List
+		if f.Related.Kind != "" {
+			if rid, err := s.resolveSubject(ctx, tx, f.Related, prov); err != nil {
+				return err
+			} else if rid != 0 {
+				relatedIDs = ids.List{rid}
+			}
+		}
+		row := eventRow(userID, personID, f, relatedIDs, status, memID, prov)
+		if err := s.Events.CreateExt(ctx, tx, row); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, createEventLog(personID, row, memID, prov)); err != nil {
 			return err
 		}
 		if status == "active" {
@@ -387,6 +448,52 @@ func relRow(userID int64, personID ids.ID, f Fact, relatedID ids.ID, status stri
 	return row
 }
 
+func eventRow(userID int64, personID ids.ID, f Fact, relatedIDs ids.List, status string,
+	memID *ids.ID, prov Provenance) *repo.PersonEvent {
+	row := &repo.PersonEvent{
+		UserID: userID, PersonID: personID,
+		EventType: f.EventType, Title: f.EventTitle,
+		Confidence: f.Confidence, EpistemicType: f.EpistemicType,
+		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+		RelatedPersonIDs:     relatedIDs,
+		// MVP：importance 用 confidence 代（手动路径 1.0/LLM 路径闸后值）——
+		// 独立重要度建模留后续，spec §13 已记
+		Importance: f.Confidence,
+	}
+	if f.EventDescription != "" {
+		row.Description = strPtr(f.EventDescription)
+	}
+	if t, ok := parseEventAt(f.OccurredAt); ok {
+		row.OccurredAt = &t
+	}
+	if t, ok := parseEventAt(f.EndAt); ok {
+		row.EndAt = &t
+	}
+	if f.EventLocation != "" {
+		row.Location = strPtr(f.EventLocation)
+	}
+	return row
+}
+
+func createEventLog(personID ids.ID, row *repo.PersonEvent, memID *ids.ID, prov Provenance) *repo.PersonChangeLog {
+	return &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "event", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "llm", NewValue: snap(row.Title),
+		Confidence: fp(row.Confidence), SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+}
+
+func reaffirmEventLog(personID ids.ID, row *repo.PersonEvent, memID *ids.ID, prov Provenance) *repo.PersonChangeLog {
+	return &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "event", EntityID: &row.ID,
+		ChangeType: "reaffirm", ChangedBy: "llm", NewValue: snap(row.Title),
+		SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+}
+
 func createAttrLog(personID ids.ID, row *repo.PersonAttribute, memID *ids.ID, prov Provenance, note string) *repo.PersonChangeLog {
 	l := &repo.PersonChangeLog{
 		PersonID: personID, EntityKind: "attribute", EntityID: &row.ID,
@@ -477,4 +584,17 @@ func idPtr(id ids.ID) *ids.ID {
 		return nil
 	}
 	return &id
+}
+
+// parseEventAt 尽力解析事件时间：RFC3339 → YYYY-MM-DD → YYYY-MM（月份精度）；
+// 全部失败返回 ok=false（调用方存 NULL——事件仍创建，标题里常含时间信息）。
+// 解析职责在此而非 ParseFacts：Fact 是传输载体，时间精度策略属落库层。
+func parseEventAt(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{time.RFC3339, "2006-01-02", "2006-01"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
