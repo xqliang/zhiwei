@@ -1207,6 +1207,28 @@ const app = createApp({
       return { attribute: '属性', relationship: '关系', person: '新人物' }[k] || k;
     }
 
+    // ---------- 从历史回填抽取（POST /api/profile/extract：不带 session_id = 最近 50 个 completed，同步） ----------
+    const backfilling = ref(false);
+    const backfillInfo = ref(null); // { processed, active, pending, skipped, errors }
+    async function runBackfill() {
+      if (backfilling.value) return;
+      backfilling.value = true;
+      backfillInfo.value = null;
+      try {
+        const d = await api('POST', '/api/profile/extract', {});
+        const rs = d.results || [];
+        backfillInfo.value = {
+          processed: d.processed || rs.length,
+          active: rs.reduce((s, r) => s + (r.active || 0), 0),
+          pending: rs.reduce((s, r) => s + (r.pending || 0), 0),
+          skipped: rs.reduce((s, r) => s + (r.skipped || 0), 0),
+          errors: rs.filter(r => r.error).length,
+        };
+        await refreshAfterQueue(); // 新 pending 可能进队列
+      } catch (e) { showError(e); }
+      finally { backfilling.value = false; }
+    }
+
     // ---------- 声纹 tab（名册管理：列表 / 录入 / 改名 / 删除 + 点开看关联录音并按时间段播放） ----------
     // 复用说话人面板既有能力：allSpeakers / enrollForm / enrolling / submitEnroll / onEnrollDrop、
     // renamingSpeaker / startRenameSpeaker / commitRenameSpeaker、askDeleteSpeaker、loadAllSpeakers、speakerColor。
@@ -1502,6 +1524,7 @@ const app = createApp({
       ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
       pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
+      backfilling, backfillInfo, runBackfill,
     };
   }
 });

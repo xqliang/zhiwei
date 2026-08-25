@@ -643,7 +643,18 @@
     <div class="kv" style="margin-bottom:12px">
       <b style="font-size:var(--fs-lg)">人物</b>
       <div style="display:flex; gap:6px">
+        <button class="btn mini" @click="runBackfill" :disabled="backfilling">
+          <span v-if="backfilling" class="spinner"></span>{{ backfilling ? '抽取中…' : '从历史抽取画像' }}
+        </button>
         <button class="btn primary" style="padding:7px 16px" @click="toggleNewPerson">{{ showNewPerson ? '收起' : '＋ 新建' }}</button>
+      </div>
+    </div>
+
+    <!-- 回填结果摘要（最近 50 段录音同步重放；单段失败不中断） -->
+    <div class="card sunken" v-if="backfillInfo" style="margin-bottom:12px">
+      <div class="kv">
+        <span class="muted">已回填 {{ backfillInfo.processed }} 段录音：{{ backfillInfo.active }} 条生效 · {{ backfillInfo.pending }} 条待确认 · {{ backfillInfo.skipped }} 条跳过<span v-if="backfillInfo.errors"> · {{ backfillInfo.errors }} 段失败</span></span>
+        <button class="btn-link" @click="backfillInfo=null">✕</button>
       </div>
     </div>
 
