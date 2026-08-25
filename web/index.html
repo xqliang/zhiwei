@@ -168,7 +168,7 @@
   .field-label { display: block; font-size: var(--fs-xs); font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
   /* topic 标签编辑行：已有 chip（带 ✕）+ 「+ 关联」虚线胶囊下拉，内联紧凑 */
   .topic-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
-  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: var(--fs-xs); font-weight: 500; line-height: 1.4; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: var(--fs-xs); font-weight: 500; line-height: 1.4; cursor: default; }
   .chip-x { background: none; border: none; color: inherit; opacity: .45; cursor: pointer; font-size: 11px; padding: 0 4px; line-height: 1; }
   .chip-x:hover { opacity: 1; }
   .chip-add { position: relative; display: inline-flex; align-items: center; padding: 3px 12px; border-radius: 99px; border: 1px dashed var(--border-strong); color: var(--muted); font-size: var(--fs-xs); cursor: pointer; background: var(--surface); white-space: nowrap; }
@@ -205,6 +205,7 @@
     <button :class="{active: tab==='timeline'}" @click="switchTab('timeline')">时间线</button>
     <button :class="{active: tab==='record'}" @click="switchTab('record')">录音</button>
     <button :class="{active: tab==='voiceprint'}" @click="switchTab('voiceprint')">声纹</button>
+    <button :class="{active: tab==='persons'}" @click="switchTab('persons')">人物</button>
     <button :class="{active: tab==='topics'}" @click="switchTab('topics')">主题</button>
     <button :class="{active: tab==='memories'}" @click="switchTab('memories')">记忆</button>
     <button :class="{active: tab==='todos'}" @click="switchTab('todos')">待办</button>
@@ -624,6 +625,55 @@
             <button class="btn primary" style="padding:7px 14px" @click="applySpMerge">确认合并</button>
           </template>
           <button class="btn mini" @click="cancelSpMerge">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 人物 tab：名册 + 详情（就地展开）+ 确认队列 + 回填 -->
+  <div class="wrap" v-if="tab==='persons'">
+    <div class="kv" style="margin-bottom:12px">
+      <b style="font-size:var(--fs-lg)">人物</b>
+      <div style="display:flex; gap:6px">
+        <button class="btn primary" style="padding:7px 16px" @click="showNewPerson = !showNewPerson">{{ showNewPerson ? '收起' : '＋ 新建' }}</button>
+      </div>
+    </div>
+
+    <!-- 新建人物 -->
+    <div class="card" v-if="showNewPerson">
+      <div class="kv" style="margin-bottom:12px"><b>新建人物</b><button class="btn-link" @click="cancelNewPerson">✕</button></div>
+      <label class="field-label">姓名 *</label>
+      <input class="txt" v-model="newPerson.display_name" placeholder="如：张三" style="margin-bottom:8px">
+      <label class="field-label">关联声纹 speaker_id（可空；只被提到的人可不绑）</label>
+      <input class="txt" v-model="newPerson.speaker_id" placeholder="从声纹 tab 复制 id，可留空" style="margin-bottom:8px">
+      <label class="field-label">备注</label>
+      <input class="txt" v-model="newPerson.summary" placeholder="一句话备注（可空）" style="margin-bottom:8px">
+      <div class="edit-actions">
+        <button class="btn primary" :disabled="creatingPerson" @click="createPerson">
+          <span v-if="creatingPerson" class="spinner"></span>{{ creatingPerson ? '创建中…' : '创建' }}
+        </button>
+        <button class="btn mini" @click="cancelNewPerson">取消</button>
+      </div>
+    </div>
+
+    <!-- 名册卡片 -->
+    <div v-if="!persons.length" class="card empty">还没有人物。点「新建」，或上传录音后由画像抽取自动生成。</div>
+    <div class="card" v-for="p in persons" :key="p.id" style="cursor:pointer" @click="togglePerson(p.id)">
+      <div class="kv">
+        <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
+          <b>{{ p.display_name }}</b>
+          <span v-if="p.is_owner" class="chip" style="cursor:default; background:var(--accent-soft); color:var(--accent)">我</span>
+          <span v-if="p.speaker_id" class="muted" title="已关联声纹">🎙</span>
+          <span v-if="p.source === 'llm'" class="muted">自动识别</span>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-shrink:0" @click.stop>
+          <span v-if="p.pending_count" class="chip" style="cursor:default; background:var(--warn-soft); color:var(--warn)" title="待确认的属性/关系数">{{ p.pending_count }} 待确认</span>
+          <template v-if="archivingPersonId === p.id">
+            <span class="muted">归档？</span>
+            <button class="btn mini danger" @click="confirmArchivePerson(p)">确认</button>
+            <button class="btn mini" @click="cancelArchivePerson()">取消</button>
+          </template>
+          <button v-else class="btn mini" @click="askArchivePerson(p)">归档</button>
         </div>
       </div>
     </div>

@@ -931,6 +931,89 @@ const app = createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 人物 tab（用户画像：名册 / 详情 / 确认队列 / 回填） ----------
+    // 后端契约见 internal/api/person.go：读直连 repo 响应、变更走 Service（审计+事务）。
+    const persons = ref([]);            // 名册（GET /api/persons → {persons:[PersonWithPending]}）
+    const personDetail = ref(null);     // 当前详情（GET /api/persons/{id}，Task 2 用）
+    const showNewPerson = ref(false);   // 新建人物表单开合
+    const newPerson = ref({ display_name: '', speaker_id: '', summary: '' });
+    const creatingPerson = ref(false);  // 防重复提交
+    const renamingPerson = ref(null);   // { id, name } 详情改名（Task 2 用）
+
+    async function loadPersons() {
+      try {
+        const d = await api('GET', '/api/persons');
+        persons.value = d.persons || [];
+      } catch (e) { showError(e); }
+    }
+    function cancelNewPerson() {
+      showNewPerson.value = false;
+      newPerson.value = { display_name: '', speaker_id: '', summary: '' };
+      creatingPerson.value = false;
+    }
+    async function createPerson() {
+      if (creatingPerson.value) return;
+      const name = newPerson.value.display_name.trim();
+      if (!name) { toast.value = '请输入姓名'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      creatingPerson.value = true;
+      try {
+        // speaker_id 可空（只被提到、没录音的人也能建档）；后端校验声纹冲突返回 409
+        const body = { display_name: name };
+        if (newPerson.value.speaker_id.trim()) body.speaker_id = newPerson.value.speaker_id.trim();
+        if (newPerson.value.summary.trim()) body.summary = newPerson.value.summary.trim();
+        await api('POST', '/api/persons', body);
+        cancelNewPerson();
+        await loadPersons();
+        toast.value = '人物已创建'; setTimeout(() => { toast.value = ''; }, 2000);
+      } catch (e) { showError(e); }
+      finally { creatingPerson.value = false; }
+    }
+    // 点名册卡片：已展开收起；否则拉详情（Task 2 渲染详情卡；本任务先实现数据拉取与切换）
+    async function togglePerson(id) {
+      if (personDetail.value && personDetail.value.person.id === id) { closePersonDetail(); return; }
+      try { personDetail.value = await api('GET', '/api/persons/' + id); }
+      catch (e) { showError(e); }
+    }
+    function closePersonDetail() {
+      personDetail.value = null;
+      renamingPerson.value = null;
+      // Task 3/4 将在此追加：attrHistory/editingAttr/showAddAttr/showAddRel 等临时态清理
+    }
+    async function reloadPersonDetail() {
+      if (!personDetail.value) return;
+      try { personDetail.value = await api('GET', '/api/persons/' + personDetail.value.person.id); }
+      catch (e) { showError(e); }
+    }
+    // 人物改名（详情内就地编辑，Task 2 渲染；本任务先定义）
+    function startRenamePerson() {
+      renamingPerson.value = { id: personDetail.value.person.id, name: personDetail.value.person.display_name };
+    }
+    async function commitRenamePerson() {
+      const rn = renamingPerson.value;
+      renamingPerson.value = null;
+      if (!rn || !rn.name.trim()) return;
+      try {
+        await api('PATCH', '/api/persons/' + rn.id, { display_name: rn.name.trim() });
+        await reloadPersonDetail();
+        await loadPersons();
+      } catch (e) {
+        renamingPerson.value = rn; // 失败恢复编辑态防输入丢失
+        showError(e);
+      }
+    }
+    // 人物归档（2 步确认；DELETE = status=dismissed 软删）
+    const archivingPersonId = ref(null);
+    function askArchivePerson(p) { archivingPersonId.value = p.id; }
+    function cancelArchivePerson() { archivingPersonId.value = null; }
+    async function confirmArchivePerson(p) {
+      try {
+        await api('DELETE', '/api/persons/' + p.id);
+        archivingPersonId.value = null;
+        if (personDetail.value && personDetail.value.person.id === p.id) closePersonDetail();
+        await loadPersons();
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 声纹 tab（名册管理：列表 / 录入 / 改名 / 删除 + 点开看关联录音并按时间段播放） ----------
     // 复用说话人面板既有能力：allSpeakers / enrollForm / enrolling / submitEnroll / onEnrollDrop、
     // renamingSpeaker / startRenameSpeaker / commitRenameSpeaker、askDeleteSpeaker、loadAllSpeakers、speakerColor。
@@ -1179,6 +1262,8 @@ const app = createApp({
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; loadTopics(); loadTodos(); loadDismissedTodos(); }
       // 声纹 tab：进入时复位本 tab 的临时态（收起录入表单/展开项/改名/播放）并拉全量名册。
       if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; loadAllSpeakers(); }
+      // 人物 tab：进入时复位详情/归档确认态并拉名册（loadPending 是 Task 5 的，先不引用）。
+      if (name === 'persons') { closePersonDetail(); archivingPersonId.value = null; loadPersons(); }
     }
     loadSessions();
     // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
@@ -1219,6 +1304,7 @@ const app = createApp({
       loadTodos, setTodoStatus, jumpToSession,
       editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
+      persons, personDetail, showNewPerson, newPerson, creatingPerson, loadPersons, cancelNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
     };
   }
 });
