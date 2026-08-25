@@ -1234,11 +1234,14 @@ const app = createApp({
       }
       return order.map(k => ({ year: k, items: map[k] }));
     });
-    // 事件日期展示：occurred_at ISO → 「M月D日」；空显「—」
-    function fmtEventDate(iso) {
+    // 事件日期展示：occurred_at ISO → 「M月D日」（已按年分组，组内不再重复年）；
+    // withYear=true 输出含年「YYYY年M月D日」，供无年上下文的「时间未知」组用；空显「—」。
+    function fmtEventDate(iso, withYear) {
       if (!iso) return '—';
       const d = new Date(iso);
-      return isNaN(d.getTime()) ? iso : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+      if (isNaN(d.getTime())) return iso;
+      const md = `${d.getMonth() + 1}月${d.getDate()}日`;
+      return withYear ? `${d.getFullYear()}年${md}` : md;
     }
     function resetAddEventForm() {
       addEventForm.event_type = ''; addEventForm.title = ''; addEventForm.description = '';

@@ -885,9 +885,10 @@
             <div class="seg-text">
               <div>
                 <b>{{ ev.title }}</b>
-                <span class="muted"> · {{ fmtEventDate(ev.occurred_at) }}</span>
+                <span class="muted"> · {{ fmtEventDate(ev.occurred_at, g.year === '时间未知') }}</span>
+                <span v-if="ev.end_at" class="muted"> 至 {{ fmtEventDate(ev.end_at, g.year === '时间未知') }}</span>
                 <span v-if="ev.location" class="muted"> · {{ ev.location }}</span>
-                <span v-if="ev.event_type === '旅行' && ev.end_at" class="muted"> 至 {{ fmtEventDate(ev.end_at) }}</span>
+                <span v-if="ev.related_person_ids && ev.related_person_ids.length" class="muted"> · 与 {{ ev.related_person_ids.map(id => personNameOf(id)).join('、') }} 同行/同场</span>
                 <span class="chip" :style="ev.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ ev.source === 'llm' ? 'AI' : '人工' }}</span>
                 <span v-if="ev.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
               </div>
