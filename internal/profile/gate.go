@@ -75,3 +75,19 @@ func DecideRelationship(f Fact, existing *repo.PersonRelationship, dedupHit bool
 	}
 	return DecisionCreatePending
 }
+
+// DecideEvent 事件闸门（spec §4.4/§5）：事件天然多条追加（同 relationship 无冲突路径）——
+// 同键（person,类型,title）已 active → 佐证（事件无置信佐证语义，持久化效果=审计
+// 条目，同 relationship reaffirm 模式）；新键按置信度 create。
+func DecideEvent(f Fact, existing *repo.PersonEvent, dedupHit bool, cfg GateConfig) Decision {
+	if dedupHit {
+		return DecisionSkip
+	}
+	if existing != nil {
+		return DecisionReaffirm
+	}
+	if autoWritable(f, cfg) {
+		return DecisionCreateActive
+	}
+	return DecisionCreatePending
+}
