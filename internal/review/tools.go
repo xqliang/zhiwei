@@ -21,7 +21,7 @@ func RegisterReportTools(s *mcp.Server, gen *Generator) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_topic_status",
-		Description: "取某话题(项目/主题)的整体状态快照(进展/里程碑/未完成待办/风险/阻塞)。现算并落库，返回最新快照。",
+		Description: "取某话题(项目/主题)的整体状态快照(进展/里程碑/未完成待办/风险/阻塞)。优先返回已持久化的最新快照；仅当从无快照时才生成一次。需强制重算请用 generate_report{type:topic_status}。",
 	}, getTopicStatusHandler(gen))
 }
 
@@ -54,7 +54,8 @@ func generateReportHandler(gen *Generator) func(context.Context, *mcp.CallToolRe
 		case "daily":
 			day := time.Now()
 			if a.Target != "" {
-				d, err := time.Parse("2006-01-02", a.Target)
+				// 与 time.Now()（本地）同一时区解析，避免窗口错位（对齐 api.parseDateOrToday）
+				d, err := time.ParseInLocation("2006-01-02", a.Target, time.Local)
 				if err != nil {
 					return nil, nil, fmt.Errorf("target 日期非法(需 YYYY-MM-DD): %w", err)
 				}
@@ -68,7 +69,8 @@ func generateReportHandler(gen *Generator) func(context.Context, *mcp.CallToolRe
 		case "weekly":
 			base := time.Now()
 			if a.Target != "" {
-				d, err := time.Parse("2006-01-02", a.Target)
+				// 与 time.Now()（本地）同一时区解析，避免 mondayOf 切出错位的周窗口
+				d, err := time.ParseInLocation("2006-01-02", a.Target, time.Local)
 				if err != nil {
 					return nil, nil, fmt.Errorf("target 日期非法(需 YYYY-MM-DD): %w", err)
 				}
@@ -105,6 +107,13 @@ func getTopicStatusHandler(gen *Generator) func(context.Context, *mcp.CallToolRe
 		if err != nil {
 			return nil, nil, fmt.Errorf("topic_id 非法: %w", err)
 		}
+		// 读优先（对齐 HTTP GET /api/topics/{id}/status）：有持久化快照就直接返回最新，
+		// 不每次都重算 → 既省一次 LLM 调用，又避免 topic_status 表被无界追加。
+		// 历史坑：此工具原先每调一次就 gen.TopicStatus（重算 + INSERT 新快照 + 耗 token）。
+		if row, err := gen.TopicStatuses.GetLatest(ctx, tid); err == nil && row != nil {
+			return jsonResult(row)
+		}
+		// 从无快照才生成一次（写路径）；显式重算/刷新走 generate_report{type:topic_status}。
 		row, err := gen.TopicStatus(ctx, tid)
 		if err != nil {
 			return nil, nil, err

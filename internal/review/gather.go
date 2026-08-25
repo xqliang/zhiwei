@@ -2,13 +2,19 @@ package review
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
+
+// ErrTopicNotFound 表示话题不存在（sentinel）。上层 HTTP handler 用 errors.Is 识别它，
+// 把「话题不存在」映射为 404 而非默认的 502（区分"客户端给了错 id"与"生成链路故障"）。
+var ErrTopicNotFound = errors.New("话题不存在")
 
 // dayRange 返回 date 所在自然日的 [start, end)（保 date 的时区）。
 func dayRange(date time.Time) (start, end time.Time) {
@@ -27,8 +33,11 @@ func (g *Generator) gatherDaily(ctx context.Context, date time.Time) (DailyInput
 	start, end := dayRange(date)
 	in := DailyInput{Date: start}
 
-	// 记忆：Since=start 取 event_at>=start（倒序），Go 内再滤 <end；按话题分组
-	mrows, err := g.Memories.List(ctx, repo.MemoryFilter{Since: &start, Limit: 200})
+	// 记忆：把窗口 [start,end) 整体下推到 SQL（Since=下界含等于 / Before=上界不含），
+	// 而不是「Since 下界 + 倒序取前 N 行再 Go 内滤 <end」——后者对过去的日期会取到全是
+	// 晚于窗口的最新行，Go 侧 inRange 全滤掉 → 明明有数据却汇聚为空。Limit 用 repo 上限 200
+	// （单日记忆量远小于此）。inRange 保留仅作 event_at 为 NULL 的防御。按话题分组
+	mrows, err := g.Memories.List(ctx, repo.MemoryFilter{Since: &start, Before: &end, Limit: 200})
 	if err != nil {
 		return in, fmt.Errorf("汇聚 memory: %w", err)
 	}
@@ -149,33 +158,39 @@ func (g *Generator) gatherWeekly(ctx context.Context, weekStart time.Time) (Week
 		}
 	}
 
-	// 本周记忆（按话题 + 每日计数）
-	mrows, err := g.Memories.List(ctx, repo.MemoryFilter{Since: &ws, Limit: 500})
-	if err != nil {
-		return in, fmt.Errorf("汇聚 memory: %w", err)
-	}
+	// 本周记忆（按话题 + 每日计数）：按天分页拉取。
+	// 历史坑：一周记忆可能超过 repo 单次上限 200，若一把 List(Limit:500) 会被 listWhere
+	// 静默夹成 50（500>200 → 回退默认 50）→ 数据被 truncate；且旧写法只给 Since 下界、
+	// 倒序取前 N 行，对过去的周会全是晚于窗口的行、Go 侧 inRange 全滤掉 → 汇聚为空。
+	// 改为对 7 天各取一次，每天把窗口 [dayStart, dayEnd) 下推到 SQL（Since/Before），
+	// 单日 200 上限足够；顺带按天累加 DailyMemoryCnt（trends 就绪序列）。
 	byTopic := map[string][]string{}
 	var order []string
-	for _, m := range mrows {
-		if m.EventAt == nil || !inRange(*m.EventAt, ws, rangeEnd) {
-			continue
+	for i := 0; i < 7; i++ {
+		dayStart := ws.AddDate(0, 0, i)
+		dayEnd := dayStart.AddDate(0, 0, 1)
+		mrows, err := g.Memories.List(ctx, repo.MemoryFilter{Since: &dayStart, Before: &dayEnd, Limit: 200})
+		if err != nil {
+			return in, fmt.Errorf("汇聚 memory: %w", err)
 		}
-		dayIdx := int(m.EventAt.Sub(ws).Hours()) / 24
-		if dayIdx >= 0 && dayIdx < 7 {
-			in.DailyMemoryCnt[dayIdx]++
-		}
-		names := []string{"未归类"}
-		if len(m.Topics) > 0 {
-			names = names[:0]
-			for _, tp := range m.Topics {
-				names = append(names, tp.Name)
+		for _, m := range mrows {
+			if m.EventAt == nil { // SQL 已窗口化到当天；此处仅防御 event_at 为 NULL
+				continue
 			}
-		}
-		for _, tn := range names {
-			if _, ok := byTopic[tn]; !ok {
-				order = append(order, tn)
+			in.DailyMemoryCnt[i]++
+			names := []string{"未归类"}
+			if len(m.Topics) > 0 {
+				names = names[:0]
+				for _, tp := range m.Topics {
+					names = append(names, tp.Name)
+				}
 			}
-			byTopic[tn] = append(byTopic[tn], m.Title)
+			for _, tn := range names {
+				if _, ok := byTopic[tn]; !ok {
+					order = append(order, tn)
+				}
+				byTopic[tn] = append(byTopic[tn], m.Title)
+			}
 		}
 	}
 	for _, tn := range order {
@@ -228,7 +243,12 @@ func (g *Generator) gatherTopicStatus(ctx context.Context, topicID ids.ID) (Topi
 	var in TopicStatusInput
 	tp, err := g.Topics.Get(ctx, topicID)
 	if err != nil {
-		return in, fmt.Errorf("话题不存在: %w", err)
+		// 话题不存在（无此行）用 sentinel 包裹，供 handler errors.Is → 404；
+		// 其余 DB 错误按原样上抛（handler 默认 502）。
+		if errors.Is(err, sql.ErrNoRows) {
+			return in, fmt.Errorf("%w: id=%d", ErrTopicNotFound, topicID.Int64())
+		}
+		return in, fmt.Errorf("查询话题: %w", err)
 	}
 	in.TopicName = tp.Name
 

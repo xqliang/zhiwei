@@ -90,3 +90,88 @@ func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return json.RawMessage(b)
 }
+
+// ---- nil 切片兜底（M5）----
+// 模型可能省略某些数组字段 → 解析后为 nil 切片 → JSON 序列化成 null，违反 prompt
+// 「数组无内容用 []」的图表就绪契约（前端 .map 会因 null 报错）。以下 normalize* 在
+// 序列化前把 nil 切片补成非 nil 空切片（[]T{}），保证输出是 [] 而非 null。
+// 注：带 omitempty 的可选字段（如 Trend.Labels）保持 nil 即被省略，不在兜底范围。
+
+// normalizeDaily 兜底日报所有切片字段（含 todos 三分组）。
+func normalizeDaily(c *DailyContent) {
+	if c.Highlights == nil {
+		c.Highlights = []string{}
+	}
+	if c.Decisions == nil {
+		c.Decisions = []string{}
+	}
+	if c.Todos.New == nil {
+		c.Todos.New = []string{}
+	}
+	if c.Todos.Done == nil {
+		c.Todos.Done = []string{}
+	}
+	if c.Todos.Open == nil {
+		c.Todos.Open = []string{}
+	}
+	if c.Insights == nil {
+		c.Insights = []string{}
+	}
+	if c.Tomorrow == nil {
+		c.Tomorrow = []string{}
+	}
+	if c.TopicDistribution == nil {
+		c.TopicDistribution = []TopicCount{}
+	}
+}
+
+// normalizeWeekly 兜底周报顶层切片，以及每个 by_topic / trends 元素的内部切片。
+func normalizeWeekly(c *WeeklyContent) {
+	if c.ByTopic == nil {
+		c.ByTopic = []WeeklyTopic{}
+	}
+	for i := range c.ByTopic {
+		if c.ByTopic[i].KeyEvents == nil {
+			c.ByTopic[i].KeyEvents = []string{}
+		}
+		if c.ByTopic[i].OpenTodos == nil {
+			c.ByTopic[i].OpenTodos = []string{}
+		}
+		if c.ByTopic[i].Risks == nil {
+			c.ByTopic[i].Risks = []string{}
+		}
+	}
+	if c.Trends == nil {
+		c.Trends = []Trend{}
+	}
+	for i := range c.Trends {
+		if c.Trends[i].Series == nil {
+			c.Trends[i].Series = []float64{}
+		}
+	}
+	if c.Risks == nil {
+		c.Risks = []string{}
+	}
+	if c.NextWeek == nil {
+		c.NextWeek = []string{}
+	}
+}
+
+// normalizeTopicStatus 兜底话题状态所有切片字段。
+func normalizeTopicStatus(c *TopicStatusContent) {
+	if c.Milestones == nil {
+		c.Milestones = []string{}
+	}
+	if c.Decisions == nil {
+		c.Decisions = []string{}
+	}
+	if c.OpenTodos == nil {
+		c.OpenTodos = []string{}
+	}
+	if c.Risks == nil {
+		c.Risks = []Risk{}
+	}
+	if c.Blockers == nil {
+		c.Blockers = []string{}
+	}
+}

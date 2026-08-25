@@ -61,6 +61,7 @@ func (g *Generator) generateDaily(ctx context.Context, in DailyInput) (*DailyCon
 	if err != nil {
 		return nil, nil, err
 	}
+	normalizeDaily(c) // 兜底 nil 切片 → []，避免落库/返回时序列化成 null（M5）
 	return c, mustJSON(c), nil
 }
 
@@ -74,6 +75,7 @@ func (g *Generator) generateWeekly(ctx context.Context, in WeeklyInput) (*Weekly
 	if err != nil {
 		return nil, nil, err
 	}
+	normalizeWeekly(c) // 兜底 nil 切片 → []（含 by_topic/trends 元素内部切片）（M5）
 	return c, mustJSON(c), nil
 }
 
@@ -87,5 +89,6 @@ func (g *Generator) generateTopicStatus(ctx context.Context, in TopicStatusInput
 	if err != nil {
 		return nil, nil, err
 	}
+	normalizeTopicStatus(c) // 兜底 nil 切片 → []，避免序列化成 null（M5）
 	return c, mustJSON(c), nil
 }

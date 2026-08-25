@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -27,11 +28,14 @@ func RegisterReviews(r chi.Router, gen *review.Generator) {
 }
 
 // parseDateOrToday 解析 ?date=YYYY-MM-DD；空则用今天。第二返回值 ok=false 表示格式非法。
+// 时区统一走 time.Local：time.Now() 本就是本地时区，显式日期也用 ParseInLocation(..., Local)
+// 解析，二者落在同一 Location，避免「今天=本地 / 显式日期=UTC」导致 dayRange 切出错位的窗口
+// （单用户场景按本地自然日语义）。scheduler / MCP 工具的日期默认与此一致。
 func parseDateOrToday(s string) (time.Time, bool) {
 	if s == "" {
 		return time.Now(), true
 	}
-	t, err := time.Parse("2006-01-02", s)
+	t, err := time.ParseInLocation("2006-01-02", s, time.Local)
 	if err != nil {
 		return time.Time{}, false
 	}
@@ -138,6 +142,11 @@ func (h *ReviewHandler) getTopicStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	row, err := h.Gen.TopicStatus(r.Context(), tid)
 	if err != nil {
+		// 话题不存在 → 404（客户端给了错 id）；其余生成链路故障 → 502。
+		if errors.Is(err, review.ErrTopicNotFound) {
+			writeJSONError(w, err.Error(), http.StatusNotFound)
+			return
+		}
 		writeJSONError(w, err.Error(), http.StatusBadGateway)
 		return
 	}

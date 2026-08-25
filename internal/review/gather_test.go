@@ -3,7 +3,10 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,4 +145,94 @@ func TestTopicStatusPersist(t *testing.T) {
 	if _, err := g.TopicStatus(ctx, tp.ID); err == nil {
 		t.Error("解析失败应上抛")
 	}
+}
+
+// TestGatherWeeklyWindowsPastWeek 复现并验证 I1（truncate + mis-window）修复：
+// 目标是一个"过去的周"，且库里存在大量比该周更晚的记忆。修复前 gatherWeekly 用
+// List(Since:ws, Limit:500) —— 500 被 repo 夹成 50 → 只取最新 50 条（全是远期记忆）→
+// inRange 按周窗口全部滤掉 → 窗口内真实记忆被漏掉。修复后按天把 [dayStart,dayEnd)
+// 下推到 SQL，窗口内记忆稳定被汇聚、窗口外记忆不出现。需要独立库（无 DSN 自动跳过）。
+func TestGatherWeeklyWindowsPastWeek(t *testing.T) {
+	g := newGenWithFake(t, &fakeLLM{}) // gatherWeekly 不调 LLM
+	ctx := context.Background()
+
+	ws := time.Date(2020, 6, 1, 0, 0, 0, 0, time.UTC) // 2020-06-01 是周一
+	sid := ids.New()
+	t.Cleanup(func() { _ = g.Memories.DeleteBySessionExt(context.Background(), g.Memories.DB, sid) })
+
+	inWindow := ws.AddDate(0, 0, 2).Add(10 * time.Hour) // 周三 10:00，落在 [ws, ws+7d)
+	const inTitle = "窗口内记忆-2020周"
+	batch := []*repo.Memory{{
+		Type: "event", Title: inTitle, Content: "x", EpistemicType: "observed",
+		SessionID: &sid, Status: "active", EventAt: &inWindow, Confidence: 0.9,
+	}}
+	// 60 条远期(2035)记忆：均晚于窗口下界 ws 且数量 >50，用于复现旧 bug 的挤占场景
+	for i := 0; i < 60; i++ {
+		ev := time.Date(2035, 1, 1, 12, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Minute)
+		batch = append(batch, &repo.Memory{
+			Type: "event", Title: fmt.Sprintf("远期噪声-%d", i), Content: "y", EpistemicType: "observed",
+			SessionID: &sid, Status: "active", EventAt: &ev, Confidence: 0.9,
+		})
+	}
+	if err := g.Memories.InsertExt(ctx, g.Memories.DB, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	in, err := g.gatherWeekly(ctx, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, tl := range in.MemoriesByTopic {
+		lines = append(lines, tl.Lines...)
+	}
+	if !containsStr(lines, inTitle) {
+		t.Errorf("窗口内记忆应被汇聚，实际 = %v", lines)
+	}
+	for _, l := range lines {
+		if strings.HasPrefix(l, "远期噪声-") {
+			t.Errorf("窗口外(远期)记忆不应出现: %s", l)
+		}
+	}
+	if in.DailyMemoryCnt[2] < 1 { // 周三桶应计到窗口内那条
+		t.Errorf("DailyMemoryCnt[周三] 应>=1, got %v", in.DailyMemoryCnt)
+	}
+}
+
+// TestTopicStatusNotFound 验证 M4：不存在的话题返回 sentinel ErrTopicNotFound
+//（handler 据此映射 404）。gather 阶段即返回，不触 LLM。需要独立库（无 DSN 自动跳过）。
+func TestTopicStatusNotFound(t *testing.T) {
+	g := newGenWithFake(t, &fakeLLM{Err: errors.New("话题不存在时不应调用 LLM")})
+	if _, err := g.TopicStatus(context.Background(), ids.New()); !errors.Is(err, ErrTopicNotFound) {
+		t.Errorf("不存在话题应返回 ErrTopicNotFound, got %v", err)
+	}
+}
+
+// TestDayRangeStable 验证 I2：dayRange 保持入参时区、切出 [00:00, 次日00:00) 的整天、且幂等。
+// 纯单元（无需 DB / DSN）。
+func TestDayRangeStable(t *testing.T) {
+	d := time.Date(2026, 8, 25, 15, 30, 0, 0, time.Local)
+	s, e := dayRange(d)
+	if s.Location() != time.Local || e.Location() != time.Local {
+		t.Errorf("dayRange 应保持入参时区(Local), got start=%s end=%s", s.Location(), e.Location())
+	}
+	if s.Hour() != 0 || s.Minute() != 0 || s.Second() != 0 {
+		t.Errorf("start 应为当日 00:00, got %s", s)
+	}
+	if !e.Equal(s.AddDate(0, 0, 1)) {
+		t.Errorf("[start,end) 应恰为一整天, start=%s end=%s", s, e)
+	}
+	if s2, e2 := dayRange(s); !s2.Equal(s) || !e2.Equal(e) {
+		t.Errorf("dayRange 应稳定/幂等, got start=%s end=%s", s2, e2)
+	}
+}
+
+// containsStr 是测试小工具：判断切片是否含某字符串。
+func containsStr(ss []string, target string) bool {
+	for _, s := range ss {
+		if s == target {
+			return true
+		}
+	}
+	return false
 }

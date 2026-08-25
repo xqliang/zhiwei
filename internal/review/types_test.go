@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"zhiwei/internal/provider"
@@ -37,5 +38,65 @@ func TestDailyContentRoundTrip(t *testing.T) {
 	}
 	if out.Headline != in.Headline || len(out.Highlights) != 2 || out.Todos.New[0] != "n1" {
 		t.Errorf("round-trip 丢字段: %+v", out)
+	}
+}
+
+// ---- M5：nil 切片兜底成 [] 而非 null ----
+
+// TestNormalizeDailyNoNullSlices：日报所有切片留 nil，normalize 后序列化应全为 []。
+func TestNormalizeDailyNoNullSlices(t *testing.T) {
+	c := &DailyContent{Headline: "只有标题"} // 所有切片留 nil
+	normalizeDaily(c)
+	b := string(mustJSON(c))
+	for _, want := range []string{
+		`"highlights":[]`, `"decisions":[]`,
+		`"new":[]`, `"done":[]`, `"open":[]`,
+		`"insights":[]`, `"tomorrow":[]`, `"topic_distribution":[]`,
+	} {
+		if !strings.Contains(b, want) {
+			t.Errorf("应含 %s，实际 = %s", want, b)
+		}
+	}
+	if strings.Contains(b, "null") {
+		t.Errorf("不应出现 null: %s", b)
+	}
+}
+
+// TestNormalizeWeeklyNoNullSlices：验证顶层 + by_topic/trends 元素内部切片都被兜底。
+func TestNormalizeWeeklyNoNullSlices(t *testing.T) {
+	c := &WeeklyContent{
+		Headline: "本周",
+		ByTopic:  []WeeklyTopic{{Topic: "工作", Progress: 0.5}}, // KeyEvents/OpenTodos/Risks nil
+		Trends:   []Trend{{Metric: "每日记忆数"}},                    // Series nil
+	}
+	normalizeWeekly(c)
+	b := string(mustJSON(c))
+	for _, want := range []string{
+		`"key_events":[]`, `"open_todos":[]`, `"risks":[]`,
+		`"series":[]`, `"next_week":[]`,
+	} {
+		if !strings.Contains(b, want) {
+			t.Errorf("应含 %s，实际 = %s", want, b)
+		}
+	}
+	if strings.Contains(b, "null") {
+		t.Errorf("不应出现 null: %s", b)
+	}
+}
+
+// TestNormalizeTopicStatusNoNullSlices：话题状态所有切片留 nil，normalize 后应全为 []。
+func TestNormalizeTopicStatusNoNullSlices(t *testing.T) {
+	c := &TopicStatusContent{Summary: "s"} // 切片留 nil
+	normalizeTopicStatus(c)
+	b := string(mustJSON(c))
+	for _, want := range []string{
+		`"milestones":[]`, `"decisions":[]`, `"open_todos":[]`, `"risks":[]`, `"blockers":[]`,
+	} {
+		if !strings.Contains(b, want) {
+			t.Errorf("应含 %s，实际 = %s", want, b)
+		}
+	}
+	if strings.Contains(b, "null") {
+		t.Errorf("不应出现 null: %s", b)
 	}
 }

@@ -51,8 +51,12 @@ type MemoryFilter struct {
 	Type    string
 	TopicID *ids.ID
 	Since   *time.Time // 事件时间下界（含等于），spec §4 的 since 过滤
-	Limit   int
-	Offset  int
+	// Before 事件时间上界（不含）。可选（nil=无上界）：与 Since 配合可把
+	// 时间窗口 [Since, Before) 完整下推到 SQL。这是新增字段，既有调用方留 nil
+	// 即保持原语义（无上界），不受影响（详见 review.gather 的窗口化修复）。
+	Before *time.Time
+	Limit  int
+	Offset int
 }
 
 type MemoryRepo struct{ DB *sqlx.DB }
@@ -168,6 +172,12 @@ func (r *MemoryRepo) List(ctx context.Context, f MemoryFilter) ([]MemoryRow, err
 	if f.Since != nil {
 		// 键里带操作符：listWhere 见到含空格的键会按原样拼接（见其注释）
 		where["m.event_at >="] = *f.Since
+	}
+	if f.Before != nil {
+		// 事件时间上界（不含）：与 Since 一起把窗口 [Since, Before) 完整下推到 SQL，
+		// 复用 listWhere 的「键自带操作符」机制（键含空格 → 按原样拼接为 "列 < ?"）。
+		// 与 Since 键不同（">=" vs "<"），二者在 map 中并存互不覆盖。
+		where["m.event_at <"] = *f.Before
 	}
 	return r.listWhere(ctx, where, f.TopicID, f.Limit, f.Offset)
 }
