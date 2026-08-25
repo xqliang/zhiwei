@@ -694,6 +694,18 @@ const app = createApp({
     function segEditing(sg) { return !!(sg && sg.id !== undefined && segDraft.value[sg.id] !== undefined); }
     function startEditSeg(sg) { segDraft.value[sg.id] = sg.text; }
     function cancelEditSeg(sg) { delete segDraft.value[sg.id]; }
+    // 单段保存：只提交该段草稿，其余段的草稿保持编辑态互不影响
+    // （顶部「保存转写修改」是批量路径，本函数是段编辑框旁边的逐段路径）。
+    async function saveSegEdit(s, sg) {
+      const text = segDraft.value[sg.id];
+      if (text === undefined) return;
+      try {
+        await api('PATCH', '/api/sessions/' + s.id + '/transcript', { segments: [{ id: sg.id, text }] });
+        delete segDraft.value[sg.id];
+        await reloadSession(s.id);
+        toast.value = '转写已保存'; setTimeout(() => { toast.value = ''; }, 2000);
+      } catch (e) { showError(e); }
+    }
     const segDirty = computed(() => Object.keys(segDraft.value).length > 0);
     // 原始 ASR 视图开关：true 时转写段以只读方式展示 ASR 原始 spk 标签 + 毫秒时间戳 + 文本，
     // 便于排查「同人被拆成 spk0/spk1」类 diarization 问题（speaker stage 会用声纹聚类兜底合并）。
@@ -1230,7 +1242,7 @@ const app = createApp({
       fmtTime, fmtDue, typeMeta, statusText, todoStatusText, spClass,
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissingMemId, askDismissMem, cancelDismissMem, confirmDismissMem, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
       tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay, detailInsights,
-      segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript, rawAsrView, toggleRawAsr,
+      segDraft, segEditing, startEditSeg, cancelEditSeg, saveSegEdit, segDirty, saveTranscript, rawAsrView, toggleRawAsr,
       sessionAudioEl, tlPlayingSegId, toggleTimelineSegPlay, onTimelineAudioTimeUpdate,
       mergeMode, mergeSelected, mergeCount, mergeTarget, enterMergeMode, cancelMerge, toggleMergeSelect, confirmMerge,
       MIN_ENROLL_MS, segEnrollId, segEnrollName, segDurMs, canEnrollSeg, startSegEnroll, cancelSegEnroll, confirmSegEnroll,

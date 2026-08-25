@@ -82,9 +82,14 @@
      无洞察（detailInsights=false）时 aside 不渲染，grid 退化为单列全宽。 */
   .detail-cols { display: flex; flex-direction: column; gap: 0; }
   .detail-aside { min-width: 0; }
+  /* 右栏（洞察侧栏）更紧凑的排版：卡片收窄边距、节标题去首距、说明文字降一档 */
+  .detail-aside .card { padding: 10px 12px; margin: 8px 0; }
+  .detail-aside .todo-group-title { margin: 14px 2px 8px; }
+  .detail-aside .muted { font-size: var(--fs-xs); }
   @media (min-width: 960px) {
-    .detail-cols.has-aside { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 0 18px; align-items: start; }
-    .detail-aside { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; }
+    .detail-cols.has-aside { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 0 18px; align-items: start; }
+    /* sticky 偏移避让顶部粘性标签栏（约 48px 高）；内容超高时侧栏内部独立滚动 */
+    .detail-aside { position: sticky; top: 64px; max-height: calc(100vh - 76px); overflow-y: auto; }
   }
   @keyframes fadeup { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
@@ -393,8 +398,10 @@
               </div>
               <div v-else-if="!segEditing(sg)" class="editable" @click="startEditSeg(sg)" title="点击编辑转写文本">{{ sg.text }}<span class="hint">✎ 编辑</span></div>
               <div v-else class="edit-form" style="margin:0">
-                <textarea class="txt seg-edit" v-model="segDraft[sg.id]" rows="2"></textarea>
+                <textarea class="txt seg-edit" v-model="segDraft[sg.id]" rows="2"
+                          @keydown.meta.enter="saveSegEdit(s, sg)" @keydown.ctrl.enter="saveSegEdit(s, sg)"></textarea>
                 <div class="edit-actions">
+                  <button class="btn mini primary" @click="saveSegEdit(s, sg)" title="保存此段（⌘/Ctrl+Enter）">保存</button>
                   <button class="btn mini" @click="cancelEditSeg(sg)">取消</button>
                 </div>
               </div>
@@ -416,16 +423,17 @@
           <div class="detail-aside" v-if="detailInsights">
           <!-- memory 卡片 -->
           <template v-if="detail.memories && detail.memories.length">
-            <div class="kv" style="margin-top:10px">
+            <div class="kv">
               <div class="todo-group-title" style="margin:0">提取的记忆</div>
               <button class="btn mini" :disabled="memConsolidating" @click="startMemoryConsolidate">
                 <span v-if="memConsolidating" class="spinner"></span>{{ memConsolidating ? '整理中…' : '记忆整理' }}
               </button>
             </div>
-            <div class="card sunken" v-for="m in detail.memories" :key="m.id" style="margin:6px 0">
+            <div class="card sunken" v-for="m in detail.memories" :key="m.id">
               <div class="kv">
-                <div style="min-width:0">
-                  <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+                <!-- 类型标签 + 标题弹性换行：窄列下长标题整行换行，不再缩进错位 -->
+                <div style="min-width:0; display:flex; align-items:flex-start; gap:6px; flex-wrap:wrap">
+                  <span class="type-tag" style="margin-right:0" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
                   <b v-if="!editingMem || editingMem.id !== m.id" class="editable" @click="startEditMemory(m)" title="点击编辑">{{ m.title }}<span class="hint">✎</span></b>
                 </div>
                 <button v-if="dismissingMemId !== m.id" class="btn ghost" @click="askDismissMem(m)" title="忽略此记忆">✕</button>
@@ -444,7 +452,12 @@
               <div class="muted">重要度 {{ (m.importance ?? 0).toFixed(1) }} · 置信 {{ (m.confidence ?? 0).toFixed(2) }}<template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template></div>
               <div class="topic-row">
                 <span v-for="tp in topicChips(m)" :key="tp.id" class="chip">{{ tp.name }}<span v-if="tp.source==='user'" style="opacity:.55; font-size:10px">✎</span><button class="chip-x" @click.stop="removeMemoryTopic(m, tp.id)" title="取消关联">✕</button></span>
-                <label class="chip-add">+ 关联<select @change="if($event.target.value){addMemoryTopic(m,$event.target.value);$event.target.value=''}"><option value="">+ 关联</option><option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option></select></label>
+                <!-- 关联主题用正常下拉（窄列下比 chip 内嵌 select 清晰） -->
+                <select class="mini" style="padding:3px 8px" title="关联主题"
+                        @change="if($event.target.value){addMemoryTopic(m,$event.target.value);$event.target.value=''}">
+                  <option value="">+ 关联主题</option>
+                  <option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option>
+                </select>
               </div>
             </div>
           </template>
@@ -475,7 +488,7 @@
           <!-- todo 卡片（只读，操作去待办页） -->
           <template v-if="detail.todos && detail.todos.length">
             <div class="todo-group-title">提取的待办</div>
-            <div class="card sunken" v-for="td in detail.todos" :key="td.id" style="margin:6px 0">
+            <div class="card sunken" v-for="td in detail.todos" :key="td.id">
               <div class="kv">
                 <div v-if="!editingTodo || editingTodo.id !== td.id" class="editable" @click="startEditTodo(td)" title="点击编辑">☑️ {{ td.title }}<span class="hint">✎</span></div>
                 <div v-else style="min-width:0; flex:1">
@@ -968,6 +981,6 @@
   </div>
 </div>
 
-<script src="/app/app.46d630d9.js"></script>
+<script src="/app/app.0d6ebbd2.js"></script>
 </body>
 </html>
