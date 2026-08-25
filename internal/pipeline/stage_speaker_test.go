@@ -265,6 +265,10 @@ func TestStageSpeakerWeakMatchByDistinctiveness(t *testing.T) {
 	if err := speakers.Create(ctx, sp); err != nil {
 		t.Fatal(err)
 	}
+	// 收尾删掉这个 active 同名 speaker：repo 包 TestPersonLifecycle 经 EnsurePersonBootstrap
+	// 会把未绑定的 active 同名 speaker 物化成 person（id 更小），残留会令其 FindByName(张三)
+	// 命中错误行（跨包共享 zhiwei_test 库）。对齐本文件 TestStageSpeakerMatchesExisting 的 cleanup。
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), sp.ID) })
 	fv := &fakeVoiceprint{matched: true, matchID: sp.ID, searchSim: 0.75, secondSim: 0.1}
 	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
 	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
