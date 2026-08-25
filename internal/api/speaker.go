@@ -86,7 +86,8 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Post("/api/speakers/merge", h.Merge)                                // 声纹页「手动合并」：多说话人并入一个目标
 	r.Get("/api/speakers/{id}/segments", h.Segments)                      // 该说话人跨 session 出现的片段（声纹 tab 点开看关联录音）
 	r.Get("/api/sessions/{sid}/speakers", h.SessionSpeakers)
-	r.Patch("/api/sessions/{sid}/segments/{seg}/speaker", h.ReassignSegment)
+	r.Patch("/api/sessions/{sid}/segments/{seg}/speaker", h.ReassignSegment) // 单段换人
+	r.Post("/api/sessions/{sid}/speakers/reassign", h.ReassignSpeakerAll)   // 「切换声纹」：本会话某说话人全部段一键改判
 	r.Post("/api/sessions/{sid}/segments/{seg}/enroll", h.EnrollFromSegment) // timeline「用此段录音纹」：从转写段音频录入新说话人
 	r.Post("/api/sessions/{sid}/segments/merge", h.MergeSegments)            // timeline「合并连续同人段成一条」
 	r.Post("/api/voiceprint/match", h.MatchPreview)                          // 录音页「试匹配」预览：上传音频→提向→1:N→返回相似度+阈值（只读不登记）
@@ -350,6 +351,56 @@ func (h *SpeakerHandler) ReassignSegment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// ReassignSpeakerAll timeline 说话人 chip「切换声纹」：把本会话内源说话人的全部段
+// 一键改判给目标说话人（纠正声纹/识别错误——单段换人逐段点太繁琐）。
+// 只改本 transcript 段的 speaker_id，不动说话人名册/声纹（错误登记的说话人
+// 可用既有的删除/手动合并处理）。目标必须在名册中存在，防误写悬空 id。
+func (h *SpeakerHandler) ReassignSpeakerAll(w http.ResponseWriter, r *http.Request) {
+	sid, err := ids.ParseID(chi.URLParam(r, "sid"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		FromSpeakerID string `json:"from_speaker_id"`
+		ToSpeakerID   string `json:"to_speaker_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	fromID, err := ids.ParseID(req.FromSpeakerID)
+	if err != nil {
+		http.Error(w, "invalid from_speaker_id", http.StatusBadRequest)
+		return
+	}
+	toID, err := ids.ParseID(req.ToSpeakerID)
+	if err != nil {
+		http.Error(w, "invalid to_speaker_id", http.StatusBadRequest)
+		return
+	}
+	if fromID == toID {
+		http.Error(w, "源与目标声纹相同", http.StatusBadRequest)
+		return
+	}
+	tr, err := h.Transcripts.GetBySession(r.Context(), sid)
+	if err != nil {
+		http.Error(w, "无转写", http.StatusNotFound)
+		return
+	}
+	// 目标必须在名册中存在（防把段指向已删除/不存在的声纹）
+	if _, err := h.Speakers.Get(r.Context(), toID); err != nil {
+		http.Error(w, "目标声纹不存在", http.StatusNotFound)
+		return
+	}
+	updated, err := h.Transcripts.ReassignSpeakerSegments(r.Context(), tr.ID, fromID, toID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "updated": updated})
 }
 
 // EnrollFromSegment timeline「用此段录音纹」：用某转写段对应时间段的音频录入新说话人，

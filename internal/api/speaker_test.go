@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -496,4 +497,88 @@ func TestEnrollFromSegmentReassignsByLabelWhenUnresolved(t *testing.T) {
 	}
 	// 同上：收尾删除新录入说话人，防跨包物化污染（对齐 张三 用例的 cleanup）。
 	t.Cleanup(func() { _ = speakers.Delete(context.Background(), np.ID) })
+}
+
+// TestSpeakerReassignAll timeline 说话人 chip「切换声纹」：识别错时把本会话内
+// 源说话人的全部段一键改判给目标声纹。验证：改判段数、段归属、transcript 作用域
+// （另一会话同源说话人的段不受波及）、目标声纹不存在 404、缺参 400。
+func TestSpeakerReassignAll(t *testing.T) {
+	r, speakers, transcripts, dir := setupSpeakerAPI(t)
+	ctx := context.Background()
+
+	// 会话 1：3 段——label 1 两段归 A（随机名，识别错的）、label 2 一段归 B（正确声纹）
+	sid, tc, _ := seedEnrollSession(t, transcripts, dir, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "甲一", StartMS: 0, EndMS: 2000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "甲二", StartMS: 2100, EndMS: 4000},
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "乙", StartMS: 4100, EndMS: 6000},
+	})
+	a := &repo.Speaker{Name: "说话人aaaa1", Source: "auto"}
+	if err := speakers.Create(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	b := &repo.Speaker{Name: "李四", Source: "enrolled"}
+	if err := speakers.Create(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	// 收尾清理两个测试说话人，防跨包物化污染（对齐既有用例的 cleanup 模式）
+	t.Cleanup(func() {
+		_ = speakers.Delete(context.Background(), a.ID)
+		_ = speakers.Delete(context.Background(), b.ID)
+	})
+	_ = transcripts.SetSegmentSpeaker(ctx, tc.ID, "1", a.ID)
+	_ = transcripts.SetSegmentSpeaker(ctx, tc.ID, "2", b.ID)
+
+	// 会话 2：同源说话人 A 的一段——reassign 按 transcript 作用域，不应跨会话波及
+	_, tc2, _ := seedEnrollSession(t, transcripts, dir, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "甲-另会话", StartMS: 0, EndMS: 2000},
+	})
+	_ = transcripts.SetSegmentSpeaker(ctx, tc2.ID, "1", a.ID)
+
+	// 正常切换：A 的 2 段 → B
+	body := fmt.Sprintf(`{"from_speaker_id":"%s","to_speaker_id":"%s"}`, a.ID, b.ID)
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sid.String()+"/speakers/reassign", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("reassign code %d body %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Updated int `json:"updated"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Updated != 2 {
+		t.Fatalf("应改判 2 段，实际 %d", out.Updated)
+	}
+	// 会话 1 的段全部归 B
+	got, _ := transcripts.ListSegments(ctx, tc.ID)
+	for _, sg := range got {
+		if sg.SpeakerID == nil || *sg.SpeakerID != b.ID {
+			t.Fatalf("会话 1 段 %d 应全部改判到 B，实际 %+v", sg.SequenceNo, sg.SpeakerID)
+		}
+	}
+	// 会话 2 的段仍归 A（作用域隔离）
+	got2, _ := transcripts.ListSegments(ctx, tc2.ID)
+	if len(got2) != 1 || got2[0].SpeakerID == nil || *got2[0].SpeakerID != a.ID {
+		t.Fatalf("会话 2 的段不应被波及，实际 %+v", got2)
+	}
+
+	// 目标声纹不存在 → 404
+	bad := fmt.Sprintf(`{"from_speaker_id":"%s","to_speaker_id":"123"}`, a.ID)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sid.String()+"/speakers/reassign", bytes.NewBufferString(bad))
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, req2)
+	if rec2.Code != 404 {
+		t.Fatalf("目标声纹不存在应 404，实际 %d", rec2.Code)
+	}
+
+	// 缺 to_speaker_id → 400
+	req3 := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sid.String()+"/speakers/reassign",
+		bytes.NewBufferString(`{"from_speaker_id":"`+a.ID.String()+`"}`))
+	rec3 := httptest.NewRecorder()
+	r.ServeHTTP(rec3, req3)
+	if rec3.Code != 400 {
+		t.Fatalf("缺 to_speaker_id 应 400，实际 %d", rec3.Code)
+	}
 }

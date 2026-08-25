@@ -196,6 +196,25 @@ func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID
 	return err
 }
 
+// ReassignSpeakerSegments 把本 transcript 内某说话人的全部段一键改判给目标说话人
+// （timeline 说话人 chip「切换声纹」：纠正声纹/识别错误，逐段下拉太繁琐）。
+// 带 transcript_id 作用域防跨会话波及；单条 UPDATE 原子写，并发安全。
+// 只改段归属，不动说话人名册/声纹（错误登记的说话人可另行删除或合并）。
+// 返回受影响段数（0 = 本会话没有该说话人的段）。
+func (r *TranscriptRepo) ReassignSpeakerSegments(ctx context.Context, transcriptID, fromID, toID ids.ID) (int, error) {
+	res, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ? WHERE transcript_id = ? AND speaker_id = ?`,
+		toID.Int64(), transcriptID.Int64(), fromID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, nil // 理论不可达：拿不到行数按 0 处理，不影响改判本身已生效
+	}
+	return int(n), nil
+}
+
 // ReassignSpeakerInTranscript 把本 transcript 内所有 speaker_id = fromID 的段改判为 toID，返回改动行数。
 // 带 transcript_id 作用域，只影响本会话——同一 speaker 在其他会话的段不动。单条 UPDATE 原子写、并发安全。
 // 用于 timeline「用此段录音纹」：录入新说话人后，把该说话人在本会话的全部段一并改判到新说话人。

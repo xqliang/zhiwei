@@ -881,6 +881,33 @@ const app = createApp({
     // 说话人对象有两种来源：时间线面板的 detail.speakers 用 speaker_id 字段；声纹 tab 的 allSpeakers 用 id 字段。
     // 用 `sp.speaker_id || sp.id` 兼容两者（两者都是同一个 speaker 主键，只是响应结构里的字段名不同）。
     function startRenameSpeaker(sp) { renamingSpeaker.value = { id: sp.speaker_id || sp.id, name: sp.name }; }
+
+    // ---------- 切换声纹（识别错时的一键批量改判） ----------
+    // 把本会话内某说话人的全部段一键改判给目标声纹（后端按 transcript 作用域批量 UPDATE，
+    // 单语句原子写）。只改段归属，不动名册/声纹——错误登记的说话人可另行删除或手动合并。
+    const switchingSpeaker = ref(null); // { id, name }：待切换的源说话人
+    const switchTarget = ref(null);     // 目标声纹 speaker id
+    // 待切换段数 = 本会话转写里归属源说话人的段数（行内提示 + 用户确认依据）
+    const switchSegCount = computed(() => {
+      if (!switchingSpeaker.value || !detail.value) return 0;
+      return (detail.value.segments || []).filter(sg => sg.speaker_id === switchingSpeaker.value.id).length;
+    });
+    function startSwitchSpeaker(sp) {
+      switchingSpeaker.value = { id: sp.speaker_id || sp.id, name: sp.name };
+      switchTarget.value = null;
+    }
+    function cancelSwitchSpeaker() { switchingSpeaker.value = null; switchTarget.value = null; }
+    async function commitSwitchSpeaker() {
+      if (!switchingSpeaker.value || !switchTarget.value || !detail.value.session) return;
+      try {
+        await api('POST', '/api/sessions/' + detail.value.session.id + '/speakers/reassign',
+          { from_speaker_id: switchingSpeaker.value.id, to_speaker_id: switchTarget.value });
+        cancelSwitchSpeaker();
+        await reloadSession(detail.value.session.id); // 刷新段归属与说话人面板
+        await loadAllSpeakers();                      // 下拉数据源同步（保险）
+      } catch (e) { showError(e); }
+    }
+
     async function commitRenameSpeaker() {
       if (!renamingSpeaker.value || !renamingSpeaker.value.name.trim()) return; // 空名不发
       try {
@@ -1211,6 +1238,7 @@ const app = createApp({
       speakerColor, segSpeakerBg, toggleSpeakerFilter, openEnroll, onEnrollDrop, submitEnroll, loadAllSpeakers,
       startEnrollRec, stopEnrollRec, enrollRecording, enrollRecSeconds, enrollPromptText,
       startRenameSpeaker, commitRenameSpeaker, askDeleteSpeaker, reassignSegment,
+      switchingSpeaker, switchTarget, switchSegCount, startSwitchSpeaker, cancelSwitchSpeaker, commitSwitchSpeaker,
       hasNameCandidates, acceptNameCandidate, dismissNameCandidate,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
       spMergeMode, spMergeSelected, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,

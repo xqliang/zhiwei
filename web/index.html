@@ -291,6 +291,7 @@
                   :title="sp.source==='auto' ? '自动登记' : '手动录入'">
               {{ sp.name }}
               <button class="chip-x" @click.stop="startRenameSpeaker(sp)" title="改名">✎</button>
+              <button class="chip-x" @click.stop="startSwitchSpeaker(sp)" title="切换声纹：本会话该说话人的全部段一键改判给另一声纹">⇄</button>
               <button class="chip-x" @click.stop="askDeleteSpeaker(sp)" title="删除">✕</button>
             </span>
             <label class="chip-add" v-if="!enrollOpen" @click="openEnroll">+ 新加说话人</label>
@@ -313,8 +314,18 @@
           <!-- 改名行（就地一行输入，回车/保存提交） -->
           <div v-if="renamingSpeaker" class="edit-form" style="margin:0 0 8px">
             <input class="txt inline" v-model="renamingSpeaker.name" @keyup.enter="commitRenameSpeaker">
-            <button class="btn primary" style="padding:6px 12px; margin-left:6px" @click="commitRenameSpeaker">保存</button>
+            <button class="btn primary" style="padding:6px 12px; margin-left:6px" @click="commitRenameSpeaker">改名</button>
             <button class="btn mini" @click="renamingSpeaker=null">取消</button>
+          </div>
+          <!-- 切换声纹行（就地选择）：识别错时把本会话内该说话人的全部段一键改判给目标声纹 -->
+          <div v-if="switchingSpeaker" class="edit-form" style="margin:0 0 8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+            <span class="muted" style="font-size:var(--fs-xs)">把「{{ switchingSpeaker.name }}」的 {{ switchSegCount }} 段改判给</span>
+            <select class="mini" v-model="switchTarget" title="选择目标声纹">
+              <option :value="null" disabled>目标声纹…</option>
+              <option v-for="sp in allSpeakers.filter(x => x.id !== switchingSpeaker.id)" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
+            </select>
+            <button class="btn mini primary" :disabled="!switchTarget" @click="commitSwitchSpeaker()">切换</button>
+            <button class="btn mini" @click="cancelSwitchSpeaker()">取消</button>
           </div>
           <!-- 录入表单（名称 + 拖拽语音样本，multipart 上传） -->
           <div class="card sunken" v-if="enrollOpen" style="margin-bottom:10px">
@@ -581,7 +592,7 @@
           </template>
           <template v-else>
             <input class="txt inline" v-model="renamingSpeaker.name" @keyup.enter="commitRenameSpeaker" @keyup.esc="renamingSpeaker=null">
-            <button class="btn primary" style="padding:6px 12px" @click="commitRenameSpeaker">保存</button>
+            <button class="btn primary" style="padding:6px 12px" @click="commitRenameSpeaker">改名</button>
             <button class="btn mini" @click="renamingSpeaker=null">取消</button>
           </template>
         </div>
@@ -957,6 +968,6 @@
   </div>
 </div>
 
-<script src="/app/app.9c5394dc.js"></script>
+<script src="/app/app.46d630d9.js"></script>
 </body>
 </html>
