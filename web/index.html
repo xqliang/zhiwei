@@ -677,6 +677,69 @@
         </div>
       </div>
     </div>
+
+    <!-- 人物详情（就地展开在名册之后；Task 1 已定义 togglePerson/closePersonDetail 数据流） -->
+    <div class="card" v-if="personDetail" style="border-color:var(--accent)">
+      <div class="kv" style="margin-bottom:12px">
+        <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
+          <template v-if="!renamingPerson">
+            <b style="font-size:var(--fs-md)">{{ personDetail.person.display_name }}</b>
+            <span v-if="personDetail.person.is_owner" class="chip" style="cursor:default; background:var(--accent-soft); color:var(--accent)">我</span>
+            <span v-if="personDetail.person.speaker_id" class="muted">🎙 {{ personDetail.person.speaker_id }}</span>
+            <button class="btn-link" @click="startRenamePerson" title="改名">✎</button>
+          </template>
+          <template v-else>
+            <input class="txt inline" v-model="renamingPerson.name" @keyup.enter="commitRenamePerson" @keyup.esc="renamingPerson=null">
+            <button class="btn primary" style="padding:6px 12px" @click="commitRenamePerson">保存</button>
+            <button class="btn mini" @click="renamingPerson=null">取消</button>
+          </template>
+        </div>
+        <button class="btn mini" @click="closePersonDetail">收起 ✕</button>
+      </div>
+      <div v-if="personDetail.person.summary" class="muted" style="margin-bottom:8px">{{ personDetail.person.summary }}</div>
+
+      <!-- 最近互动（溯源 session，点击跳时间线展开） -->
+      <div v-if="personDetail.recent_session_ids && personDetail.recent_session_ids.length" style="margin-bottom:10px">
+        <span class="muted" style="font-size:var(--fs-xs)">最近互动</span>
+        <span v-for="sid in personDetail.recent_session_ids" :key="sid" class="chip" style="cursor:pointer; margin-left:4px"
+              @click="jumpToSession(sid)" title="在时间线打开该录音">🎤</span>
+      </div>
+
+      <!-- 分组属性区（后端已按 GroupOrder 分组、只含 active+pending） -->
+      <div v-for="g in personDetail.groups" :key="g.group" style="margin-bottom:12px">
+        <div class="muted" style="font-weight:600; margin-bottom:4px">{{ g.group }}</div>
+        <div v-for="a in g.attrs" :key="a.id" class="seg">
+          <div class="seg-text">
+            <div>
+              {{ a.attr_key }}：<b>{{ a.value_text }}</b>
+              <span class="chip" style="cursor:default; font-size:var(--fs-xs)"
+                    :style="a.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ a.source === 'llm' ? 'AI' : '人工' }}</span>
+              <span class="chip" style="cursor:default; font-size:var(--fs-xs)">{{ (a.confidence * 100).toFixed(0) }}%</span>
+              <span class="chip" style="cursor:default; font-size:var(--fs-xs); background:var(--surface-sunken); color:var(--text-2)">{{ epiText(a.epistemic_type) }}</span>
+              <span v-if="a.status === 'pending'" class="chip" style="cursor:default; font-size:var(--fs-xs); background:var(--warn-soft); color:var(--warn)">待确认</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div v-if="!personDetail.groups || !personDetail.groups.length" class="muted" style="margin-bottom:12px">暂无属性。</div>
+
+      <!-- 关系区 -->
+      <div v-if="personDetail.relationships && personDetail.relationships.length" style="margin-bottom:12px">
+        <div class="muted" style="font-weight:600; margin-bottom:4px">关系</div>
+        <div v-for="rel in personDetail.relationships" :key="rel.id" class="seg">
+          <div class="seg-text">
+            <div>
+              <b>{{ rel.relation_type }}</b>
+              <span v-if="rel.related_person_id" class="muted"> → {{ personNameOf(rel.related_person_id) }}</span>
+              <span v-if="rel.org_name" class="muted"> · {{ rel.org_name }}</span>
+              <span v-if="rel.label" class="muted"> · {{ rel.label }}</span>
+              <span v-if="rel.direction" class="muted"> · {{ rel.direction }}</span>
+              <span v-if="rel.status === 'pending'" class="chip" style="cursor:default; font-size:var(--fs-xs); background:var(--warn-soft); color:var(--warn)">待确认</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- ============ 主题 ============ -->

@@ -1017,6 +1017,18 @@ const app = createApp({
         await loadPersons();
       } catch (e) { showError(e); }
     }
+    // epistemic_type（认知来源）→ 中文标签，属性徽标用。
+    // 后端枚举见 internal/profile/fact.go：observed（对话直陈）/inferred（可推断）/
+    // predicted（预测）/suggested（建议）。未知值原样返回，避免出现空徽标。
+    function epiText(t) {
+      return { observed: '直述', inferred: '推断', predicted: '预测', suggested: '建议' }[t] || t;
+    }
+    // 关系对端人物名：从已加载的名册缓存（persons.value，GET /api/persons）里按 id 查显示名。
+    // 查不到就回退显示原始 id——对端可能已被忽略（dismissed）或还没建卡，此时名册里没有它。
+    function personNameOf(id) {
+      const p = persons.value.find(x => x.id === id);
+      return p ? p.display_name : id;
+    }
 
     // ---------- 声纹 tab（名册管理：列表 / 录入 / 改名 / 删除 + 点开看关联录音并按时间段播放） ----------
     // 复用说话人面板既有能力：allSpeakers / enrollForm / enrolling / submitEnroll / onEnrollDrop、
@@ -1309,6 +1321,7 @@ const app = createApp({
       editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       persons, personDetail, showNewPerson, newPerson, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
+      epiText, personNameOf,
     };
   }
 });
