@@ -662,12 +662,12 @@
       <div class="kv">
         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
           <b>{{ p.display_name }}</b>
-          <span v-if="p.is_owner" class="chip" style="cursor:default; background:var(--accent-soft); color:var(--accent)">我</span>
+          <span v-if="p.is_owner" class="chip">我</span>
           <span v-if="p.speaker_id" class="muted" title="已关联声纹">🎙</span>
           <span v-if="p.source === 'llm'" class="muted">自动识别</span>
         </div>
         <div style="display:flex; gap:6px; align-items:center; flex-shrink:0" @click.stop>
-          <span v-if="p.pending_count" class="chip" style="cursor:default; background:var(--warn-soft); color:var(--warn)" title="待确认的属性/关系数">{{ p.pending_count }} 待确认</span>
+          <span v-if="p.pending_count" class="chip" style="background:var(--warn-soft); color:var(--warn)" title="待确认的属性/关系数">{{ p.pending_count }} 待确认</span>
           <template v-if="archivingPersonId === p.id">
             <span class="muted">归档？</span>
             <button class="btn mini danger" @click="confirmArchivePerson(p)">确认</button>
@@ -684,7 +684,7 @@
         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
           <template v-if="!renamingPerson">
             <b style="font-size:var(--fs-md)">{{ personDetail.person.display_name }}</b>
-            <span v-if="personDetail.person.is_owner" class="chip" style="cursor:default; background:var(--accent-soft); color:var(--accent)">我</span>
+            <span v-if="personDetail.person.is_owner" class="chip">我</span>
             <span v-if="personDetail.person.speaker_id" class="muted">🎙 {{ personDetail.person.speaker_id }}</span>
             <button class="btn-link" @click="startRenamePerson" title="改名">✎</button>
           </template>
@@ -712,12 +712,29 @@
           <div class="seg-text">
             <div>
               {{ a.attr_key }}：<b>{{ a.value_text }}</b>
-              <span class="chip" style="cursor:default; font-size:var(--fs-xs)"
+              <span class="chip"
                     :style="a.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ a.source === 'llm' ? 'AI' : '人工' }}</span>
-              <span class="chip" style="cursor:default; font-size:var(--fs-xs)">{{ (a.confidence * 100).toFixed(0) }}%</span>
-              <span class="chip" style="cursor:default; font-size:var(--fs-xs); background:var(--surface-sunken); color:var(--text-2)">{{ epiText(a.epistemic_type) }}</span>
-              <span v-if="a.status === 'pending'" class="chip" style="cursor:default; font-size:var(--fs-xs); background:var(--warn-soft); color:var(--warn)">待确认</span>
+              <span class="chip">{{ (a.confidence * 100).toFixed(0) }}%</span>
+              <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ epiText(a.epistemic_type) }}</span>
+              <span v-if="a.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
             </div>
+          </div>
+          <div style="display:flex; gap:4px; flex-shrink:0">
+            <template v-if="editingAttr && editingAttr.id === a.id">
+              <input class="txt inline" v-model="editingAttr.value" @keyup.enter="commitEditAttr" @keyup.esc="editingAttr=null">
+              <button class="btn primary" style="padding:6px 12px" @click="commitEditAttr">存</button>
+              <button class="btn mini" @click="editingAttr=null">取消</button>
+            </template>
+            <template v-else-if="deletingAttrId === a.id">
+              <span class="muted">删除？</span>
+              <button class="btn mini danger" @click="confirmDeleteAttr">确认</button>
+              <button class="btn mini" @click="deletingAttrId=null">取消</button>
+            </template>
+            <template v-else>
+              <button class="btn mini" @click="startEditAttr(a)" title="改值（旧行留痕）">✎</button>
+              <button class="btn mini" @click="showAttrHistory(a)" title="修改历史">⟲</button>
+              <button class="btn mini danger" @click="askDeleteAttr(a)" title="删除">🗑</button>
+            </template>
           </div>
         </div>
       </div>
@@ -734,10 +751,54 @@
               <span v-if="rel.org_name" class="muted"> · {{ rel.org_name }}</span>
               <span v-if="rel.label" class="muted"> · {{ rel.label }}</span>
               <span v-if="rel.direction" class="muted"> · {{ rel.direction }}</span>
-              <span v-if="rel.status === 'pending'" class="chip" style="cursor:default; font-size:var(--fs-xs); background:var(--warn-soft); color:var(--warn)">待确认</span>
+              <span v-if="rel.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- 加属性表单 -->
+      <div class="card sunken" v-if="showAddAttr" style="margin-bottom:10px">
+        <div class="kv" style="margin-bottom:8px"><b>加属性</b><button class="btn-link" @click="showAddAttr=false">✕</button></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap">
+          <input class="txt" list="attr-keys" v-model="addAttrForm.attr_key" placeholder="属性 key（如 occupation）" style="flex:1; min-width:140px">
+          <datalist id="attr-keys">
+            <option v-for="k in ATTR_KEYS" :key="k" :value="k"></option>
+          </datalist>
+          <input class="txt" v-model="addAttrForm.value" placeholder="值（如 后端工程师）" style="flex:1; min-width:140px">
+          <button class="btn primary" :disabled="addingAttr" @click="submitAddAttr">{{ addingAttr ? '保存中…' : '保存' }}</button>
+        </div>
+        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；单值属性重复添加 = 改值，旧值留痕可查历史。</div>
+      </div>
+
+      <!-- 修改历史抽屉 -->
+      <div class="card sunken" v-if="attrHistory" style="margin-bottom:10px">
+        <div class="kv" style="margin-bottom:8px">
+          <b>「{{ attrHistory.attr_key }}」修改历史</b>
+          <button class="btn-link" @click="attrHistory=null">✕</button>
+        </div>
+        <div v-if="attrHistoryLoading" class="muted">加载中…</div>
+        <template v-else>
+          <div v-for="h in attrHistory.items" :key="h.id" class="seg">
+            <span class="chip"
+                  :style="h.changed_by === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">
+              {{ h.changed_by === 'llm' ? 'AI' : '人工' }} · {{ changeText(h.change_type) }}
+            </span>
+            <div class="seg-text">
+              <div>
+                <template v-if="h.old_value && h.new_value">{{ snapText(h.old_value) }} → <b>{{ snapText(h.new_value) }}</b></template>
+                <template v-else-if="h.new_value"><b>{{ snapText(h.new_value) }}</b></template>
+                <template v-else-if="h.old_value">删除了 {{ snapText(h.old_value) }}</template>
+              </div>
+              <div class="muted" style="font-size:var(--fs-xs)">{{ fmtTime(h.created_at) }}<span v-if="h.note"> · {{ h.note }}</span></div>
+            </div>
+          </div>
+          <div v-if="!attrHistory.items.length" class="muted">无历史记录。</div>
+        </template>
+      </div>
+
+      <div class="edit-actions">
+        <button class="btn mini" @click="showAddAttr = !showAddAttr">{{ showAddAttr ? '收起加属性' : '＋ 加属性' }}</button>
       </div>
     </div>
   </div>

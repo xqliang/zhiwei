@@ -981,7 +981,9 @@ const app = createApp({
       personDetail.value = null;
       renamingPerson.value = null;
       archivingPersonId.value = null; // 切换详情/收起时一并清归档确认态（对齐 toggleSession 折叠清 deletingSessionId）
-      // Task 3/4 将在此追加：attrHistory/editingAttr/showAddAttr/showAddRel 等临时态清理
+      // 属性手动管理临时态（Task 3）：加属性表单 / 就地改值 / 删除确认 / 历史抽屉一并清空
+      editingAttr.value = null; deletingAttrId.value = null; attrHistory.value = null; showAddAttr.value = false;
+      // Task 4 将在此追加：showAddRel 等关系相关临时态清理
     }
     async function reloadPersonDetail() {
       if (!personDetail.value) return;
@@ -1024,11 +1026,81 @@ const app = createApp({
       return { observed: '直述', inferred: '推断', predicted: '预测', suggested: '建议' }[t] || t;
     }
     // 关系对端人物名：从已加载的名册缓存（persons.value，GET /api/persons）里按 id 查显示名。
-    // 查不到就回退显示原始 id——对端可能已被忽略（dismissed）或还没建卡，此时名册里没有它。
+    // 查不到就回退显示「未知联系人」——对端可能已被忽略（dismissed）或还没建卡，此时名册里
+    // 没有它；长雪花 id 直接展示不友好，故用友好占位文案而非原始 id。
     function personNameOf(id) {
       const p = persons.value.find(x => x.id === id);
-      return p ? p.display_name : id;
+      return p ? p.display_name : '未知联系人';
     }
+
+    // ---------- 人物属性手动管理（加 / 改(留痕) / 删 / 修改历史抽屉） ----------
+    // 常用属性 key 建议（datalist；与 internal/profile/catalog.go 的 47 键一致，可自由输入目录外 key）
+    const ATTR_KEYS = ['aliases','birthday','gender','zodiac','mbti','education','school','city','address','phone',
+      'occupation','industry','office_location','work_start_time','work_end_time','commute_mode','often_travel','current_projects',
+      'meal_time','cuisine','eats_spicy','eats_numbing','smokes','drinks','wears_makeup','perfume',
+      'hobbies','skills','reading_now','books_read','movies_watched','music_listened','games_played','fav_celebrities','fav_anime','fav_movie_genres','catchphrases','invests_stocks',
+      'cities_visited','places_traveled','has_car','car_brand','phone_brand',
+      'recent_concerns','attention_topics','personality','chronic_diseases'];
+
+    const showAddAttr = ref(false);          // 加属性表单开合
+    const addAttrForm = reactive({ attr_key: '', value: '' });
+    const addingAttr = ref(false);
+    const editingAttr = ref(null);           // { id, attr_key, value }：就地改值
+    const deletingAttrId = ref(null);        // 2 步删除确认
+    const attrHistory = ref(null);           // { attr_key, items }：历史抽屉
+    const attrHistoryLoading = ref(false);
+
+    async function submitAddAttr() {
+      if (addingAttr.value) return;
+      const key = addAttrForm.attr_key.trim(), val = addAttrForm.value.trim();
+      if (!key || !val) { toast.value = 'key 与值必填'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingAttr.value = true;
+      try {
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/attributes', { attr_key: key, value: val });
+        showAddAttr.value = false; addAttrForm.attr_key = ''; addAttrForm.value = '';
+        await reloadPersonDetail(); await loadPersons(); // 名册 pending 计数可能变化
+      } catch (e) { showError(e); }
+      finally { addingAttr.value = false; }
+    }
+    // 改值 = PATCH（后端 supersede 旧行留痕；body 必须带行自身的 attr_key，与目标行不一致会 400）
+    function startEditAttr(a) { deletingAttrId.value = null; editingAttr.value = { id: a.id, attr_key: a.attr_key, value: a.value_text }; }
+    async function commitEditAttr() {
+      const e = editingAttr.value;
+      if (!e || !e.value.trim()) return;
+      try {
+        await api('PATCH', '/api/persons/' + personDetail.value.person.id + '/attributes/' + e.id,
+          { attr_key: e.attr_key, value: e.value.trim() });
+        editingAttr.value = null;
+        await reloadPersonDetail();
+      } catch (e2) { showError(e2); }
+    }
+    function askDeleteAttr(a) { editingAttr.value = null; deletingAttrId.value = a.id; }
+    async function confirmDeleteAttr() {
+      const id = deletingAttrId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/attributes/' + id);
+        deletingAttrId.value = null;
+        await reloadPersonDetail(); await loadPersons();
+      } catch (e) { showError(e); }
+    }
+    // 修改历史抽屉：GET /api/persons/{id}/history?entity_kind=attribute&attr_key=X
+    async function showAttrHistory(a) {
+      attrHistory.value = { attr_key: a.attr_key, items: [] };
+      attrHistoryLoading.value = true;
+      try {
+        const d = await api('GET', '/api/persons/' + personDetail.value.person.id +
+          '/history?entity_kind=attribute&attr_key=' + encodeURIComponent(a.attr_key));
+        attrHistory.value = { attr_key: a.attr_key, items: d.history || [] };
+      } catch (e) { showError(e); attrHistory.value = null; }
+      finally { attrHistoryLoading.value = false; }
+    }
+    // change_log 变更类型 → 中文（历史抽屉行徽标）
+    function changeText(t) {
+      return { create: '新建', update: '修改', confirm: '确认', dismiss: '放弃', supersede: '替换', delete: '删除', reaffirm: '佐证' }[t] || t;
+    }
+    // 历史 old/new_value 是 JSON 快照文本（如 "医生"），剥引号展示
+    function snapText(v) { if (v == null) return ''; try { return JSON.parse(v); } catch (e) { return v; } }
 
     // ---------- 声纹 tab（名册管理：列表 / 录入 / 改名 / 删除 + 点开看关联录音并按时间段播放） ----------
     // 复用说话人面板既有能力：allSpeakers / enrollForm / enrolling / submitEnroll / onEnrollDrop、
@@ -1322,6 +1394,7 @@ const app = createApp({
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       persons, personDetail, showNewPerson, newPerson, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
       epiText, personNameOf,
+      ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
     };
   }
 });
