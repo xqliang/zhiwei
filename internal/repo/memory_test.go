@@ -14,7 +14,7 @@ func newTestMemory(sessionID ids.ID) *Memory {
 	return &Memory{
 		Type: "event", Title: "给 Tom 发邮件", Content: "明天需要给 Tom 发邮件确认设计稿",
 		EpistemicType: "observed", Importance: 0.6, Confidence: 0.9,
-		SessionID: sessionID, TranscriptSegmentIDs: ids.List{1, 2},
+		SessionID: &sessionID, TranscriptSegmentIDs: ids.List{1, 2},
 		EventAt: &eventAt, Status: "active",
 	}
 }
@@ -198,7 +198,7 @@ func TestMemoryListWithTopics(t *testing.T) {
 	}
 
 	m := &Memory{Type: "fact", Title: "多主题记忆用例", Content: "足够长的内容描述",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: ids.New(), Status: "active"}
+		EpistemicType: "observed", Confidence: 0.9, SessionID: idPtr(ids.New()), Status: "active"}
 	if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {
 		t.Fatal(err)
 	}
@@ -244,9 +244,9 @@ func TestMemoryListActiveTitlesExt(t *testing.T) {
 	now := time.Now()
 	sid := ids.New()
 	ms := []*Memory{
-		{Type: "fact", Title: "学Rust", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: sid, EventAt: &now, Status: "active"},
-		{Type: "fact", Title: "学Go", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: sid, EventAt: &now, Status: "active"},
-		{Type: "fact", Title: "学Python", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: sid, EventAt: &now, Status: "superseded"},
+		{Type: "fact", Title: "学Rust", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: &sid, EventAt: &now, Status: "active"},
+		{Type: "fact", Title: "学Go", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: &sid, EventAt: &now, Status: "active"},
+		{Type: "fact", Title: "学Python", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: &sid, EventAt: &now, Status: "superseded"},
 	}
 	if err := mr.InsertExt(ctx, db, ms); err != nil {
 		t.Fatal(err)
@@ -272,8 +272,8 @@ func TestMemoryBumpConfidence(t *testing.T) {
 	mr := &MemoryRepo{DB: db}
 	ctx := context.Background()
 	now := time.Now()
-	lo := &Memory{Type: "fact", Title: "佐证Bump低", Content: "x", EpistemicType: "observed", Confidence: 0.80, SessionID: ids.New(), EventAt: &now, Status: "active"}
-	hi := &Memory{Type: "fact", Title: "佐证Bump高", Content: "x", EpistemicType: "observed", Confidence: 0.97, SessionID: ids.New(), EventAt: &now, Status: "active"}
+	lo := &Memory{Type: "fact", Title: "佐证Bump低", Content: "x", EpistemicType: "observed", Confidence: 0.80, SessionID: idPtr(ids.New()), EventAt: &now, Status: "active"}
+	hi := &Memory{Type: "fact", Title: "佐证Bump高", Content: "x", EpistemicType: "observed", Confidence: 0.97, SessionID: idPtr(ids.New()), EventAt: &now, Status: "active"}
 	if err := mr.InsertExt(ctx, db, []*Memory{lo, hi}); err != nil {
 		t.Fatal(err)
 	}
@@ -303,8 +303,8 @@ func TestMemoryListActive(t *testing.T) {
 	mr := &MemoryRepo{DB: db}
 	ctx := context.Background()
 	now := time.Now()
-	a := &Memory{Type: "fact", Title: "整理ListA", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: ids.New(), EventAt: &now, Status: "active"}
-	s := &Memory{Type: "fact", Title: "整理ListS", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: ids.New(), EventAt: &now, Status: "superseded"}
+	a := &Memory{Type: "fact", Title: "整理ListA", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: idPtr(ids.New()), EventAt: &now, Status: "active"}
+	s := &Memory{Type: "fact", Title: "整理ListS", Content: "x", EpistemicType: "observed", Confidence: 0.8, SessionID: idPtr(ids.New()), EventAt: &now, Status: "superseded"}
 	if err := mr.InsertExt(ctx, db, []*Memory{a, s}); err != nil {
 		t.Fatal(err)
 	}
@@ -333,8 +333,8 @@ func TestMemoryApplyConsolidation(t *testing.T) {
 	_, _ = db.ExecContext(ctx, `UPDATE topic SET status='dismissed' WHERE user_id=1 AND name IN (?,?) AND status IN ('active','suggested')`, "整理靶主题", "整理源主题")
 	_, _ = db.ExecContext(ctx, `DELETE FROM memory WHERE title IN (?,?)`, "整理A记忆", "整理B记忆")
 	now := time.Now()
-	a := &Memory{Type: "fact", Title: "整理A记忆", Content: "A", EpistemicType: "observed", Confidence: 0.80, SessionID: ids.New(), EventAt: &now, Status: "active"}
-	b := &Memory{Type: "fact", Title: "整理B记忆", Content: "B", EpistemicType: "observed", Confidence: 0.80, SessionID: ids.New(), EventAt: &now, Status: "active"}
+	a := &Memory{Type: "fact", Title: "整理A记忆", Content: "A", EpistemicType: "observed", Confidence: 0.80, SessionID: idPtr(ids.New()), EventAt: &now, Status: "active"}
+	b := &Memory{Type: "fact", Title: "整理B记忆", Content: "B", EpistemicType: "observed", Confidence: 0.80, SessionID: idPtr(ids.New()), EventAt: &now, Status: "active"}
 	if err := mr.InsertExt(ctx, db, []*Memory{a, b}); err != nil {
 		t.Fatal(err)
 	}

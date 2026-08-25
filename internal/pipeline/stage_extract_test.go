@@ -47,6 +47,7 @@ func newExtractDeps(t *testing.T, llm provider.LLMProvider) StageDeps {
 		Topics:       &repo.TopicRepo{DB: db},
 		MemoryTopics: &repo.MemoryTopicRepo{DB: db},
 		TodoTopics:   &repo.TodoTopicRepo{DB: db},
+		Speakers:     &repo.SpeakerRepo{DB: db}, // 70f2aef 起 stageExtract 用 Speakers 做说话人名映射；DSN 下不设会 nil panic
 		LLM:          llm,
 		LLMModel:     "fake-model",
 		Prompt:       "测试 system prompt",
@@ -545,7 +546,7 @@ func TestStageExtractDedupTodoByTitle(t *testing.T) {
 	memA := &repo.Memory{
 		Type: "event", Title: "预置 todo 来源 memory", Content: "session A 预置",
 		EpistemicType: "observed", Importance: 0.5, Confidence: 0.9,
-		SessionID: sidA, Status: "active",
+		SessionID: &sidA, Status: "active",
 	}
 	if err := d.Memories.InsertExt(ctx, d.DB, []*repo.Memory{memA}); err != nil {
 		t.Fatal(err)
@@ -634,7 +635,7 @@ func TestStageExtractMemoryCorroboration(t *testing.T) {
 	oldMem := &repo.Memory{
 		Type: "fact", Title: "学Rust", Content: "用户在学 Rust",
 		EpistemicType: "observed", Importance: 0.7, Confidence: 0.80,
-		SessionID: sidA, Status: "active",
+		SessionID: &sidA, Status: "active",
 	}
 	if err := d.Memories.InsertExt(ctx, d.DB, []*repo.Memory{oldMem}); err != nil {
 		t.Fatal(err)

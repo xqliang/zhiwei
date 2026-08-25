@@ -59,7 +59,7 @@ func TestSearchMemoryTool(t *testing.T) {
 	kw := "工具层检索验证词"
 	sid := ids.New()
 	t.Cleanup(func() { _ = d.Memory.DeleteBySessionExt(context.Background(), d.Memory.DB, sid) })
-	ms := []*repo.Memory{{Type: "fact", Title: kw, Content: kw, SessionID: sid, Status: "active", Confidence: 0.8}}
+	ms := []*repo.Memory{{Type: "fact", Title: kw, Content: kw, SessionID: &sid, Status: "active", Confidence: 0.8}}
 	if err := d.Memory.InsertExt(ctx, d.Memory.DB, ms); err != nil {
 		t.Fatal(err)
 	}

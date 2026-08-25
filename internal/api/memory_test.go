@@ -40,7 +40,7 @@ func setupMemoryAPI(t *testing.T) (http.Handler, *repo.MemoryRepo, *repo.TopicRe
 	eventAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	mem := &repo.Memory{Type: "event", Title: "API 用例记忆 A", Content: "事件 A 的完整描述内容",
 		EpistemicType: "observed", Confidence: 0.9,
-		SessionID: ids.New(), EventAt: &eventAt, Status: "active"}
+		SessionID: idPtr(ids.New()), EventAt: &eventAt, Status: "active"}
 	if err := mr.InsertExt(ctx, db, []*repo.Memory{mem}); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestMemoryListAndFilter(t *testing.T) {
 	// 再插一条不同 type 的记忆，验证 type 过滤
 	if err := mr.InsertExt(ctx, mr.DB, []*repo.Memory{{Type: "fact", Title: "API 用例记忆 B",
 		Content: "事实 B 的完整描述内容", EpistemicType: "observed", Confidence: 0.9,
-		SessionID: ids.New(), Status: "active"}}); err != nil {
+		SessionID: idPtr(ids.New()), Status: "active"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -111,7 +111,7 @@ func TestMemoryListSince(t *testing.T) {
 	early := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
 	if err := mr.InsertExt(ctx, mr.DB, []*repo.Memory{{Type: "event", Title: "API 用例记忆 C（早）",
 		Content: "事件 C 的完整描述内容", EpistemicType: "observed", Confidence: 0.9,
-		SessionID: ids.New(), EventAt: &early, Status: "active"}}); err != nil {
+		SessionID: idPtr(ids.New()), EventAt: &early, Status: "active"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -177,7 +177,7 @@ func TestMemoryAddRemoveTopic(t *testing.T) {
 	mtr := &repo.MemoryTopicRepo{DB: db}
 
 	mem := &repo.Memory{Type: "fact", Title: "加删 topic 用例记忆", Content: "足够长的内容描述",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: ids.New(), Status: "active"}
+		EpistemicType: "observed", Confidence: 0.9, SessionID: idPtr(ids.New()), Status: "active"}
 	if err := mr.InsertExt(ctx, db, []*repo.Memory{mem}); err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestMemoryPatch(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("dismiss: %d", rec2.Code)
 	}
-	rows, _ := mr.ListBySession(ctx, mem.SessionID)
+	rows, _ := mr.ListBySession(ctx, *mem.SessionID)
 	if len(rows) != 0 {
 		t.Fatalf("dismissed 后列表不应出现, got %d", len(rows))
 	}
@@ -313,7 +313,7 @@ func setupMemoryConsolidateFixtures(t *testing.T) (*repo.MemoryRepo, *repo.Memor
 	eventAt := time.Now()
 	mk := func(title string) *repo.Memory {
 		return &repo.Memory{Type: "fact", Title: title, Content: title + "的内容描述",
-			EpistemicType: "observed", Confidence: 0.80, SessionID: ids.New(), EventAt: &eventAt, Status: "active"}
+			EpistemicType: "observed", Confidence: 0.80, SessionID: idPtr(ids.New()), EventAt: &eventAt, Status: "active"}
 	}
 	a, b, c, d, e := mk("整理A记忆"), mk("整理B记忆"), mk("整理C记忆"), mk("整理D记忆"), mk("整理E记忆")
 	for _, m := range []*repo.Memory{a, b, c, d, e} {

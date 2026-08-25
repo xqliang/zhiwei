@@ -22,7 +22,7 @@ func TestTodoTopicRepo(t *testing.T) {
 	tp := &TopicRepo{DB: db}
 
 	m := &Memory{Type: "fact", Title: "t", Content: "足够长的内容描述",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: sid}
+		EpistemicType: "observed", Confidence: 0.9, SessionID: &sid}
 	mr.InsertExt(ctx, db, []*Memory{m})
 	td := &Todo{Title: "td", SourceMemoryID: &m.ID, Status: "suggested", Confidence: 0.9}
 	tr.InsertExt(ctx, db, []*Todo{td})
@@ -73,7 +73,7 @@ func TestTodoTopicSnapshotUser(t *testing.T) {
 	segA, segB := ids.New(), ids.New()
 	m := &Memory{
 		Type: "event", Title: "给 Tom 发邮件", Content: "明天需要给 Tom 发邮件确认设计稿",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: sid,
+		EpistemicType: "observed", Confidence: 0.9, SessionID: &sid,
 		TranscriptSegmentIDs: ids.List{segA, segB},
 	}
 	if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {

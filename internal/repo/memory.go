@@ -14,15 +14,20 @@ import (
 // Memory 是从对话中抽取的一条记忆。embedding 列 Sprint 3 启用，本期留空。
 // topic 归属走关联表 memory_topic（多对多），本结构不再承载单值 topic_id。
 type Memory struct {
-	ID                   ids.ID     `db:"id" json:"id"`
-	UserID               int64      `db:"user_id" json:"user_id"`
-	Type                 string     `db:"type" json:"type"`
-	Title                string     `db:"title" json:"title"`
-	Content              string     `db:"content" json:"content"`
-	EpistemicType        string     `db:"epistemic_type" json:"epistemic_type"`
-	Importance           float64    `db:"importance" json:"importance"`
-	Confidence           float64    `db:"confidence" json:"confidence"`
-	SessionID            ids.ID     `db:"session_id" json:"session_id"`
+	ID            ids.ID  `db:"id" json:"id"`
+	UserID        int64   `db:"user_id" json:"user_id"`
+	Type          string  `db:"type" json:"type"`
+	Title         string  `db:"title" json:"title"`
+	Content       string  `db:"content" json:"content"`
+	EpistemicType string  `db:"epistemic_type" json:"epistemic_type"`
+	Importance    float64 `db:"importance" json:"importance"`
+	Confidence    float64 `db:"confidence" json:"confidence"`
+	// SessionID 改为可空指针：对话来源的记忆此列为 NULL（见 spec §6.3）。
+	// 录音来源仍写 session_id（stage_extract 传 &sessionID）。
+	// 用指针而非值类型：sqlx safe 模式下 SELECT * 扫描 NULL 进非指针 int64 会报错。
+	SessionID *ids.ID `db:"session_id" json:"session_id,omitempty"`
+	// ConversationID 对话溯源（可空）：仅对话转记忆写此列，录音来源为 NULL。
+	ConversationID       *ids.ID    `db:"conversation_id" json:"conversation_id,omitempty"`
 	TranscriptSegmentIDs ids.List   `db:"transcript_segment_ids" json:"transcript_segment_ids"`
 	EventAt              *time.Time `db:"event_at" json:"event_at,omitempty"`
 	Status               string     `db:"status" json:"status"`
@@ -79,6 +84,40 @@ VALUES (:id, :user_id, :type, :title, :content, :epistemic_type,
 // （extract stage 单事务提交用）。
 func (r *MemoryRepo) DeleteBySessionExt(ctx context.Context, ext ExecerContext, sessionID ids.ID) error {
 	_, err := ext.ExecContext(ctx, `DELETE FROM memory WHERE session_id = ?`, sessionID.Int64())
+	return err
+}
+
+// InsertConversationExt 批量插入对话来源的记忆：统一盖 conversation_id、session_id 置 NULL。
+// 与 InsertExt 同构（ext 传 *sqlx.Tx 入事务；预置非零 id 被尊重，供批内 dedup/佐证引用）。
+// 单独一条 INSERT（含 conversation_id 列、不含 session_id 列→默认 NULL），
+// 保持 InsertExt 原样不变（session 路径不受影响）。
+func (r *MemoryRepo) InsertConversationExt(ctx context.Context, ext ExecerContext, convID ids.ID, ms []*Memory) error {
+	if len(ms) == 0 {
+		return nil
+	}
+	for i := range ms {
+		if ms[i].ID == 0 {
+			ms[i].ID = ids.New()
+		}
+		if ms[i].UserID == 0 {
+			ms[i].UserID = 1
+		}
+		cid := convID // 每条都指向同一对话；用局部变量取地址避免共享循环变量
+		ms[i].ConversationID = &cid
+		ms[i].SessionID = nil // 对话来源无 session
+	}
+	_, err := ext.NamedExecContext(ctx, `
+INSERT INTO memory (id, user_id, type, title, content, epistemic_type,
+  importance, confidence, conversation_id, transcript_segment_ids, event_at, status)
+VALUES (:id, :user_id, :type, :title, :content, :epistemic_type,
+  :importance, :confidence, :conversation_id, :transcript_segment_ids, :event_at, :status)`, ms)
+	return err
+}
+
+// DeleteByConversationExt 删一个 conversation 的全部对话记忆（对话抽取重跑幂等；须与 Insert 同 tx）。
+// 镜像 DeleteBySessionExt，只是过滤列换成 conversation_id。
+func (r *MemoryRepo) DeleteByConversationExt(ctx context.Context, ext ExecerContext, convID ids.ID) error {
+	_, err := ext.ExecContext(ctx, `DELETE FROM memory WHERE conversation_id = ?`, convID.Int64())
 	return err
 }
 

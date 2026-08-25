@@ -66,7 +66,7 @@ func TestSessionsAndDetail(t *testing.T) {
 	eventAt := time.Now()
 	_ = memories.InsertExt(ctx, db, []*repo.Memory{{
 		Type: "event", Title: "装配用例发邮件", Content: "明天记得给 Tom 发邮件确认设计稿",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: sid,
+		EpistemicType: "observed", Confidence: 0.9, SessionID: &sid,
 		EventAt: &eventAt, Status: "active",
 	}})
 	memRows, _ := memories.ListBySession(ctx, sid)
@@ -283,7 +283,7 @@ func buildEnrichedSession(t *testing.T) (http.Handler, ids.ID, *repo.SessionRepo
 	eventAt := time.Now()
 	_ = memories.InsertExt(ctx, db, []*repo.Memory{{
 		Type: "event", Title: "富化用例发邮件", Content: "明天记得给 Tom 发邮件",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: sid,
+		EpistemicType: "observed", Confidence: 0.9, SessionID: &sid,
 		EventAt: &eventAt, Status: "active",
 	}})
 	memRows, _ := memories.ListBySession(ctx, sid)

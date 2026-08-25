@@ -214,7 +214,7 @@ func repoMemoryFixture(t *testing.T, db *sqlx.DB, sessionID ids.ID) *Memory {
 	mem := &Memory{
 		Type: "event", Title: "发邮件", Content: "明天需要给 Tom 发邮件确认设计稿",
 		EpistemicType: "observed", Importance: 0.6, Confidence: 0.9,
-		SessionID: sessionID, Status: "active",
+		SessionID: &sessionID, Status: "active",
 	}
 	if err := mr.InsertExt(t.Context(), db, []*Memory{mem}); err != nil {
 		t.Fatal(err)

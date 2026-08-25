@@ -30,7 +30,7 @@ func setupTodoAPI(t *testing.T) (http.Handler, *repo.TodoRepo, *repo.Todo) {
 	ctx := context.Background()
 
 	mem := &repo.Memory{Type: "event", Title: "API 用例待办来源", Content: "明天需要给 Tom 发邮件确认设计稿",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: ids.New(), Status: "active"}
+		EpistemicType: "observed", Confidence: 0.9, SessionID: idPtr(ids.New()), Status: "active"}
 	if err := mr.InsertExt(ctx, db, []*repo.Memory{mem}); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestTodoAddRemoveTopic(t *testing.T) {
 
 	// 建来源 memory + todo + topic
 	mem := &repo.Memory{Type: "event", Title: "加删 topic 来源", Content: "描述内容描述",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: ids.New(), Status: "active"}
+		EpistemicType: "observed", Confidence: 0.9, SessionID: idPtr(ids.New()), Status: "active"}
 	if err := mr.InsertExt(ctx, db, []*repo.Memory{mem}); err != nil {
 		t.Fatal(err)
 	}

@@ -42,7 +42,7 @@ func setupTopicAPI(t *testing.T) (http.Handler, *repo.TopicRepo, *repo.MemoryRep
 	mem := &repo.Memory{
 		Type: "fact", Title: "API用例记忆学Rust", Content: "用户正在学习 Rust 计划三个月读完一本书",
 		EpistemicType: "observed", Confidence: 0.9,
-		SessionID: ids.New(), EventAt: &eventAt, Status: "active",
+		SessionID: idPtr(ids.New()), EventAt: &eventAt, Status: "active",
 	}
 	if err := mr.InsertExt(ctx, db, []*repo.Memory{mem}); err != nil {
 		t.Fatal(err)
@@ -260,7 +260,7 @@ WHERE user_id = 1 AND name = ? AND status IN ('active','suggested')`, name); err
 	memA := &repo.Memory{
 		Type: "fact", Title: "合并A记忆", Content: "合并靶主题下的记忆内容",
 		EpistemicType: "observed", Confidence: 0.9,
-		SessionID: ids.New(), EventAt: &eventAt, Status: "active",
+		SessionID: idPtr(ids.New()), EventAt: &eventAt, Status: "active",
 	}
 	if err := mr.InsertExt(ctx, db, []*repo.Memory{memA}); err != nil {
 		t.Fatal(err)
@@ -283,7 +283,7 @@ WHERE user_id = 1 AND name = ? AND status IN ('active','suggested')`, name); err
 	memB := &repo.Memory{
 		Type: "fact", Title: "合并B记忆", Content: "合并源主题下的记忆内容",
 		EpistemicType: "observed", Confidence: 0.9,
-		SessionID: ids.New(), EventAt: &eventAt, Status: "active",
+		SessionID: idPtr(ids.New()), EventAt: &eventAt, Status: "active",
 	}
 	if err := mr.InsertExt(ctx, db, []*repo.Memory{memB}); err != nil {
 		t.Fatal(err)

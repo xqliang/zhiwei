@@ -186,7 +186,7 @@ func TestTopicListWithCounts(t *testing.T) {
 	mtr := &MemoryTopicRepo{DB: db}
 	ttr := &TodoTopicRepo{DB: db}
 	mem := &Memory{Type: "fact", Title: "计数用例记忆", Content: "c",
-		SessionID: sess.ID, Status: "active"}
+		SessionID: idPtr(sess.ID), Status: "active"}
 	if err := mr.InsertExt(ctx, db, []*Memory{mem}); err != nil {
 		t.Fatal(err)
 	}

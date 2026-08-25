@@ -60,11 +60,21 @@ func (r *MemoryTopicRepo) DeleteBySessionExt(ctx context.Context, ext ExecerCont
 	return err
 }
 
+// DeleteByConversationExt 删该对话全部记忆的 topic 关联（对话抽取重跑清理用；
+// 须先于删 memory——子查询依赖 memory 行仍存在）。
+// 合法性：子查询的是 memory 表、删的是 memory_topic 表（不同表），MySQL 允许。
+func (r *MemoryTopicRepo) DeleteByConversationExt(ctx context.Context, ext ExecerContext, convID ids.ID) error {
+	_, err := ext.ExecContext(ctx,
+		`DELETE FROM memory_topic WHERE memory_id IN (SELECT id FROM memory WHERE conversation_id = ?)`,
+		convID.Int64())
+	return err
+}
+
 // MemoryUserLink 是快照手动关联用的行（带自然键成分 segment_ids+title）。
 type MemoryUserLink struct {
-	TopicID     ids.ID  `db:"topic_id"`
-	SegmentIDs  ids.List `db:"transcript_segment_ids"`
-	Title       string  `db:"title"`
+	TopicID    ids.ID   `db:"topic_id"`
+	SegmentIDs ids.List `db:"transcript_segment_ids"`
+	Title      string   `db:"title"`
 }
 
 // SnapshotUserBySessionExt 读取某 session 待删 memory 的 source='user' 关联，

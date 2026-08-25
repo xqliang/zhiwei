@@ -19,8 +19,8 @@ func TestMemorySearch(t *testing.T) {
 	t.Cleanup(func() { _ = mr.DeleteBySessionExt(context.Background(), db, sid) })
 	kw := "量子隧穿实验" // 独特词，避免与库里既有数据碰撞
 	ms := []*Memory{
-		{Type: "fact", Title: kw + "记录", Content: "今天讨论了" + kw + "的进展", SessionID: sid, Status: "active", Importance: 0.6, Confidence: 0.8},
-		{Type: "idea", Title: "无关记忆", Content: "买牛奶", SessionID: sid, Status: "active", Importance: 0.3, Confidence: 0.8},
+		{Type: "fact", Title: kw + "记录", Content: "今天讨论了" + kw + "的进展", SessionID: &sid, Status: "active", Importance: 0.6, Confidence: 0.8},
+		{Type: "idea", Title: "无关记忆", Content: "买牛奶", SessionID: &sid, Status: "active", Importance: 0.3, Confidence: 0.8},
 	}
 	if err := mr.InsertExt(ctx, db, ms); err != nil {
 		t.Fatalf("InsertExt: %v", err)
@@ -66,8 +66,8 @@ func TestMemorySearchEscapesWildcards(t *testing.T) {
 	lit := "进度100%达成X9Z"     // 含字面量 %
 	other := "进度100abc达成X9Z" // % 若被当通配符, 会误命中它
 	ms := []*Memory{
-		{Type: "fact", Title: lit, Content: lit, SessionID: sid, Status: "active", Confidence: 0.8},
-		{Type: "fact", Title: other, Content: other, SessionID: sid, Status: "active", Confidence: 0.8},
+		{Type: "fact", Title: lit, Content: lit, SessionID: &sid, Status: "active", Confidence: 0.8},
+		{Type: "fact", Title: other, Content: other, SessionID: &sid, Status: "active", Confidence: 0.8},
 	}
 	if err := mr.InsertExt(ctx, db, ms); err != nil {
 		t.Fatal(err)

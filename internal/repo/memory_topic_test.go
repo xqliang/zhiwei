@@ -17,7 +17,7 @@ func TestMemoryTopicRepo(t *testing.T) {
 
 	// 预置 1 memory + 2 topic（memory 的 session_id 随机生成，无外键约束即可）
 	m := &Memory{Type: "fact", Title: "t", Content: "足够长的内容描述",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: ids.New()}
+		EpistemicType: "observed", Confidence: 0.9, SessionID: idPtr(ids.New())}
 	if err := (&MemoryRepo{DB: db}).InsertExt(ctx, db, []*Memory{m}); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestMemoryTopicSnapshotUser(t *testing.T) {
 	segA, segB := ids.New(), ids.New()
 	m := &Memory{
 		Type: "fact", Title: "给 Tom 发邮件", Content: "明天需要给 Tom 发邮件确认设计稿",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: sid,
+		EpistemicType: "observed", Confidence: 0.9, SessionID: &sid,
 		TranscriptSegmentIDs: ids.List{segA, segB},
 	}
 	if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {

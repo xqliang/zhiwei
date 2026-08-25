@@ -223,7 +223,7 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 			Type: c.Type, Title: c.Title, Content: c.Content,
 			EpistemicType: c.EpistemicType,
 			Importance:    c.Importance, Confidence: c.Confidence,
-			SessionID: sessionID, TranscriptSegmentIDs: ids.List(c.SegmentIDs),
+			SessionID: &sessionID, TranscriptSegmentIDs: ids.List(c.SegmentIDs),
 			EventAt: &c.EventAt, Status: "active",
 		}
 		memories[i] = m
