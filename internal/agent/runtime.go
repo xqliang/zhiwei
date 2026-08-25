@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // AgentRuntime 抽象「驱动一个 agent 跑一轮对话」。dsh 实现 + fake 实现（测试）。
@@ -42,6 +44,10 @@ type rpcError struct {
 	Code    int    `json:"code"`
 }
 
+// errDSHExited 在 dsh 子进程退出（stdout EOF）时返回给所有阻塞中的 call，
+// 让它们以错误返回而非永久挂起。
+var errDSHExited = errors.New("dsh 进程已退出")
+
 // dshRuntime spawn 一个长驻 dsh 子进程并用 JSON-RPC/stdio 驱动它。
 //
 // 并发模型（两把锁，职责严格分开，避免数据竞争）：
@@ -61,6 +67,7 @@ type dshRuntime struct {
 	// 生命周期字段：仅在 startMu 保护下访问。
 	startMu sync.Mutex
 	started bool
+	closed  bool // Close 是否已调用（幂等守卫）
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
 
@@ -116,6 +123,15 @@ func (r *dshRuntime) ensureStarted(ctx context.Context) error {
 	if _, err := r.call(ctx, "initialize", map[string]any{
 		"cwd": dir, "provider": "deepseek-official", "model": r.cfg.Model,
 	}); err != nil {
+		// 握手失败：杀掉子进程并清理句柄，避免进程泄漏。started 保持 false，
+		// 后续 Prompt 可干净重启；cmd/stdin 置 nil，Close 也不会碰这个已死的 cmd。
+		_ = stdin.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+		r.cmd = nil
+		r.stdin = nil
 		return err
 	}
 	r.started = true
@@ -162,11 +178,16 @@ func (r *dshRuntime) readLoop(stdout io.Reader) {
 			r.onNotification(frame.Method, frame.Params)
 		}
 	}
-	// stdout 关闭（进程退出）：关闭所有未决轮次 channel，避免消费者永久阻塞。
+	// stdout 关闭（进程退出）：关闭所有未决轮次 channel，避免消费者永久阻塞；
+	// 同时让所有阻塞中的 call 以 errDSHExited 返回（respCh 是 buffered(1)，send 不会阻塞）。
 	r.mu.Lock()
 	for sid, ch := range r.turns {
 		close(ch)
 		delete(r.turns, sid)
+	}
+	for id, ch := range r.pending {
+		ch <- rpcResp{err: errDSHExited}
+		delete(r.pending, id)
 	}
 	r.mu.Unlock()
 }
@@ -228,7 +249,10 @@ func (r *dshRuntime) call(ctx context.Context, method string, params any) (json.
 	id := r.nextID
 	respCh := make(chan rpcResp, 1)
 	r.pending[id] = respCh
-	frame := map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}
+	frame := map[string]any{"jsonrpc": "2.0", "id": id, "method": method}
+	if params != nil {
+		frame["params"] = params // 省略 nil params，避免协议流里出现 "params":null
+	}
 	b, _ := json.Marshal(frame)
 	b = append(b, '\n')
 	_, werr := r.stdin.Write(b)
@@ -238,18 +262,37 @@ func (r *dshRuntime) call(ctx context.Context, method string, params any) (json.
 	}
 	select {
 	case <-ctx.Done():
+		// ctx 取消/超时：清理 pending，避免响应永远不来时的永久泄漏。
+		// respCh 是 buffered(1)，即便 deliverResp 与此处竞态也不会阻塞。
+		r.mu.Lock()
+		delete(r.pending, id)
+		r.mu.Unlock()
 		return nil, ctx.Err()
 	case resp := <-respCh:
 		return resp.result, resp.err
 	}
 }
 
+// Prompt 向某会话发一条用户消息，返回该轮的事件流 channel（轮次结束时由 readLoop 关闭）。
+//
+// 消费契约（调用方必须遵守）：调用方必须及时且无条件地把返回的 channel drain 到关闭为止。
+// 返回的 channel 是 buffered 的；一旦消费者 stall 或提前放弃（不再接收），buffer 填满后就会
+// 阻塞唯一的读 goroutine（readLoop），进而 wedge 整个 runtime——任何 session 都不会再收到
+// 后续的 RPC 响应/事件。P2c 的 WS 消费者必须遵守本契约（即便自身 ctx 已取消，也要把 channel
+// drain 完）。当前暂不引入中止机制；P2b 唯一的消费者会完整 drain。
+//
+// 单轮次契约：同一 sessionID 同时只能有一个进行中的轮次；若已存在则直接返回错误。
 func (r *dshRuntime) Prompt(ctx context.Context, sessionID, text string) (<-chan Event, error) {
 	if err := r.ensureStarted(ctx); err != nil {
 		return nil, err
 	}
 	ch := make(chan Event, 64)
 	r.mu.Lock()
+	if _, exists := r.turns[sessionID]; exists {
+		// 已有进行中的轮次：拒绝第二轮，避免孤儿/永不关闭的 channel 与 double-close。
+		r.mu.Unlock()
+		return nil, fmt.Errorf("会话 %s 已有进行中的轮次", sessionID)
+	}
 	r.turns[sessionID] = ch
 	r.mu.Unlock()
 	_, err := r.call(ctx, "session/prompt", map[string]any{
@@ -257,10 +300,12 @@ func (r *dshRuntime) Prompt(ctx context.Context, sessionID, text string) (<-chan
 		"contentBlocks": []map[string]string{{"type": "text", "text": text}},
 	})
 	if err != nil {
+		// 仅从 turns 摘除；不 close(ch)——readLoop 是 turn channel 的唯一关闭者。
+		// 此处的 ch 从未返回给调用方，无人接收，交给 GC 即可；再 close 会与 readLoop
+		// 造成 double-close / send-on-closed panic。
 		r.mu.Lock()
 		delete(r.turns, sessionID)
 		r.mu.Unlock()
-		close(ch)
 		return nil, err
 	}
 	return ch, nil
@@ -268,15 +313,20 @@ func (r *dshRuntime) Prompt(ctx context.Context, sessionID, text string) (<-chan
 
 func (r *dshRuntime) Close() error {
 	r.startMu.Lock()
-	started := r.started
+	// 幂等：已关闭或从未启动，都置 closed 后直接返回（第二次 Close / Close-before-start 是 no-op）。
+	if r.closed || !r.started {
+		r.closed = true
+		r.startMu.Unlock()
+		return nil
+	}
+	r.closed = true
 	cmd := r.cmd
 	stdin := r.stdin
 	r.startMu.Unlock()
-	if !started {
-		return nil
-	}
-	// best-effort shutdown（忽略错误），关 stdin 让 bin 退出。
-	_, _ = r.call(context.Background(), "shutdown", nil)
+	// best-effort shutdown（忽略错误），有界超时避免子进程「活着但无响应」时 Close 永久挂起。
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = r.call(ctx, "shutdown", nil)
 	if stdin != nil {
 		_ = stdin.Close()
 	}
