@@ -106,6 +106,8 @@ PATCH/DELETE     /api/persons/{id}/attributes/{aid}  手动改值（supersede）
 POST             /api/persons/{id}/relationships     手动加关系（配偶/子女/上下游/组织…）
 DELETE           /api/persons/{id}/relationships/{rid}
 GET              /api/persons/{id}/history           修改历史（?entity_kind=&attr_key= 过滤）
+GET/POST         /api/persons/{id}/events             大事记列表（?status= 过滤）/ 手动新增
+DELETE           /api/persons/{id}/events/{eid}       删除事件（软删 dismissed）
 GET              /api/profile/pending                确认队列（属性/关系/人物 pending 并集）
 POST             /api/profile/pending/{kind}/{id}/confirm|dismiss   确认/放弃
 POST             /api/profile/extract                画像抽取/回填（可带 session_id；默认最近 50 个 completed）
