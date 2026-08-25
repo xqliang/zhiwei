@@ -13,6 +13,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/bin/zhiwei-server"
 PID_FILE="$ROOT/.run/dev.pid"
 LOG_FILE="$ROOT/logs/dev.log"
+# 先 source .env 再取 ZW_PORT——端口预检/启动都要用正确端口，且 .env 里可
+# 覆盖端口（如与本机其它服务共机让出 8080）。放顶部保证所有命令生效。
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/.env"
+  set +a
+fi
 # 与 internal/config 保持一致：ZW_PORT 默认 8080
 PORT="${ZW_PORT:-8080}"
 
@@ -69,13 +77,7 @@ cmd_start() {
     exit 1
   fi
 
-  # 2) 环境变量预检：服务不自己读 .env，这里统一 source 后校验必需密钥
-  if [ -f "$ROOT/.env" ]; then
-    set -a
-    # shellcheck disable=SC1091
-    . "$ROOT/.env"
-    set +a
-  fi
+  # 2) 环境变量预检：.env 已在脚本顶部 source（ZW_PORT 等全局生效），这里只校验必需密钥
   if [ -z "${ARK_API_KEY:-}" ]; then
     echo "错误: ARK_API_KEY 未设置（LLM 必需）。请在项目根目录 .env 中配置后重试。" >&2
     exit 1
