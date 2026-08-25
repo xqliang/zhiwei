@@ -1134,6 +1134,7 @@ const app = createApp({
         if (addRelForm.org_name.trim()) body.org_name = addRelForm.org_name.trim();
         await api('POST', '/api/persons/' + personDetail.value.person.id + '/relationships', body);
         await reloadPersonDetail();
+        // 手动加=active 不产生 pending，无需刷名册（删 pending 关系才需要，见 confirmDeleteRel）
         showAddRel.value = false;
         resetAddRelForm();
       } catch (e) { showError(e); }

@@ -153,6 +153,14 @@
   /* 输入框 */
   input.txt, textarea.txt { border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; font-size: var(--fs-base); width: 100%; background: #fff; font-family: inherit; line-height: 1.6; transition: border-color .15s, box-shadow .15s; }
   input.txt:focus, textarea.txt:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+  /* select.txt：与 input.txt 同款描边/圆角/内距/字号，补上 inline 样式无法表达的 :focus 环与高度对齐 */
+  select.txt {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 9px;
+    padding: 9px 12px; font-size: var(--fs-base); font-family: inherit; color: var(--text);
+    line-height: 1.6; transition: border-color .15s, box-shadow .15s;
+    width: auto; /* input.txt 的 width:100% 会破坏 flex 行的 min-width 布局，select 保持自适应 */
+  }
+  select.txt:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
   textarea.txt { resize: vertical; }
   input.inline { width: auto; min-width: 160px; display: inline-block; }
 
@@ -783,17 +791,17 @@
       <div class="card sunken" v-if="showAddRel" style="margin-bottom:10px">
         <div class="kv" style="margin-bottom:8px"><b>加关系</b><button class="btn-link" @click="toggleAddRel">✕</button></div>
         <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
-          <select class="txt" v-model="addRelForm.relation_type" style="min-width:100px; background:var(--surface); border:1px solid var(--border); border-radius:9px; padding:8px 10px; font-size:var(--fs-base); font-family:inherit; color:var(--text)">
+          <select class="txt" v-model="addRelForm.relation_type" style="min-width:100px">
             <option value="" disabled>关系类型</option>
             <option v-for="t in RELATION_TYPES" :key="t" :value="t">{{ t }}</option>
           </select>
           <span class="muted">→</span>
-          <select class="txt" v-model="addRelForm.related_person_id" style="min-width:140px; background:var(--surface); border:1px solid var(--border); border-radius:9px; padding:8px 10px; font-size:var(--fs-base); font-family:inherit; color:var(--text)">
+          <select class="txt" v-model="addRelForm.related_person_id" style="min-width:140px">
             <option value="">（对端人物，可空）</option>
             <option v-for="p in persons.filter(x => x.id !== personDetail.person.id)" :key="p.id" :value="p.id">{{ p.display_name }}</option>
           </select>
           <input class="txt" v-model="addRelForm.label" placeholder="称呼（如 老婆/大儿子，可空）" style="flex:1; min-width:120px">
-          <select class="txt" v-model="addRelForm.direction" style="min-width:100px; background:var(--surface); border:1px solid var(--border); border-radius:9px; padding:8px 10px; font-size:var(--fs-base); font-family:inherit; color:var(--text)">
+          <select class="txt" v-model="addRelForm.direction" style="min-width:100px">
             <option value="">（上下游，可空）</option>
             <option v-for="d in DIRECTIONS" :key="d" :value="d">{{ d }}</option>
           </select>
