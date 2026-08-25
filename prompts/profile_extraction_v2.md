@@ -88,6 +88,7 @@ personality 性格
 对话：
 1|我|我老婆 Alice 是儿科医生，我们家老大今年上小学了
 2|我|最近太忙，每天九点才下班
+3|我|七月底带家人去云南自驾玩了一周，特别开心
 
 输出：
 {"facts": [
@@ -100,6 +101,6 @@ personality 性格
   {"plane":"attribute","subject":{"kind":"self"},"attr_key":"work_end_time","value":"21:00",
    "confidence":0.85,"epistemic_type":"observed","block_index":2},
   {"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去云南旅游一周",
-   "description":"和朋友自驾","occurred_at":"2026-07-20","end_at":"2026-07-27","location":"云南",
-   "confidence":0.9,"epistemic_type":"observed","block_index":2}
+   "description":"和家人自驾","occurred_at":"2026-07-20","end_at":"2026-07-27","location":"云南",
+   "confidence":0.9,"epistemic_type":"observed","block_index":3}
 ]}

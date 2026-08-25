@@ -29,7 +29,7 @@ type PersonRef struct {
 type Extractor struct {
 	LLM    provider.LLMProvider
 	Model  string // 模型名（Tier 1 flash）
-	Prompt string // prompts/profile_extraction_v1.md 内容
+	Prompt string // prompts/profile_extraction_v2.md 内容
 	Window int    // 窗口大小（块数），<=0 时 memory.SplitWindows 内部回退默认 10
 
 	// stats 记录最近一次 Extract 的统计（每个 stage 各自 new 一个，无并发共享）。
