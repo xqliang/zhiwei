@@ -458,6 +458,9 @@ func TestEnrollFromSegmentReassignsSameSpeaker(t *testing.T) {
 	if np.Name != "张三" || np.Source != "enrolled" {
 		t.Fatalf("新说话人应为 张三/enrolled, got %s/%s", np.Name, np.Source)
 	}
+	// 收尾删掉新录入的「张三」：repo 包 TestPersonLifecycle 经 EnsurePersonBootstrap
+	// 会把未绑定 active 同名 speaker 物化成 person，残留令其 FindByName(张三) 命中错误行。
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), *newID) })
 }
 
 // TestEnrollFromSegmentReassignsByLabelWhenUnresolved：该段尚未识别出说话人(speaker_id 为空)时，
@@ -491,4 +494,6 @@ func TestEnrollFromSegmentReassignsByLabelWhenUnresolved(t *testing.T) {
 	if np.Name != "李四" {
 		t.Fatalf("新说话人名应为 李四, got %s", np.Name)
 	}
+	// 同上：收尾删除新录入说话人，防跨包物化污染（对齐 张三 用例的 cleanup）。
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), np.ID) })
 }
