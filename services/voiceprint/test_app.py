@@ -33,7 +33,18 @@ def test_add_search_remove():
         assert client.post("/add", json={"vector": v, "speaker_id": 42}).json()["ok"] is True
         r = client.post("/search", json={"vector": v}).json()
         assert r["matched"] is True and r["speaker_id"] == 42
+        # top-2 契约：单向量库 second_distance 为 0（Go 侧区分性弱命中规则的 top2）
+        assert r["second_distance"] == 0.0
+        # 加第二个向量后 second_distance 反映次高相似度且 ≤ top-1
+        v2 = [x * 0.5 for x in v]
+        n2 = sum(x * x for x in v2) ** 0.5
+        v2 = [x / n2 for x in v2]
+        assert client.post("/add", json={"vector": v2, "speaker_id": 43}).json()["ok"] is True
+        r2 = client.post("/search", json={"vector": v}).json()
+        assert r2["matched"] is True and r2["speaker_id"] == 42
+        assert 0.0 < r2["second_distance"] <= r2["distance"]  # top-2 存在且不超过 top-1
         assert client.post("/remove", json={"speaker_id": 42}).json()["ok"] is True
+        assert client.post("/remove", json={"speaker_id": 43}).json()["ok"] is True
         assert client.post("/search", json={"vector": v}).json()["matched"] is False
 
 

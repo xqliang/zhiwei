@@ -674,7 +674,14 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 		items = append(items, matchItem{SpeakerID: sp.ID.String(), Name: sp.Name, Similarity: cosine(vec, emb)})
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Similarity > items[j].Similarity })
-	matched := len(items) > 0 && items[0].Similarity >= threshold
+	// 命中判定与 speaker stage 同一套两级规则（voiceprint.Matched）：强命中 top1≥阈值；
+	// 或区分性弱命中 top1≥0.72 且明显领先第二名（top1−top2≥0.6）。
+	// 保证「试匹配」预览与实际识别结论一致，避免预览说未达阈值、实际处理却命中。
+	second := 0.0
+	if len(items) > 1 {
+		second = items[1].Similarity
+	}
+	matched := len(items) > 0 && voiceprint.Matched(items[0].Similarity, second, threshold)
 	resp := map[string]any{
 		"matches":     items, // 全库按相似度降序
 		"threshold":   threshold,
@@ -685,6 +692,13 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 		resp["speaker_id"] = items[0].SpeakerID
 		resp["speaker_name"] = items[0].Name
 		resp["similarity"] = items[0].Similarity
+		resp["match_rule"] = map[string]any{ // 命中依据（区分性弱命中时前端可解释为何低于阈值仍命中）
+			"top1":    items[0].Similarity,
+			"top2":    second,
+			"strong":  items[0].Similarity >= threshold, // true=强命中（过阈值）；false=区分性弱命中
+			"soft_min": voiceprint.SoftMin,
+			"gap_min":  voiceprint.GapMin,
+		}
 	}
 	writeJSON(w, resp)
 }

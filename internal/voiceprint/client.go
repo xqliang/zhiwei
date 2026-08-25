@@ -15,13 +15,23 @@ import (
 	"zhiwei/internal/ids"
 )
 
+// SearchResult 一次 1:N 检索的结果（top-2）。
+// Matched 表示 sidecar 是否找到 top-1（库非空），不代表阈值通过——
+// 命中判定统一在 Go 侧用 Matched()（两级规则）做。
+type SearchResult struct {
+	SpeakerID      ids.ID
+	Distance       float64 // top-1 相似度（L2 归一向量的内积 = 余弦）
+	SecondDistance float64 // top-2 相似度（库中向量 <2 个时为 0），区分性弱命中规则用
+	Matched        bool    // 是否找到 top-1（false = 空库）
+}
+
 // Client 声纹 sidecar 客户端接口（pipeline/api 注入，测试可 mock）。
 type Client interface {
 	// Embed 把一段音频抽成 256 维声纹向量。
 	Embed(ctx context.Context, audioPath string) ([]float32, error)
-	// Search 用向量检索最相近的说话人；matched 表示 sidecar 是否找到 top-1，
-	// 不代表阈值通过 —— 阈值判定在 Go 侧 pipeline 用 distance 与配置比较后决定。
-	Search(ctx context.Context, vec []float32) (speakerID ids.ID, distance float64, matched bool, err error)
+	// Search 用向量检索最相近的 top-2 说话人。matched 表示 sidecar 是否找到 top-1，
+	// 不代表阈值通过 —— 阈值判定在 Go 侧 pipeline 用 Matched() 比较后决定。
+	Search(ctx context.Context, vec []float32) (SearchResult, error)
 	// Add 把向量登记到某个说话人名下（自动建档）。
 	Add(ctx context.Context, vec []float32, id ids.ID) error
 	// Remove 删除某个说话人的全部声纹（删除说话人时调用）。
@@ -90,17 +100,23 @@ func (c *httpClient) Embed(ctx context.Context, audioPath string) ([]float32, er
 	return out.Vector, nil
 }
 
-func (c *httpClient) Search(ctx context.Context, vec []float32) (ids.ID, float64, bool, error) {
+func (c *httpClient) Search(ctx context.Context, vec []float32) (SearchResult, error) {
 	// 注意：speaker_id 用 int64 中转，绕过 ids.ID 的自定义 JSON（sidecar 返回裸数字）。
 	var out struct {
-		SpeakerID int64   `json:"speaker_id"`
-		Distance  float64 `json:"distance"`
-		Matched   bool    `json:"matched"`
+		SpeakerID     int64   `json:"speaker_id"`
+		Distance      float64 `json:"distance"`
+		SecondDistance float64 `json:"second_distance"` // 旧版 sidecar 无此字段 → 0（gap 规则退化为仅看 top1）
+		Matched       bool    `json:"matched"`
 	}
 	if err := c.post(ctx, "/search", map[string][]float32{"vector": vec}, &out); err != nil {
-		return 0, 0, false, err
+		return SearchResult{}, err
 	}
-	return ids.ID(out.SpeakerID), out.Distance, out.Matched, nil
+	return SearchResult{
+		SpeakerID:      ids.ID(out.SpeakerID),
+		Distance:       out.Distance,
+		SecondDistance: out.SecondDistance,
+		Matched:        out.Matched,
+	}, nil
 }
 
 func (c *httpClient) Add(ctx context.Context, vec []float32, id ids.ID) error {

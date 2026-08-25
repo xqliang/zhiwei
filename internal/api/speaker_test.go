@@ -34,8 +34,8 @@ func (fakeVoiceprintAPI) Embed(_ context.Context, _ string) ([]float32, error) {
 }
 func (fakeVoiceprintAPI) Add(_ context.Context, _ []float32, _ ids.ID) error { return nil }
 func (fakeVoiceprintAPI) Remove(_ context.Context, _ ids.ID) error           { return nil }
-func (fakeVoiceprintAPI) Search(_ context.Context, _ []float32) (ids.ID, float64, bool, error) {
-	return 0, 0, false, nil
+func (fakeVoiceprintAPI) Search(_ context.Context, _ []float32) (voiceprint.SearchResult, error) {
+	return voiceprint.SearchResult{}, nil
 }
 
 var _ voiceprint.Client = fakeVoiceprintAPI{}

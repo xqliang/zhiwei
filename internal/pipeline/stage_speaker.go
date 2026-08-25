@@ -15,6 +15,7 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/voiceprint"
 )
 
 // runSpeakerStage 是 speaker stage 的可测核心（避开 pool），由 stageSpeaker 包装成 Handler。
@@ -93,14 +94,17 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 	// 2) 每组（= 一个 ASR 说话人）独立做跨 session 1:N 检索/登记 → 回填该组未解析段。
 	// 信任 ASR diarization：不同 ASR 标签一律视为不同说话人，不在本地按声纹相似度合并。
 	for _, g := range reps {
-		matchID, sim, matched, err := d.Voiceprint.Search(ctx, g.rep)
+		res, err := d.Voiceprint.Search(ctx, g.rep)
 		if err != nil {
 			return fmt.Errorf("voiceprint search: %w", err)
 		}
-		matched = matched && sim >= threshold // 同一人判定：相似度 ≥ 阈值才复用，否则登记新声纹
+		// 同一人判定（两级规则，见 voiceprint.Matched）：强命中 sim≥阈值；
+		// 或区分性弱命中 sim≥0.72 且明显领先第二名（top1−top2≥0.6）——
+		// 分数略低于阈值但明显是同一个人的也复用，减少真匹配被误登记成新声纹。
+		matched := res.Matched && voiceprint.Matched(res.Distance, res.SecondDistance, threshold)
 		var speakerID ids.ID
 		if matched {
-			speakerID = matchID
+			speakerID = res.SpeakerID
 		} else {
 			// 自动登记：name=说话人{5位随机串}，向量 BLOB 灾备
 			sp := &repo.Speaker{Name: "说话人" + rand5(), Source: "auto", Embedding: float32Blob(g.rep), SampleCount: g.vecN}

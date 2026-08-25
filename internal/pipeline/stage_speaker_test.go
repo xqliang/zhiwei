@@ -16,7 +16,8 @@ import (
 type fakeVoiceprint struct {
 	matched     bool
 	matchID     ids.ID
-	searchSim   float64 // Search 返回的相似度；0 → 兜底 0.9（清晰命中，兼容既有用例）
+	searchSim   float64 // Search 返回的 top-1 相似度；0 → 兜底 0.9（清晰命中，兼容既有用例）
+	secondSim   float64 // Search 返回的 top-2 相似度（区分性弱命中规则用，默认 0=单声纹库）
 	added       []ids.ID
 	embedOK     bool
 	sameVec     bool // true→各段返回相同向量；false→逐段正交（各段不同向量）
@@ -36,13 +37,15 @@ func (f *fakeVoiceprint) Embed(_ context.Context, _ string) ([]float32, error) {
 	}
 	return v, nil
 }
-func (f *fakeVoiceprint) Search(_ context.Context, _ []float32) (ids.ID, float64, bool, error) {
+func (f *fakeVoiceprint) Search(_ context.Context, _ []float32) (voiceprint.SearchResult, error) {
 	f.searchCalls++
 	sim := f.searchSim
 	if sim == 0 {
 		sim = 0.9 // 兜底：默认返回清晰命中相似度，兼容既有用例
 	}
-	return f.matchID, sim, f.matched, nil
+	return voiceprint.SearchResult{
+		SpeakerID: f.matchID, Distance: sim, SecondDistance: f.secondSim, Matched: f.matched,
+	}, nil
 }
 func (f *fakeVoiceprint) Add(_ context.Context, _ []float32, id ids.ID) error {
 	f.added = append(f.added, id)
@@ -247,5 +250,44 @@ func TestStageSpeakerEnrollsWhenSimilarityBelowThreshold(t *testing.T) {
 		if s.SpeakerID != nil && *s.SpeakerID == preset {
 			t.Fatalf("相似度 0.7 < 0.8 不应复用 matchID(%v)", preset)
 		}
+	}
+}
+
+// TestStageSpeakerWeakMatchByDistinctiveness 区分性弱命中（两级规则的弱命中支路）：
+// sim 0.75（低于强阈值 0.8）但明显领先第二名（top1−top2 ≥ 0.6）→ 复用既有声纹；
+// 同样 0.75 但第二名 0.5（领先不足，两个相近声纹的模糊匹配）→ 仍登记新声纹。
+func TestStageSpeakerWeakMatchByDistinctiveness(t *testing.T) {
+	ctx := context.Background()
+
+	// 场景一：0.75 vs 0.1 → gap 0.65 ≥ 0.6 → 命中复用既有声纹
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	sp := &repo.Speaker{Name: "张三", Source: "enrolled"}
+	if err := speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	fv := &fakeVoiceprint{matched: true, matchID: sp.ID, searchSim: 0.75, secondSim: 0.1}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 0 {
+		t.Fatalf("区分性弱命中应复用既有声纹，实际登记了 %d 个新声纹", len(fv.added))
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SpeakerID == nil || *s.SpeakerID != sp.ID {
+			t.Fatalf("段 %d 应归属既有声纹 %s，实际 %+v", s.SequenceNo, sp.ID, s.SpeakerID)
+		}
+	}
+
+	// 场景二：0.75 vs 0.5 → gap 0.25 < 0.6 → 登记新声纹
+	sid2, tr2, dataDir2, transcripts2, speakers2 := seedSpeakerStage(t)
+	fv2 := &fakeVoiceprint{matched: true, matchID: ids.New(), searchSim: 0.75, secondSim: 0.5}
+	d2 := StageDeps{Transcripts: transcripts2, Speakers: speakers2, Voiceprint: fv2, DataDir: dataDir2}
+	if err := runSpeakerStage(ctx, d2, sid2, tr2); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv2.added) == 0 {
+		t.Fatal("领先不足（模糊匹配）时应登记新声纹")
 	}
 }
