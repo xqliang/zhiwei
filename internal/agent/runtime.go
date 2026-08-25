@@ -83,7 +83,17 @@ func NewDSHRuntime(cfg RuntimeConfig) *dshRuntime {
 	return &dshRuntime{cfg: cfg, pending: map[int]chan rpcResp{}, turns: map[string]chan Event{}}
 }
 
-func (r *dshRuntime) sidecarDir() string { return filepath.Dir(r.cfg.CordisConfig) }
+// sidecarDir 返回边车目录的【绝对路径】。必须绝对：spawn 时 cmd.Dir 设为本目录，
+// 若 binPath/DSH_CORDIS_CONFIG 用相对路径会相对 cmd.Dir 再解析一次→路径翻倍（
+// 如 services/agent-sidecar/services/agent-sidecar/...）导致 MODULE_NOT_FOUND。
+// 绝对化后 node 的 bin.js 实参与 cordis 配置均与 cwd 无关。
+func (r *dshRuntime) sidecarDir() string {
+	dir := filepath.Dir(r.cfg.CordisConfig)
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
+}
 
 func (r *dshRuntime) binPath() string {
 	return filepath.Join(r.sidecarDir(), "node_modules", "@deepseek-ai", "dsh-sdk-jsonrpc-demo", "lib", "bin.js")
@@ -138,10 +148,15 @@ func (r *dshRuntime) ensureStarted(ctx context.Context) error {
 	return nil
 }
 
-// dshEnv 组装 DSH_* 环境变量。
+// dshEnv 组装 DSH_* 环境变量。CordisConfig 绝对化：dsh 子进程 cwd=sidecarDir，
+// 相对配置路径会相对 cwd 再解析一次而翻倍/找不到。
 func (r *dshRuntime) dshEnv() []string {
+	cordis := r.cfg.CordisConfig
+	if abs, err := filepath.Abs(cordis); err == nil {
+		cordis = abs
+	}
 	return []string{
-		"DSH_CORDIS_CONFIG=" + r.cfg.CordisConfig,
+		"DSH_CORDIS_CONFIG=" + cordis,
 		"DSH_SESSION_ROOT=" + r.cfg.SessionRoot,
 		"DSH_MODEL=" + r.cfg.Model,
 		"DSH_CWD=" + r.sidecarDir(),

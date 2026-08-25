@@ -38,7 +38,19 @@ type ArkLLM struct {
 }
 
 func NewArkLLM(baseURL, apiKey string) *ArkLLM {
-	return &ArkLLM{baseURL: baseURL, apiKey: apiKey, client: &http.Client{Timeout: 60 * time.Second}}
+	return NewArkLLMWithTimeout(baseURL, apiKey, 60*time.Second)
+}
+
+// NewArkLLMWithTimeout 同 NewArkLLM 但可指定 HTTP 超时。抽取/分类等短调用用默认 60s；
+// 报告这类「大 prompt + 结构化长输出」的生成（doubao thinking 模型 + 全天/全周数据）
+// 常超 60s（实测 context deadline exceeded while awaiting headers），需更长超时。
+func NewArkLLMWithTimeout(baseURL, apiKey string, timeout time.Duration) *ArkLLM {
+	return &ArkLLM{baseURL: baseURL, apiKey: apiKey, client: &http.Client{Timeout: timeout}}
+}
+
+// NewArkLLMForReports 为报告引擎构造更长超时（180s）的客户端。
+func NewArkLLMForReports(baseURL, apiKey string) *ArkLLM {
+	return NewArkLLMWithTimeout(baseURL, apiKey, 180*time.Second)
 }
 
 type chatPayload struct {

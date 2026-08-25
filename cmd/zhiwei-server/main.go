@@ -133,7 +133,9 @@ func main() {
 		agentModel = cfg.LLMStrongModel
 	}
 	// 报告引擎（日/周报 + 话题状态）：直连 Ark LLM（非 dsh 边车），复用现有 repo。
-	reviewer := review.NewGenerator(llm, agentModel,
+	// 用更长超时的客户端——报告是大 prompt + 结构化长输出，默认 60s 会 context deadline exceeded。
+	reviewLLM := provider.NewArkLLMForReports(cfg.ARKBaseURL, cfg.ARKAPIKey)
+	reviewer := review.NewGenerator(reviewLLM, agentModel,
 		string(reviewDailyBytes), "review_daily_v1",
 		string(reviewWeeklyBytes), "review_weekly_v1",
 		string(topicStatusBytes), "topic_status_v1",
