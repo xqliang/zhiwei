@@ -1154,7 +1154,7 @@ const app = createApp({
       try {
         await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/relationships/' + id);
         deletingRelId.value = null;
-        await reloadPersonDetail();
+        await reloadPersonDetail(); await loadPersons(); // 删 pending 关系会改名册 pending 计数，一并刷（对齐 confirmDeleteAttr）
       } catch (e) { showError(e); }
     }
 
