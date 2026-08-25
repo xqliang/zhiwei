@@ -169,6 +169,7 @@ func ParseFacts(raw string) ([]Fact, error) {
 				continue
 			}
 		case "event":
+			// related 为可选增强信息，service 层解析容错（解析不到存空），此处不校验——与 relationship 平面强制校验 Related.Kind 不同。
 			if !ValidEventTypes[f.EventType] || f.EventTitle == "" {
 				continue // 非法事件类型或空标题：无法落库
 			}
