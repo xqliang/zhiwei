@@ -1162,6 +1162,7 @@ const app = createApp({
     // ---------- 确认队列（跨平面 pending 并集；与名册/详情独立刷新） ----------
     const pendingItems = ref([]);
     const pendingLoading = ref(false);
+    const queueBusyIds = reactive({}); // 正在确认/放弃的条目 id（kind-id 键），防双击重放
     async function loadPending() {
       pendingLoading.value = true;
       try {
@@ -1177,16 +1178,24 @@ const app = createApp({
       if (personDetail.value) await reloadPersonDetail();
     }
     async function confirmPendingItem(it) {
+      const k = it.kind + '-' + it.id;
+      if (queueBusyIds[k]) return; // 防双击重放（确认/放弃互斥共用同一键）
+      queueBusyIds[k] = true;
       try {
         await api('POST', '/api/profile/pending/' + it.kind + '/' + it.id + '/confirm');
         await refreshAfterQueue();
       } catch (e) { showError(e); }
+      finally { delete queueBusyIds[k]; }
     }
     async function dismissPendingItem(it) {
+      const k = it.kind + '-' + it.id;
+      if (queueBusyIds[k]) return; // 防双击重放（确认/放弃互斥共用同一键）
+      queueBusyIds[k] = true;
       try {
         await api('POST', '/api/profile/pending/' + it.kind + '/' + it.id + '/dismiss');
         await refreshAfterQueue();
       } catch (e) { showError(e); }
+      finally { delete queueBusyIds[k]; }
     }
     // 队列条目摘要（kind 不同字段不同：attribute=建议值，relationship=类型+称呼，person=名字）
     function pendingSummary(it) {
@@ -1492,7 +1501,7 @@ const app = createApp({
       epiText, personNameOf,
       ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
-      pendingItems, pendingLoading, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
+      pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
     };
   }
 });
