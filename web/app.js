@@ -1039,6 +1039,8 @@ const app = createApp({
       showAddAttr.value = false; addAttrForm.attr_key = ''; addAttrForm.value = '';
       // 关系手动管理临时态（Task 4）：加关系表单(含草稿) / 删除确认一并清空
       showAddRel.value = false; resetAddRelForm(); deletingRelId.value = null;
+      // 大事记临时态（P2b Task 1）：加事件表单(含草稿) / 删除确认一并清空
+      showAddEvent.value = false; resetAddEventForm(); deletingEventId.value = null;
     }
     async function reloadPersonDetail() {
       if (!personDetail.value) return;
@@ -1208,6 +1210,75 @@ const app = createApp({
         await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/relationships/' + id);
         deletingRelId.value = null;
         await reloadPersonDetail(); await loadPersons(); // 删 pending 关系会改名册 pending 计数，一并刷（对齐 confirmDeleteAttr）
+      } catch (e) { showError(e); }
+    }
+
+    // ---------- 大事记（event 平面，P2） ----------
+    // 事件类型枚举与后端 ValidEventTypes 一致（9 类）
+    const EVENT_TYPES = ['里程碑','聚会','会议','旅行','健康','成就','挫折','负面','其他'];
+
+    const showAddEvent = ref(false);
+    const addEventForm = reactive({ event_type: '', title: '', description: '', occurred_at: '', end_at: '', location: '', related_person_id: '' });
+    const addingEvent = ref(false);
+    const deletingEventId = ref(null);  // 2 步删除确认
+
+    // 按年分组（时间倒序）：occurred_at 为空的事件归「时间未知」组排最后。
+    // 后端 ListByPerson 已按 occurred_at DESC 排（NULL 沉底），这里只分桶保持顺序。
+    const eventsByYear = computed(() => {
+      if (!personDetail.value || !personDetail.value.events) return [];
+      const map = {}, order = [];
+      for (const e of personDetail.value.events) {
+        const k = e.occurred_at ? String(e.occurred_at).slice(0, 4) : '时间未知';
+        if (!map[k]) { map[k] = []; order.push(k); }
+        map[k].push(e);
+      }
+      return order.map(k => ({ year: k, items: map[k] }));
+    });
+    // 事件日期展示：occurred_at ISO → 「M月D日」；空显「—」
+    function fmtEventDate(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      return isNaN(d.getTime()) ? iso : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+    }
+    function resetAddEventForm() {
+      addEventForm.event_type = ''; addEventForm.title = ''; addEventForm.description = '';
+      addEventForm.occurred_at = ''; addEventForm.end_at = ''; addEventForm.location = ''; addEventForm.related_person_id = '';
+    }
+    // 开合切换：收起清草稿（对齐 toggleAddAttr/toggleAddRel 对称模式）
+    function toggleAddEvent() {
+      if (showAddEvent.value) { showAddEvent.value = false; resetAddEventForm(); return; }
+      showAddEvent.value = true;
+    }
+    async function submitAddEvent() {
+      if (addingEvent.value) return;
+      const et = addEventForm.event_type;
+      const title = addEventForm.title.trim();
+      if (!et) { toast.value = '请选择事件类型'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      if (!title) { toast.value = '请输入标题'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingEvent.value = true;
+      try {
+        // 日期用 <input type="date"> 的 YYYY-MM-DD；可选字段仅非空才传（后端 parseEventAt 尽力解析）
+        const body = { event_type: et, title };
+        if (addEventForm.description.trim()) body.description = addEventForm.description.trim();
+        if (addEventForm.occurred_at) body.occurred_at = addEventForm.occurred_at;
+        if (addEventForm.end_at) body.end_at = addEventForm.end_at;
+        if (addEventForm.location.trim()) body.location = addEventForm.location.trim();
+        if (addEventForm.related_person_id) body.related_person_id = addEventForm.related_person_id;
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/events', body);
+        await reloadPersonDetail();
+        showAddEvent.value = false;
+        resetAddEventForm();
+      } catch (e) { showError(e); }
+      finally { addingEvent.value = false; }
+    }
+    function askDeleteEvent(ev) { deletingEventId.value = ev.id; }
+    async function confirmDeleteEvent() {
+      const id = deletingEventId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/events/' + id);
+        deletingEventId.value = null;
+        await reloadPersonDetail(); await loadPersons(); // pending 计数可能变化
       } catch (e) { showError(e); }
     }
 
@@ -1576,6 +1647,7 @@ const app = createApp({
       epiText, personNameOf,
       ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
+      EVENT_TYPES, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
       pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
       backfilling, backfillInfo, runBackfill,
     };

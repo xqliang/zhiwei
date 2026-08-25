@@ -875,6 +875,58 @@
         </div>
       </div>
 
+      <!-- 大事记（按年分组，时间倒序；与属性/关系互补：属性记「有过的」，大事记记「某次发生的」） -->
+      <div v-if="personDetail.events && personDetail.events.length" style="margin-bottom:12px">
+        <div class="muted" style="font-weight:600; margin-bottom:4px">大事记</div>
+        <div v-for="g in eventsByYear" :key="g.year" style="margin-bottom:8px">
+          <div class="muted" style="font-size:var(--fs-xs); margin:4px 0">{{ g.year }}</div>
+          <div v-for="ev in g.items" :key="ev.id" class="seg">
+            <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ ev.event_type }}</span>
+            <div class="seg-text">
+              <div>
+                <b>{{ ev.title }}</b>
+                <span class="muted"> · {{ fmtEventDate(ev.occurred_at) }}</span>
+                <span v-if="ev.location" class="muted"> · {{ ev.location }}</span>
+                <span v-if="ev.event_type === '旅行' && ev.end_at" class="muted"> 至 {{ fmtEventDate(ev.end_at) }}</span>
+                <span class="chip" :style="ev.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ ev.source === 'llm' ? 'AI' : '人工' }}</span>
+                <span v-if="ev.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+              </div>
+              <div v-if="ev.description" class="muted" style="font-size:var(--fs-xs)">{{ ev.description }}</div>
+            </div>
+            <div style="display:flex; gap:4px; flex-shrink:0">
+              <template v-if="deletingEventId === ev.id">
+                <span class="muted">删除？</span>
+                <button class="btn mini danger" @click="confirmDeleteEvent">确认</button>
+                <button class="btn mini" @click="deletingEventId=null">取消</button>
+              </template>
+              <button v-else class="btn mini danger" @click="askDeleteEvent(ev)" title="删除事件">🗑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 加事件表单 -->
+      <div class="card sunken" v-if="showAddEvent" style="margin-bottom:10px">
+        <div class="kv" style="margin-bottom:8px"><b>加大事记</b><button class="btn-link" @click="toggleAddEvent">✕</button></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+          <select class="txt" v-model="addEventForm.event_type" style="min-width:100px">
+            <option value="" disabled>事件类型</option>
+            <option v-for="t in EVENT_TYPES" :key="t" :value="t">{{ t }}</option>
+          </select>
+          <input class="txt" v-model="addEventForm.title" placeholder="标题（如 去云南旅游一周）*" style="flex:1; min-width:140px">
+          <input class="txt" v-model="addEventForm.occurred_at" type="date" title="发生日期" style="width:auto; min-width:130px">
+          <input class="txt" v-model="addEventForm.end_at" type="date" title="结束日期（旅行/会议等跨天事件）" style="width:auto; min-width:130px">
+          <input class="txt" v-model="addEventForm.location" placeholder="地点（可空）" style="flex:1; min-width:100px">
+          <select class="txt" v-model="addEventForm.related_person_id" style="min-width:120px" title="同场主要人物">
+            <option value="">（同行人物，可空）</option>
+            <option v-for="p in persons.filter(x => x.id !== personDetail.person.id)" :key="p.id" :value="p.id">{{ p.display_name }}</option>
+          </select>
+          <button class="btn primary" :disabled="addingEvent" @click="submitAddEvent">{{ addingEvent ? '保存中…' : '保存' }}</button>
+        </div>
+        <input class="txt" v-model="addEventForm.description" placeholder="细节（可空）" style="width:100%; margin-top:8px">
+        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；日期可选，只知道大概时间可留空。</div>
+      </div>
+
       <!-- 加属性表单 -->
       <div class="card sunken" v-if="showAddAttr" style="margin-bottom:10px">
         <div class="kv" style="margin-bottom:8px"><b>加属性</b><button class="btn-link" @click="toggleAddAttr">✕</button></div>
@@ -942,6 +994,7 @@
       <div class="edit-actions">
         <button class="btn mini" @click="toggleAddAttr">{{ showAddAttr ? '收起加属性' : '＋ 加属性' }}</button>
         <button class="btn mini" @click="toggleAddRel">{{ showAddRel ? '收起加关系' : '＋ 加关系' }}</button>
+        <button class="btn mini" @click="toggleAddEvent">{{ showAddEvent ? '收起加大事记' : '＋ 加大事记' }}</button>
       </div>
     </div>
   </div>
