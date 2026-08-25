@@ -164,6 +164,25 @@ func main() {
 	r.Handle("/internal/mcp", mcpHandler)
 	r.Handle("/internal/mcp/*", mcpHandler)
 
+	// Agent 运行时（惰性 spawn dsh；首次对话时启动，此时 /internal/mcp 已监听）。
+	if cfg.AgentEnabled {
+		rt := agent.NewDSHRuntime(agent.RuntimeConfig{
+			CordisConfig: cfg.AgentCordisConfig,
+			Model:        cfg.AgentModel,
+			SessionRoot:  cfg.DSHSessionRoot,
+			SystemPrompt: cfg.DSHSystemPrompt,
+			MCPURL:       "http://127.0.0.1:" + cfg.Port + "/internal/mcp",
+		})
+		defer rt.Close()
+		agentConvs := &repo.AgentConversationRepo{DB: db}
+		agentMsgs := &repo.AgentMessageRepo{DB: db}
+		agent.RegisterAgent(r, &agent.AgentHandler{
+			Orch:          agent.NewOrchestrator(rt, agentConvs, agentMsgs),
+			Conversations: agentConvs,
+			Messages:      agentMsgs,
+		})
+	}
+
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
 	go func() {
 		log.Println("zhiwei-server listening on :" + cfg.Port)
