@@ -951,6 +951,9 @@ const app = createApp({
       newPerson.value = { display_name: '', speaker_id: '', summary: '' };
       creatingPerson.value = false;
     }
+    // 工具栏「＋ 新建/收起」切换：收起时走 cancelNewPerson 一并清草稿（对齐 toggleNewTopic，
+    // 避免 inline `showNewPerson = !showNewPerson` 收起不重置、重开残留旧输入的不对称）。
+    function toggleNewPerson() { if (showNewPerson.value) cancelNewPerson(); else showNewPerson.value = true; }
     async function createPerson() {
       if (creatingPerson.value) return;
       const name = newPerson.value.display_name.trim();
@@ -977,6 +980,7 @@ const app = createApp({
     function closePersonDetail() {
       personDetail.value = null;
       renamingPerson.value = null;
+      archivingPersonId.value = null; // 切换详情/收起时一并清归档确认态（对齐 toggleSession 折叠清 deletingSessionId）
       // Task 3/4 将在此追加：attrHistory/editingAttr/showAddAttr/showAddRel 等临时态清理
     }
     async function reloadPersonDetail() {
@@ -1304,7 +1308,7 @@ const app = createApp({
       loadTodos, setTodoStatus, jumpToSession,
       editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
-      persons, personDetail, showNewPerson, newPerson, creatingPerson, loadPersons, cancelNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
+      persons, personDetail, showNewPerson, newPerson, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
     };
   }
 });

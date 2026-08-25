@@ -635,7 +635,7 @@
     <div class="kv" style="margin-bottom:12px">
       <b style="font-size:var(--fs-lg)">人物</b>
       <div style="display:flex; gap:6px">
-        <button class="btn primary" style="padding:7px 16px" @click="showNewPerson = !showNewPerson">{{ showNewPerson ? '收起' : '＋ 新建' }}</button>
+        <button class="btn primary" style="padding:7px 16px" @click="toggleNewPerson">{{ showNewPerson ? '收起' : '＋ 新建' }}</button>
       </div>
     </div>
 
@@ -658,7 +658,7 @@
 
     <!-- 名册卡片 -->
     <div v-if="!persons.length" class="card empty">还没有人物。点「新建」，或上传录音后由画像抽取自动生成。</div>
-    <div class="card" v-for="p in persons" :key="p.id" style="cursor:pointer" @click="togglePerson(p.id)">
+    <div class="card clickable" v-for="p in persons" :key="p.id" @click="togglePerson(p.id)">
       <div class="kv">
         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
           <b>{{ p.display_name }}</b>
