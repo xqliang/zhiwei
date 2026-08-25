@@ -23,6 +23,7 @@ func RegisterAgent(r chi.Router, h *AgentHandler) {
 	r.Get("/api/agent/conversations", h.listConversations)
 	r.Get("/api/agent/conversations/{cid}", h.getConversation)
 	r.Post("/api/agent/conversations/{cid}/messages", h.postMessage)
+	r.Get("/api/agent/conversations/{cid}/ws", h.handleWS) // WS 流式（上行发消息 + 下行流式帧）
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
