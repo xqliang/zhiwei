@@ -100,13 +100,20 @@ func factProvenance(win []memory.Block, idx int) []ids.ID {
 // event 平面同理：主体多为 self、attr/relation 字段全空，若不纳入 event_type/title
 // 判别，「旅行·去云南」与「聚会·同学会」两条都会塌缩成 event|self||... 被误判同一条。
 // 故末尾追加 EventType/EventTitle 两个判别字段（防批内塌缩：同 key 不同事件）。
+//
+// metric/cycle 平面（P3）同样追加判别（追加式不破坏既有键）：metric 主体多为 self
+// 且 attr/relation/event 字段全空，靠 MetricKey/MetricValue/MeasuredAt 区分不同测点
+// （体重·72.5·8-20 与 情绪·焦虑·8-21 不能塌缩）；cycle 靠 CycleType/CycleLabel/AnchorDate
+// 区分不同周期安排（降压药与胰岛素两条 medication 不能塌缩）。
 func factKey(f Fact) string {
 	return f.Plane + "\x00" +
 		f.Subject.Kind + "\x00" + f.Subject.Name + "\x00" + f.Subject.Relation + "\x00" +
 		f.AttrKey + "\x00" + f.Value + "\x00" +
 		f.RelationType + "\x00" +
 		f.Related.Kind + "\x00" + f.Related.Name + "\x00" + f.Related.Relation + "\x00" +
-		f.EventType + "\x00" + f.EventTitle
+		f.EventType + "\x00" + f.EventTitle + "\x00" +
+		f.MetricKey + "\x00" + f.MetricValue + "\x00" + f.MeasuredAt + "\x00" +
+		f.CycleType + "\x00" + f.CycleLabel + "\x00" + f.AnchorDate
 }
 
 // buildProfileUserMessage 组装用户消息：对话块 + 已知人物名单。

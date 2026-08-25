@@ -106,3 +106,64 @@ func TestParseFactsEvent(t *testing.T) {
 		t.Fatalf("occurred_at 应允许为空: %q", facts[1].OccurredAt)
 	}
 }
+
+func TestParseFactsMetric(t *testing.T) {
+	raw := `{"facts":[
+		{"plane":"metric","subject":{"kind":"self"},"metric_key":"weight","metric_value":" 72.5 ",
+		 "metric_unit":" kg ","measured_at":" 2026-08-20 ","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"metric","subject":{"kind":"self"},"metric_key":"emotion","metric_value":"焦虑",
+		 "confidence":0.85,"epistemic_type":"observed","block_index":2},
+		{"plane":"metric","subject":{"kind":"self"},"metric_key":"bogus","metric_value":"x","confidence":0.9},
+		{"plane":"metric","subject":{"kind":"self"},"metric_key":"weight","metric_value":"","confidence":0.9}
+	]}`
+	facts, err := ParseFacts(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 非法 key（bogus）与空 value 两条被丢，保留数值型 + 类别型共 2 条
+	if len(facts) != 2 {
+		t.Fatalf("应保留 2 条: %+v", facts)
+	}
+	// 数值型测点：metric_value/unit/measured_at 前后空格应被 TrimSpace 归一化
+	f0 := facts[0]
+	if f0.Plane != "metric" || f0.MetricKey != "weight" || f0.MetricValue != "72.5" ||
+		f0.MetricUnit != "kg" || f0.MeasuredAt != "2026-08-20" {
+		t.Fatalf("metric fact0 错误（trim 应生效）: %+v", f0)
+	}
+	// 类别型测点：measured_at 允许为空（service 落 session 时间）
+	f1 := facts[1]
+	if f1.MetricKey != "emotion" || f1.MetricValue != "焦虑" || f1.MeasuredAt != "" {
+		t.Fatalf("metric fact1 错误: %+v", f1)
+	}
+}
+
+func TestParseFactsCycle(t *testing.T) {
+	// 注意 frequency 字段的 json 标签是 "frequency"（Go 字段 FrequencyText），对齐 prompt v3 契约
+	raw := `{"facts":[
+		{"plane":"cycle","subject":{"kind":"self"},"cycle_type":"medication","cycle_label":" 降压药 ",
+		 "anchor_date":" 2026-08-01 ","period_days":30,"duration_days":1,"dosage":" 1片 ",
+		 "frequency":" 每日一次 ","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"cycle","subject":{"kind":"self"},"cycle_type":"menstrual","confidence":0.8,"block_index":2},
+		{"plane":"cycle","subject":{"kind":"self"},"cycle_type":"bogus","confidence":0.9}
+	]}`
+	facts, err := ParseFacts(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 非法 type（bogus）丢；medication 全字段 + menstrual 空 label 各保留 → 2 条
+	if len(facts) != 2 {
+		t.Fatalf("应保留 2 条: %+v", facts)
+	}
+	// 全字段：label/anchor/dosage/frequency 前后空格应 TrimSpace；period/duration 为 int 原样透传
+	f0 := facts[0]
+	if f0.Plane != "cycle" || f0.CycleType != "medication" || f0.CycleLabel != "降压药" ||
+		f0.AnchorDate != "2026-08-01" || f0.PeriodDays != 30 || f0.DurationDays != 1 ||
+		f0.Dosage != "1片" || f0.FrequencyText != "每日一次" {
+		t.Fatalf("cycle fact0 错误（trim 应生效）: %+v", f0)
+	}
+	// menstrual 空 label/anchor 合法（纯周期记录，label/anchor 可空——不因缺字段被丢）
+	f1 := facts[1]
+	if f1.CycleType != "menstrual" || f1.CycleLabel != "" || f1.AnchorDate != "" {
+		t.Fatalf("cycle fact1（空 label 应合法）错误: %+v", f1)
+	}
+}

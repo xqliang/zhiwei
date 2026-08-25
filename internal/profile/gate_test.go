@@ -128,3 +128,63 @@ func TestDecideEvent(t *testing.T) {
 		t.Fatalf("默认阈值 0.75，0.9 应 active: %v", d)
 	}
 }
+
+func TestDecideMetric(t *testing.T) {
+	cfg := GateConfig{AutoConf: 0.75}
+	f := Fact{Plane: "metric", MetricKey: "weight", MetricValue: "72.5",
+		Subject:    Subject{Kind: "self"},
+		Confidence: 0.9, EpistemicType: "observed"}
+
+	// 高置信 observed → 直接 active（纯置信闸门）
+	if d := DecideMetric(f, false, cfg); d != DecisionCreateActive {
+		t.Fatalf("高置信测点应 create_active: %v", d)
+	}
+	// 低置信 → pending
+	low := f
+	low.Confidence = 0.6
+	if d := DecideMetric(low, false, cfg); d != DecisionCreatePending {
+		t.Fatalf("低置信应 create_pending: %v", d)
+	}
+	// 自然键已处理（同 session 重跑）→ skip（幂等）
+	if d := DecideMetric(f, true, cfg); d != DecisionSkip {
+		t.Fatalf("dedupHit 应 skip: %v", d)
+	}
+	// metric 无 reaffirm/conflict 语义：DecideMetric 签名不含 existing 参数——同 key 同值是
+	// 「两次独立采样各自成行」而非佐证，不同值是「时序变化」而非冲突。故只有 active/pending/skip
+	// 三条路径可测（无第四条 existing 分支），此处不存在 reaffirm/conflict 断言。
+	// 默认阈值兜底：AutoConf<=0 用 0.75，0.9 应 active
+	if d := DecideMetric(f, false, GateConfig{}); d != DecisionCreateActive {
+		t.Fatalf("默认阈值 0.75，0.9 应 active: %v", d)
+	}
+}
+
+func TestDecideCycle(t *testing.T) {
+	cfg := GateConfig{AutoConf: 0.75}
+	f := Fact{Plane: "cycle", CycleType: "medication", CycleLabel: "降压药",
+		Subject:    Subject{Kind: "self"},
+		Confidence: 0.9, EpistemicType: "observed"}
+
+	// 无现值、高置信 → active
+	if d := DecideCycle(f, nil, false, cfg); d != DecisionCreateActive {
+		t.Fatalf("高置信新周期应 create_active: %v", d)
+	}
+	// 无现值、低置信 → pending
+	low := f
+	low.Confidence = 0.6
+	if d := DecideCycle(low, nil, false, cfg); d != DecisionCreatePending {
+		t.Fatalf("低置信应 create_pending: %v", d)
+	}
+	// 自然键已处理 → skip（幂等）
+	if d := DecideCycle(f, nil, true, cfg); d != DecisionSkip {
+		t.Fatalf("dedupHit 应 skip: %v", d)
+	}
+	// 有 active 现值 → 冲突 pending（单值语义，supersedes 指向现值，绝不静默覆盖）。
+	// 注意即使高置信也走冲突路径（无 reaffirm——周期更新即取代）：钉死 existing!=nil 分支优先于置信度。
+	if d := DecideCycle(f, &repo.PersonCycle{}, false, cfg); d != DecisionConflictPending {
+		t.Fatalf("有现值应 conflict_pending: %v", d)
+	}
+	// 默认阈值兜底：AutoConf<=0 用 0.75，0.9 应 active
+	if d := DecideCycle(f, nil, false, GateConfig{}); d != DecisionCreateActive {
+		t.Fatalf("默认阈值 0.75，0.9 应 active: %v", d)
+	}
+}

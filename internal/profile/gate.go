@@ -91,3 +91,33 @@ func DecideEvent(f Fact, existing *repo.PersonEvent, dedupHit bool, cfg GateConf
 	}
 	return DecisionCreatePending
 }
+
+// DecideMetric 指标闸门：测点流无当前值/无冲突/无佐证——纯置信闸门，自然键防重跑。
+// 与其余四平面不同，metric 是「采样」而非「当前态」：同 key 同值不是佐证而是两次独立采样
+// （各自成行），不同值不是冲突而是时序变化——故既无 reaffirm 也无 conflict/existing 分支。
+// 唯一去重是自然键 (session,person,key,value,measured_at) 防同 session 重跑（dedupHit）。
+func DecideMetric(f Fact, dedupHit bool, cfg GateConfig) Decision {
+	if dedupHit {
+		return DecisionSkip
+	}
+	if autoWritable(f, cfg) {
+		return DecisionCreateActive
+	}
+	return DecisionCreatePending
+}
+
+// DecideCycle 周期闸门：单值语义（同 person+type+label 至多一条 active）——
+// 有 active 现值 → 冲突 pending（supersedes 指向现值，绝不静默覆盖，对齐 attribute 单值模式）；
+// 无 → 按置信度。无 reaffirm（周期更新即冲突路径：用药/周期调整都要人工确认取代现值）。
+func DecideCycle(f Fact, existing *repo.PersonCycle, dedupHit bool, cfg GateConfig) Decision {
+	if dedupHit {
+		return DecisionSkip
+	}
+	if existing != nil {
+		return DecisionConflictPending
+	}
+	if autoWritable(f, cfg) {
+		return DecisionCreateActive
+	}
+	return DecisionCreatePending
+}

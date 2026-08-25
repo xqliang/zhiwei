@@ -18,10 +18,10 @@ type Subject struct {
 	Relation string `json:"relation"` // kind=relation 时的关系类型（如 配偶）
 }
 
-// Fact 是 LLM 输出的一条画像事实（闸门前后通用载体）。P1-P2 三个平面：
-// attribute（属性）/ relationship（关系）/ event（大事记）。P2+ 续扩 metric/cycle/activity。
+// Fact 是 LLM 输出的一条画像事实（闸门前后通用载体）。P1-P3 五个平面：
+// attribute（属性）/ relationship（关系）/ event（大事记）/ metric（时序指标）/ cycle（周期日程）。
 type Fact struct {
-	Plane   string  // attribute|relationship|event
+	Plane   string  // attribute|relationship|event|metric|cycle
 	Subject Subject // 信息归属的人物指代
 
 	// ---- attribute 平面 ----
@@ -44,6 +44,21 @@ type Fact struct {
 	EndAt            string
 	EventLocation    string
 
+	// ---- metric 平面（P3 时序指标）----
+	MetricKey   string // emotion|state|weight|sleep_late|diet|health
+	MetricValue string // LLM 原始值（数值或类别），Go 侧分流 value_num/value_text
+	MetricUnit  string
+	MeasuredAt  string // 原始日期串；空则 service 落 session 时间
+
+	// ---- cycle 平面（P3 周期/日程，敏感）----
+	CycleType     string // menstrual|medication|injection|followup
+	CycleLabel    string
+	AnchorDate    string // YYYY-MM-DD 原始串
+	PeriodDays    int
+	DurationDays  int
+	Dosage        string
+	FrequencyText string
+
 	// ---- 通用 ----
 	Confidence    float64
 	EpistemicType string // observed|inferred|predicted|suggested
@@ -53,7 +68,7 @@ type Fact struct {
 	SegmentIDs []ids.ID // provenance：来源块的 segment id
 }
 
-var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true}
+var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true, "metric": true, "cycle": true}
 
 // validSubjectKinds 是人物指代 Subject.Kind（也用于 Related.Kind）的合法取值。
 // 非法或缺失的指代无法归属到具体人物，直接丢弃该条（宁少勿错）。
@@ -76,6 +91,17 @@ var validDirections = map[string]bool{"upstream": true, "downstream": true, "pee
 var ValidEventTypes = map[string]bool{
 	"里程碑": true, "聚会": true, "会议": true, "旅行": true, "健康": true,
 	"成就": true, "挫折": true, "负面": true, "其他": true,
+}
+
+// ValidMetricKeys 指标 key 枚举（spec §4.5：时序测点流的 6 种）。
+var ValidMetricKeys = map[string]bool{
+	"emotion": true, "state": true, "weight": true,
+	"sleep_late": true, "diet": true, "health": true,
+}
+
+// ValidCycleTypes 周期类型枚举（spec §4.6：敏感周期/日程的 4 种）。
+var ValidCycleTypes = map[string]bool{
+	"menstrual": true, "medication": true, "injection": true, "followup": true,
 }
 
 type rawSubject struct {
@@ -101,6 +127,17 @@ type rawFact struct {
 	OccurredAt       string     `json:"occurred_at"`
 	EndAt            string     `json:"end_at"`
 	EventLocation    string     `json:"location"`
+	MetricKey        string     `json:"metric_key"`
+	MetricValue      string     `json:"metric_value"`
+	MetricUnit       string     `json:"metric_unit"`
+	MeasuredAt       string     `json:"measured_at"`
+	CycleType        string     `json:"cycle_type"`
+	CycleLabel       string     `json:"cycle_label"`
+	AnchorDate       string     `json:"anchor_date"`
+	PeriodDays       int        `json:"period_days"`
+	DurationDays     int        `json:"duration_days"`
+	Dosage           string     `json:"dosage"`
+	FrequencyText    string     `json:"frequency"` // Go 字段 FrequencyText，json 标签 frequency——对齐 prompt v3 契约
 	Confidence       float64    `json:"confidence"`
 	EpistemicType    string     `json:"epistemic_type"`
 	BlockIndex       int        `json:"block_index"`
@@ -142,6 +179,17 @@ func ParseFacts(raw string) ([]Fact, error) {
 			OccurredAt:       strings.TrimSpace(rf.OccurredAt),
 			EndAt:            strings.TrimSpace(rf.EndAt),
 			EventLocation:    strings.TrimSpace(rf.EventLocation),
+			MetricKey:        strings.TrimSpace(rf.MetricKey),
+			MetricValue:      strings.TrimSpace(rf.MetricValue),
+			MetricUnit:       strings.TrimSpace(rf.MetricUnit),
+			MeasuredAt:       strings.TrimSpace(rf.MeasuredAt),
+			CycleType:        strings.TrimSpace(rf.CycleType),
+			CycleLabel:       strings.TrimSpace(rf.CycleLabel),
+			AnchorDate:       strings.TrimSpace(rf.AnchorDate),
+			PeriodDays:       rf.PeriodDays,   // int，不 trim
+			DurationDays:     rf.DurationDays, // int，不 trim
+			Dosage:           strings.TrimSpace(rf.Dosage),
+			FrequencyText:    strings.TrimSpace(rf.FrequencyText),
 			Confidence:       clamp01(rf.Confidence),
 			EpistemicType:    strings.TrimSpace(rf.EpistemicType),
 			BlockIndex:       rf.BlockIndex,
@@ -172,6 +220,16 @@ func ParseFacts(raw string) ([]Fact, error) {
 			// related 为可选增强信息，service 层解析容错（解析不到存空），此处不校验——与 relationship 平面强制校验 Related.Kind 不同。
 			if !ValidEventTypes[f.EventType] || f.EventTitle == "" {
 				continue // 非法事件类型或空标题：无法落库
+			}
+		case "metric":
+			// 时序测点：非法指标 key 或空值无法落库；measured_at 可空（service 落 session 时间）。
+			if !ValidMetricKeys[f.MetricKey] || f.MetricValue == "" {
+				continue
+			}
+		case "cycle":
+			// 周期记录：仅强制合法 cycle_type；label/anchor 可空（如纯随访、生理期无药名）。
+			if !ValidCycleTypes[f.CycleType] {
+				continue
 			}
 		}
 		facts = append(facts, f)
