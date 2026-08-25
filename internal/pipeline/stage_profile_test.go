@@ -49,7 +49,7 @@ func TestStageProfile(t *testing.T) {
 			{"plane":"attribute","subject":{"kind":"self"},"attr_key":"occupation","value":"工程师",
 			 "confidence":0.9,"epistemic_type":"observed","block_index":1}
 		]}`}},
-		Model: "test", Prompt: "sys", PromptVersion: "profile_extraction_v2",
+		Model: "test", Prompt: "sys", PromptVersion: "profile_extraction_v3",
 		Window: 10, Gate: profile.GateConfig{AutoConf: 0.75},
 	}
 	if err := repo.EnsurePersonBootstrap(ctx, persons, speakers); err != nil {
@@ -102,7 +102,7 @@ func TestStageProfile(t *testing.T) {
 	if err := json.Unmarshal(*j.Trace, &entries); err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Stage != "profile" || entries[0].PromptVersion != "profile_extraction_v2" {
+	if len(entries) != 1 || entries[0].Stage != "profile" || entries[0].PromptVersion != "profile_extraction_v3" {
 		t.Fatalf("trace 错误: %+v", entries)
 	}
 }
