@@ -1,6 +1,6 @@
 // 知微 Web 前端（Vue 3 CDN，无构建）。
-// 标签页：时间线 / 录音 / Topics / 待办（问知微、今日留待后续 Sprint）。
-const { createApp, ref, reactive, computed, onUnmounted } = Vue;
+// 标签页：问知微 / 时间线 / 录音 / 声纹 / 主题 / 记忆 / 待办。
+const { createApp, ref, reactive, computed, onUnmounted, nextTick } = Vue;
 
 // memory 类型 → 中文标签与颜色（卡片徽标用）
 const TYPE_META = {
@@ -1142,15 +1142,274 @@ const app = createApp({
           return (tb || 0) - (ta || 0);
         });
     });
+    // ---------- 问知微（流式对话 / WS + MCP 工具卡） ----------
+    // 后端契约：REST 见 internal/agent/handlers.go；WS 见 internal/agent/ws.go。
+    //   会话列表  GET  /api/agent/conversations            → [conversation]（直接数组）
+    //   新建会话  POST /api/agent/conversations {title?}    → conversation
+    //   会话历史  GET  /api/agent/conversations/{cid}       → {conversation_id, messages:[{id,role,kind,content,tool_payload,created_at}]}
+    //   流式会话  WS   /api/agent/conversations/{cid}/ws     上行 {"text":"…"}；下行 StreamFrame
+    // StreamFrame.type ∈ user|assistant|tool_call|tool_result|turn_end：
+    //   一条用户消息 → user → (assistant | tool_call | tool_result)* → turn_end（turn_end.error 非空=失败）。
+    // 关键：tool_result 帧/历史都【不带 call_id】（见 orchestrator.go / event.go），
+    //   故工具结果按【出现顺序】配对到最早一个未填充的 tool_call 卡（FIFO），而非按 call_id。
+    const agentConversations = ref([]);   // 左侧会话列表
+    const agentConvId = ref(null);        // 当前选中的会话 id（string）
+    const agentMessages = ref([]);        // 当前会话的展示项流（见下 makeToolItem / 文本项结构）
+    const agentInput = ref('');           // 输入框内容
+    const agentConnected = ref(false);    // WS 是否已连接（连接指示灯）
+    const agentTyping = ref(false);       // 是否有轮次进行中（「正在思考…」+ 禁发，遵守后端单轮次约束）
+    const agentTurnError = ref('');       // 最近一轮的模型侧错误（turn_end.error）
+    const agentLoading = ref(false);      // 拉历史中
+    const agentStreamEl = ref(null);      // 消息流容器（滚动到底用）
+    // WS 与重连句柄用普通变量（与录音页 recorder/pollTimer 同风格，非响应式）。
+    let agentWS = null, agentReconnectTimer = null;
+    let agentWantConnect = false;         // 是否「希望保持连接」（切走/切换会话时置 false，抑制重连）
+
+    // ---- XSS 安全的极简 Markdown（先转义所有 HTML，再只注入自己生成的白名单标签）----
+    // 助手文本、工具结果、记忆/转写内容均为【不可信】（可能含注入的 HTML）。任何要作为
+    // HTML 插入的文本必须先转义；仅助手气泡用 v-html（渲染 Markdown），工具卡一律走
+    // Vue 文本插值（自动转义）。不引入外部 md 库。
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+    // 行内格式（作用于【已转义】文本）：`代码` / **粗** / *斜* / [文字](链接)。
+    // 链接 href 仅放行 http/https/mailto，其余降级为 #，防 javascript: 等注入。
+    function inlineMd(s) {
+      const codes = [];
+      // 先抽出行内代码，避免其中的 * / [ ] 被后续规则误伤
+      s = s.replace(/`([^`]+)`/g, (m, c) => '\uE000C' + (codes.push('<code>' + c + '</code>') - 1) + '\uE000');
+      s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, txt, url) => {
+        const safe = /^(https?:|mailto:)/i.test(url) ? url : '#'; // url 已转义，可安全放进属性
+        return '<a href="' + safe + '" target="_blank" rel="noopener noreferrer">' + txt + '</a>';
+      });
+      s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+      s = s.replace(/\uE000C(\d+)\uE000/g, (m, i) => codes[Number(i)] || '');
+      return s;
+    }
+    // 块级：围栏代码块（```）、有序/无序列表、段落（连续文本行用 <br> 连接）。
+    function renderMarkdown(src) {
+      if (src == null || src === '') return '';
+      const blocks = [];
+      // 1) 先摘出围栏代码块（内容整体转义、原样保留），用占位符替换，避免被行内规则处理
+      let text = String(src).replace(/```(?:[^\n`]*)\n?([\s\S]*?)```/g, (m, code) =>
+        '\uE000B' + (blocks.push('<pre class="chat-code"><code>' + escapeHtml(code.replace(/\s+$/, '')) + '</code></pre>') - 1) + '\uE000');
+      // 2) 转义其余全部文本（占位符不含特殊字符，安全穿过）
+      text = escapeHtml(text);
+      const lines = text.split('\n');
+      let html = '', listType = null, para = [];
+      const flushPara = () => { if (para.length) { html += '<p>' + para.join('<br>') + '</p>'; para = []; } };
+      const closeList = () => { if (listType) { html += '</' + listType + '>'; listType = null; } };
+      for (const line of lines) {
+        const t = line.trim();
+        if (/^\uE000B\d+\uE000$/.test(t)) { flushPara(); closeList(); html += t; continue; } // 独立成行的代码块占位符
+        const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+        const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+        if (ul) { flushPara(); if (listType !== 'ul') { closeList(); html += '<ul>'; listType = 'ul'; } html += '<li>' + inlineMd(ul[1]) + '</li>'; }
+        else if (ol) { flushPara(); if (listType !== 'ol') { closeList(); html += '<ol>'; listType = 'ol'; } html += '<li>' + inlineMd(ol[1]) + '</li>'; }
+        else if (t === '') { flushPara(); closeList(); }        // 空行=段落分隔
+        else { closeList(); para.push(inlineMd(line)); }         // 普通文本行
+      }
+      flushPara(); closeList();
+      // 3) 回填代码块
+      return html.replace(/\uE000B(\d+)\uE000/g, (m, i) => blocks[Number(i)] || '');
+    }
+
+    // ---- 工具名/参数/结果解析 ----
+    // dsh 侧 MCP 工具名形如 mcp__zhiwei__get_todos，取 __ 分隔的末段作基名。
+    function toolBase(name) { const p = String(name || '').split('__'); return p[p.length - 1]; }
+    const TOOL_LABELS = {
+      search_memory: '检索记忆', get_timeline: '查看时间线', get_topics: '查看主题',
+      get_todos: '查看待办', get_topic_status: '话题状态', generate_report: '生成报告',
+      zhiwei_ping: '连通性检查',
+    };
+    function toolLabel(name) { return TOOL_LABELS[toolBase(name)] || (name || '工具'); }
+    // 参数摘要：把 args(JSON 字符串) 折成 "k=v · k=v"，解析失败原样显示
+    function toolArgsSummary(args) {
+      if (!args) return '';
+      try {
+        const o = JSON.parse(args);
+        return Object.entries(o).filter(([, v]) => v !== '' && v != null)
+          .map(([k, v]) => k + '=' + (typeof v === 'string' ? v : JSON.stringify(v))).join(' · ');
+      } catch (e) { return String(args); }
+    }
+    function safeParse(t) { try { return JSON.parse(t); } catch (e) { return null; } }
+    function coerceStr(v) { return typeof v === 'string' ? v : JSON.stringify(v); }
+    // 报告类工具（generate_report / get_topic_status）结果是包装行 {..., content:{…}}；
+    // 抽出 content 的 headline/summary 作标题，已知数组字段作分节列表，风险/按话题做特殊拼接。
+    function reportSections(parsed) {
+      const c = parsed && parsed.content ? parsed.content : parsed;
+      if (!c || typeof c !== 'object') return null;
+      const title = c.headline || c.summary || '报告';
+      const defs = [['要点', 'highlights'], ['决定', 'decisions'], ['洞察', 'insights'], ['明日', 'tomorrow'],
+        ['里程碑', 'milestones'], ['未完成待办', 'open_todos'], ['阻塞', 'blockers'], ['下周', 'next_week']];
+      const sections = [];
+      for (const [label, key] of defs) {
+        const arr = c[key];
+        if (Array.isArray(arr) && arr.length) sections.push({ label, items: arr.map(coerceStr) });
+      }
+      if (Array.isArray(c.risks) && c.risks.length) {
+        sections.push({ label: '风险', items: c.risks.map(r => typeof r === 'string' ? r : ((r.desc || '') + (r.severity ? '（' + r.severity + '）' : ''))) });
+      }
+      if (Array.isArray(c.by_topic) && c.by_topic.length) {
+        sections.push({ label: '按话题', items: c.by_topic.map(t => (t.topic || '') + (t.progress != null ? ' · ' + Math.round(t.progress * 100) + '%' : '')) });
+      }
+      return { title, progress: (typeof c.progress === 'number' ? c.progress : null), sections };
+    }
+    function prettyJSON(text) { try { return JSON.stringify(JSON.parse(text), null, 2); } catch (e) { return String(text == null ? '' : text); } }
+
+    // 工具展示项工厂：tool_call → 骨架卡（result=null）；tool_result → 填充。
+    function makeToolItem(callId, name, args) {
+      return { kind: 'tool', call_id: callId, name, base: toolBase(name), label: toolLabel(name),
+        args, argsSummary: toolArgsSummary(args), result: null, parsed: null, report: null };
+    }
+    function fillTool(it, text, isErr) {
+      it.result = { text: text || '', is_error: !!isErr };
+      it.parsed = safeParse(text);
+      if (it.base === 'generate_report' || it.base === 'get_topic_status') it.report = reportSections(it.parsed);
+    }
+    // 把 tool_result 填到 arr 里【最早一个未填充】的工具卡（FIFO 配对）。无匹配返回 false。
+    function fillNextToolIn(arr, text, isErr) {
+      for (const it of arr) { if (it.kind === 'tool' && it.result === null) { fillTool(it, text, isErr); return true; } }
+      return false;
+    }
+    // 历史消息（GET）→ 展示项：tool_payload 已是对象（Go 内联 JSON）。tool_result 无 call_id，按序配对。
+    function mapAgentHistory(messages) {
+      const items = [];
+      for (const m of (messages || [])) {
+        if (m.kind === 'tool_call') {
+          const tp = m.tool_payload || {};
+          items.push(makeToolItem(tp.call_id, tp.name, tp.arguments));
+        } else if (m.kind === 'tool_result') {
+          const tp = m.tool_payload || {};
+          if (!fillNextToolIn(items, tp.text, tp.is_error)) {
+            // 落单的结果（历史异常）：作独立错误/结果卡兜底显示
+            const it = makeToolItem('', '', ''); fillTool(it, tp.text, tp.is_error); items.push(it);
+          }
+        } else if (m.content) {
+          items.push({ kind: 'text', role: m.role, content: m.content });
+        }
+      }
+      return items;
+    }
+
+    function scrollAgentBottom() {
+      nextTick(() => { const el = agentStreamEl.value; if (el) el.scrollTop = el.scrollHeight; });
+    }
+    async function loadAgentConversations() {
+      try { const d = await api('GET', '/api/agent/conversations'); agentConversations.value = d || []; }
+      catch (e) { showError(e); }
+    }
+    async function loadAgentHistory(cid) {
+      agentLoading.value = true;
+      try {
+        const d = await api('GET', '/api/agent/conversations/' + cid);
+        agentMessages.value = mapAgentHistory(d.messages);
+        scrollAgentBottom();
+      } catch (e) { showError(e); }
+      finally { agentLoading.value = false; }
+    }
+    // 同源 WS 地址：跟随页面协议（https→wss）
+    function agentWSURL(cid) {
+      return (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/api/agent/conversations/' + cid + '/ws';
+    }
+    function handleAgentFrame(ev) {
+      let f; try { f = JSON.parse(ev.data); } catch (e) { return; }
+      switch (f.type) {
+        case 'user': agentMessages.value.push({ kind: 'text', role: 'user', content: f.content }); break;
+        case 'assistant': agentMessages.value.push({ kind: 'text', role: 'assistant', content: f.content }); break;
+        case 'tool_call': agentMessages.value.push(makeToolItem(f.call_id, f.name, f.args)); break;
+        case 'tool_result': fillNextToolIn(agentMessages.value, f.content, f.is_error); break;
+        case 'turn_end': agentTyping.value = false; if (f.error) agentTurnError.value = f.error; break;
+      }
+      scrollAgentBottom();
+    }
+    // 打开/重开 WS（先关旧连接）。断线时若仍希望连接且仍停留在本会话/本 tab，则 1.5s 后重连。
+    function openAgentWS(cid) {
+      closeAgentWS();
+      agentWantConnect = true;
+      let ws;
+      try { ws = new WebSocket(agentWSURL(cid)); }
+      catch (e) { showError(e); return; }
+      agentWS = ws;
+      ws.onopen = () => { if (agentWS === ws) agentConnected.value = true; };
+      ws.onmessage = handleAgentFrame;
+      ws.onclose = () => {
+        if (agentWS !== ws) return; // 已被 closeAgentWS 换掉：忽略旧连接的回调
+        agentConnected.value = false;
+        agentTyping.value = false;  // 断线时停掉「思考中」，避免发送按钮永久禁用（重发会自纠正）
+        agentWS = null;
+        if (agentWantConnect && tab.value === 'agent' && agentConvId.value === cid) {
+          // 重连时重拉历史（从 DB 权威状态补回断线期间漏掉的帧），再开新连接
+          agentReconnectTimer = setTimeout(() => {
+            if (agentWantConnect && agentConvId.value === cid) { loadAgentHistory(cid); openAgentWS(cid); }
+          }, 1500);
+        }
+      };
+      ws.onerror = () => { /* 错误后紧跟 onclose，统一在那里处理重连 */ };
+    }
+    function closeAgentWS() {
+      agentWantConnect = false;
+      if (agentReconnectTimer) { clearTimeout(agentReconnectTimer); agentReconnectTimer = null; }
+      if (agentWS) {
+        const ws = agentWS; agentWS = null;
+        try { ws.onclose = null; ws.onmessage = null; ws.onerror = null; ws.onopen = null; ws.close(); } catch (e) {}
+      }
+      agentConnected.value = false;
+    }
+    // 选中某会话：切换前关旧 WS、清流，拉历史后开新 WS。
+    async function selectAgentConversation(c) {
+      if (agentConvId.value === c.id) return;
+      closeAgentWS();
+      agentConvId.value = c.id;
+      agentMessages.value = [];
+      agentTurnError.value = '';
+      agentTyping.value = false;
+      await loadAgentHistory(c.id);
+      openAgentWS(c.id);
+    }
+    // 新对话：POST 建会话 → 刷新列表 → 选中并连 WS。
+    async function newAgentConversation() {
+      try {
+        const c = await api('POST', '/api/agent/conversations', {});
+        await loadAgentConversations();
+        closeAgentWS();
+        agentConvId.value = c.id;
+        agentMessages.value = [];
+        agentTurnError.value = '';
+        agentTyping.value = false;
+        openAgentWS(c.id);
+      } catch (e) { showError(e); }
+    }
+    // 发送：Enter 触发。遵守后端单轮次约束——进行中(agentTyping)不再发。
+    function sendAgentMessage() {
+      const text = agentInput.value.trim();
+      if (!text || !agentConvId.value || agentTyping.value) return;
+      if (!agentWS || agentWS.readyState !== WebSocket.OPEN) { showError(new Error('连接未就绪，请稍候')); return; }
+      try {
+        agentWS.send(JSON.stringify({ text }));
+        agentInput.value = '';
+        agentTurnError.value = '';
+        agentTyping.value = true; // user 帧会由服务端回显渲染气泡；这里只置「思考中」
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 标签页切换 ----------
     function switchTab(name) {
+      const prev = tab.value;
       tab.value = name;
+      // 离开问知微：断开 WS（含抑制重连），避免后台常驻连接
+      if (prev === 'agent' && name !== 'agent') closeAgentWS();
       if (name === 'timeline') { deletingSessionId.value = null; reextractConfirmId.value = null; segDraft.value = {}; loadSessions(); loadAllSpeakers(); }
       if (name === 'memories') { memSearch.value = ''; loadMemories(); }
       if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; dismissingTopicId.value = null; cancelManualMerge(); loadDismissedTopics(); loadTopics(); }
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; loadTopics(); loadTodos(); loadDismissedTodos(); }
       // 声纹 tab：进入时复位本 tab 的临时态（收起录入表单/展开项/改名/播放）并拉全量名册。
       if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; loadAllSpeakers(); }
+      // 问知微 tab：拉会话列表；若已有选中会话，重拉历史 + 重连 WS（切回时恢复现场）。
+      if (name === 'agent') { loadAgentConversations(); if (agentConvId.value) { const cid = agentConvId.value; loadAgentHistory(cid); openAgentWS(cid); } }
     }
     loadSessions();
     // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
@@ -1160,7 +1419,7 @@ const app = createApp({
     // 换人下拉（转写段 <select>）的数据源，首屏 timeline 即可用。
     loadAllSpeakers();
 
-    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); clearTimeout(reextractPollTimer); });
+    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); clearTimeout(reextractPollTimer); closeAgentWS(); });
 
     return {
       tab, toast, switchTab,
@@ -1190,6 +1449,10 @@ const app = createApp({
       loadTodos, setTodoStatus, jumpToSession,
       editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
+      // 问知微（流式对话）
+      agentConversations, agentConvId, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
+      loadAgentConversations, newAgentConversation, selectAgentConversation, sendAgentMessage,
+      renderMarkdown, reportSections, prettyJSON,
     };
   }
 });

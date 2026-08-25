@@ -196,6 +196,58 @@
   @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
   .skeleton-line.short { width: 40%; }
   .skeleton-line.med { width: 70%; }
+
+  /* ===== 问知微（流式对话页） =====
+     暖白纸 + 靛蓝：沿用卡片/徽标/CSS 变量，与其余 tab 一致。 */
+  .wrap.wrap-lg { max-width: 1100px; } /* 聊天页加宽（左列表 + 右消息流） */
+  .agent-shell { display: flex; gap: 16px; align-items: flex-start; }
+  .agent-convos { width: 220px; flex-shrink: 0; }
+  .agent-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  @media (max-width: 760px) {
+    .agent-shell { flex-direction: column; }
+    .agent-convos { width: 100%; }
+  }
+  /* 会话列表项 */
+  .agent-convo-item { padding: 9px 12px; border-radius: var(--radius-sm); border: 1px solid transparent; cursor: pointer; margin-bottom: 6px; transition: background .15s, border-color .15s; }
+  .agent-convo-item:hover { background: var(--surface-sunken); }
+  .agent-convo-item.active { background: var(--accent-soft); border-color: var(--accent); }
+  .agent-convo-item b { display: block; font-size: var(--fs-sm); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-conn { font-size: var(--fs-xs); font-weight: 600; }
+
+  /* 消息流：独立滚动区，避让顶部粘性标签栏与底部输入 */
+  .agent-stream { min-height: 340px; max-height: calc(100vh - 240px); overflow-y: auto; padding: 8px 4px; display: flex; flex-direction: column; gap: 12px; }
+  .chat-msg { display: flex; }
+  .chat-msg.user { justify-content: flex-end; }
+  .chat-msg.assistant { justify-content: flex-start; }
+  .bubble { max-width: 82%; padding: 10px 14px; border-radius: var(--radius); font-size: var(--fs-base); line-height: 1.65; word-break: break-word; box-shadow: var(--shadow); }
+  .bubble.user { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .bubble.assistant { background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .bubble.assistant p { margin: 0 0 8px; }
+  .bubble.assistant p:last-child { margin-bottom: 0; }
+  .bubble.assistant ul, .bubble.assistant ol { margin: 6px 0; padding-left: 20px; }
+  .bubble.assistant a { color: var(--accent); }
+  .bubble.assistant code { background: var(--surface-sunken); padding: 1px 5px; border-radius: 5px; font-size: .9em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .chat-code { background: var(--surface-sunken); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; overflow-x: auto; font-size: var(--fs-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.5; white-space: pre-wrap; margin: 4px 0; }
+
+  /* 工具卡：骨架(进行中) / 已填充 / 错误 三态 */
+  .tool-card { background: var(--surface-2); border: 1px solid var(--border); border-left: 3px solid var(--accent-2); border-radius: var(--radius-sm); padding: 10px 14px; max-width: 88%; box-shadow: var(--shadow); }
+  .tool-card.pending { opacity: .9; }
+  .tool-card.error { border-left-color: var(--danger); background: var(--danger-soft); }
+  .tool-card .tool-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--fs-sm); }
+  .tool-card .tool-name { font-weight: 600; color: var(--accent-2); }
+  .tool-card.error .tool-name { color: var(--danger); }
+  .tool-card .tool-args { color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; word-break: break-all; }
+  .tool-card .tool-body { margin-top: 8px; }
+  .tool-row { padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: var(--fs-sm); line-height: 1.55; }
+  .tool-row:last-child { border-bottom: none; }
+  .tool-empty { color: var(--muted); font-size: var(--fs-sm); padding: 4px 0; }
+
+  /* 「正在思考」指示 */
+  .agent-typing { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--fs-sm); padding: 2px 2px; }
+
+  /* 输入区：贴底，多行自适应 */
+  .agent-input { display: flex; gap: 8px; align-items: flex-end; margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .agent-input textarea { flex: 1; resize: none; min-height: 44px; max-height: 160px; }
 </style>
 </head>
 <body>
@@ -203,6 +255,7 @@
   <div class="tabs">
     <span class="brand">知微</span>
     <button :class="{active: tab==='timeline'}" @click="switchTab('timeline')">时间线</button>
+    <button :class="{active: tab==='agent'}" @click="switchTab('agent')">问知微</button>
     <button :class="{active: tab==='record'}" @click="switchTab('record')">录音</button>
     <button :class="{active: tab==='voiceprint'}" @click="switchTab('voiceprint')">声纹</button>
     <button :class="{active: tab==='topics'}" @click="switchTab('topics')">主题</button>
@@ -454,6 +507,131 @@
             </div>
           </template>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 问知微（流式对话） ============ -->
+  <!-- 左：对话列表；右：消息流 + 底部输入。WS 流式帧 → 气泡/工具卡（见 app.js 问知微区）。 -->
+  <div class="wrap wrap-lg" v-if="tab==='agent'">
+    <div class="agent-shell">
+      <!-- 左侧：会话列表 -->
+      <div class="agent-convos">
+        <button class="btn primary" style="width:100%; justify-content:center; margin-bottom:10px" @click="newAgentConversation">＋ 新对话</button>
+        <div v-if="!agentConversations.length" class="muted" style="padding:8px 4px; font-size:var(--fs-sm)">还没有对话，点上方「新对话」开始。</div>
+        <div v-for="c in agentConversations" :key="c.id" class="agent-convo-item" :class="{active: c.id===agentConvId}" @click="selectAgentConversation(c)">
+          <b>{{ c.title || '新对话' }}</b>
+          <span class="muted" style="font-size:var(--fs-xs)">{{ fmtTime(c.last_active_at) }}</span>
+        </div>
+      </div>
+
+      <!-- 右侧：消息流 + 输入 -->
+      <div class="agent-main">
+        <div v-if="!agentConvId" class="card empty" style="margin-top:40px">
+          选择左侧对话，或点「新对话」，开始向「知微」提问你的记忆、待办与主题。
+        </div>
+        <template v-else>
+          <div class="kv" style="margin-bottom:6px">
+            <span class="agent-conn" :style="{color: agentConnected ? 'var(--ok)' : 'var(--muted)'}">● {{ agentConnected ? '已连接' : '连接中…' }}</span>
+          </div>
+          <div class="agent-stream" ref="agentStreamEl">
+            <div v-if="agentLoading" class="muted" style="text-align:center; padding:20px"><span class="spinner"></span> 加载历史…</div>
+            <div v-if="!agentLoading && !agentMessages.length" class="empty">发条消息开始对话吧。试试：「我这周有哪些待办？」</div>
+
+            <template v-for="(m, mi) in agentMessages" :key="mi">
+              <!-- 文本气泡：user 右侧纯文本；assistant 左侧 Markdown（已转义再渲染） -->
+              <div v-if="m.kind==='text'" class="chat-msg" :class="m.role">
+                <div class="bubble" :class="m.role">
+                  <span v-if="m.role==='user'" style="white-space:pre-wrap">{{ m.content }}</span>
+                  <span v-else v-html="renderMarkdown(m.content)"></span>
+                </div>
+              </div>
+              <!-- 工具卡：未出结果=骨架「进行中」；出结果按工具类型渲染；is_error 走错误样式 -->
+              <div v-else-if="m.kind==='tool'" class="chat-msg assistant">
+                <div class="tool-card" :class="{error: m.result && m.result.is_error, pending: !m.result}">
+                  <div class="tool-head">
+                    <span v-if="!m.result" class="spinner"></span>
+                    <span class="tool-name">🔧 {{ m.label }}</span>
+                    <span v-if="m.argsSummary" class="tool-args">{{ m.argsSummary }}</span>
+                    <span v-if="!m.result" class="muted" style="font-size:var(--fs-xs)">进行中…</span>
+                  </div>
+                  <div class="tool-body" v-if="m.result">
+                    <!-- 错误结果 -->
+                    <div v-if="m.result.is_error" style="white-space:pre-wrap; color:var(--danger)">{{ m.result.text }}</div>
+                    <!-- search_memory：记忆列表 -->
+                    <template v-else-if="m.base==='search_memory' && Array.isArray(m.parsed)">
+                      <div v-if="!m.parsed.length" class="tool-empty">没有匹配的记忆</div>
+                      <div v-for="(x, xi) in m.parsed" :key="xi" class="tool-row">
+                        <div><span class="type-tag" :style="{background: typeMeta(x.type).color}">{{ typeMeta(x.type).label }}</span><b>{{ x.title }}</b></div>
+                        <div class="muted">{{ x.content }}</div>
+                        <div class="muted" style="font-size:var(--fs-xs)">重要度 {{ (x.importance ?? 0).toFixed(1) }}<template v-if="x.event_at"> · {{ fmtTime(x.event_at) }}</template></div>
+                      </div>
+                    </template>
+                    <!-- get_timeline：会话列表(有 session_id) 或 转写分段(有 speaker) -->
+                    <template v-else-if="m.base==='get_timeline' && Array.isArray(m.parsed)">
+                      <div v-if="!m.parsed.length" class="tool-empty">暂无数据</div>
+                      <template v-else-if="m.parsed[0] && m.parsed[0].session_id">
+                        <div v-for="(x, xi) in m.parsed" :key="xi" class="tool-row">
+                          <div><b>{{ x.filename || '录音' }}</b> <span class="badge" :class="x.status">{{ statusText(x.status) }}</span></div>
+                          <div class="muted" style="font-size:var(--fs-xs)">{{ fmtTime(x.created_at) }} · {{ x.source==='web_record' ? '录音' : '上传' }}<template v-if="x.duration_ms"> · {{ (x.duration_ms/1000).toFixed(0) }}s</template></div>
+                        </div>
+                      </template>
+                      <template v-else>
+                        <div v-for="(x, xi) in m.parsed" :key="xi" class="tool-row" style="display:flex; gap:8px; align-items:flex-start">
+                          <span class="sp sp1">{{ x.speaker }}</span>
+                          <span style="flex:1; min-width:0">{{ x.text }}</span>
+                        </div>
+                      </template>
+                    </template>
+                    <!-- get_topics：主题列表 -->
+                    <template v-else-if="m.base==='get_topics' && Array.isArray(m.parsed)">
+                      <div v-if="!m.parsed.length" class="tool-empty">暂无主题</div>
+                      <div v-for="(x, xi) in m.parsed" :key="xi" class="tool-row">
+                        <b>{{ x.name }}</b>
+                        <span v-if="x.status==='suggested'" class="badge suggested">待确认</span>
+                        <span class="muted" style="font-size:var(--fs-xs)"> · {{ x.memory_count }} 条记忆 · {{ x.open_todo_count }} 个进行中待办</span>
+                      </div>
+                    </template>
+                    <!-- get_todos：待办列表 -->
+                    <template v-else-if="m.base==='get_todos' && Array.isArray(m.parsed)">
+                      <div v-if="!m.parsed.length" class="tool-empty">暂无待办</div>
+                      <div v-for="(x, xi) in m.parsed" :key="xi" class="tool-row">
+                        <span>☑️ {{ x.title }}</span>
+                        <span class="badge" :class="x.status">{{ todoStatusText(x.status) }}</span>
+                        <span v-if="x.due_at" class="muted" style="font-size:var(--fs-xs)"> · 截止 {{ fmtDue(x.due_at) }}</span>
+                        <span v-for="(tp, ti) in (x.topics||[])" :key="ti" class="chip" style="margin-left:4px">{{ tp }}</span>
+                      </div>
+                    </template>
+                    <!-- generate_report / get_topic_status：报告快照 -->
+                    <template v-else-if="m.report">
+                      <div class="tool-row"><b>{{ m.report.title }}</b><span v-if="m.report.progress!=null" class="muted" style="font-size:var(--fs-xs)"> · 进展 {{ Math.round(m.report.progress*100) }}%</span></div>
+                      <div v-for="(sec, si) in m.report.sections" :key="si" class="tool-row">
+                        <div class="muted" style="font-weight:600; font-size:var(--fs-xs)">{{ sec.label }}</div>
+                        <div v-for="(it, ii) in sec.items" :key="ii" style="font-size:var(--fs-sm)">· {{ it }}</div>
+                      </div>
+                    </template>
+                    <!-- 通用兜底：美化 JSON（文本插值，自动转义） -->
+                    <template v-else>
+                      <pre class="chat-code">{{ prettyJSON(m.result.text) }}</pre>
+                    </template>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <div v-if="agentTyping" class="agent-typing"><span class="spinner"></span> 知微正在思考…</div>
+            <div v-if="agentTurnError" class="card" style="margin:0; border-color:var(--danger); background:var(--danger-soft); color:var(--danger)">出错了：{{ agentTurnError }}</div>
+          </div>
+
+          <!-- 输入区：Enter 发送，Shift+Enter 换行 -->
+          <div class="agent-input">
+            <textarea class="txt" v-model="agentInput" rows="1" placeholder="问知微…（Enter 发送，Shift+Enter 换行）"
+                      @keydown.enter.exact.prevent="sendAgentMessage"></textarea>
+            <button class="btn primary" :disabled="!agentInput.trim() || agentTyping || !agentConnected" @click="sendAgentMessage">
+              <span v-if="agentTyping" class="spinner"></span>{{ agentTyping ? '回复中' : '发送' }}
+            </button>
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -913,6 +1091,6 @@
   </div>
 </div>
 
-<script src="/app/app.76d8c4c3.js"></script>
+<script src="/app/app.1c39b595.js"></script>
 </body>
 </html>
