@@ -516,6 +516,10 @@ func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "event_type 非法", http.StatusBadRequest)
 		return
 	}
+	if strings.TrimSpace(req.Title) == "" {
+		http.Error(w, "title 必填", http.StatusBadRequest)
+		return
+	}
 	var related *ids.ID
 	if req.RelatedPersonID != "" {
 		rid, err := ids.ParseID(req.RelatedPersonID)
@@ -572,7 +576,7 @@ func (h *PersonHandler) History(w http.ResponseWriter, r *http.Request) {
 // ---- 确认队列（跨平面 pending 并集）----
 
 type pendingItem struct {
-	Kind          string     `json:"kind"` // attribute|relationship|person
+	Kind          string     `json:"kind"` // attribute|relationship|person|event
 	ID            ids.ID     `json:"id"`
 	PersonID      ids.ID     `json:"person_id"`
 	PersonName    string     `json:"person_name"`

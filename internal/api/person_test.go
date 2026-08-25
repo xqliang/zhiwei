@@ -394,6 +394,11 @@ func TestPersonEventAPI(t *testing.T) {
 		map[string]any{"event_type": "神秘", "title": "x"}); rec.Code != 400 {
 		t.Fatalf("非法类型应 400: %d", rec.Code)
 	}
+	// 空 title → 400（handler 层校验，非 Service 500）
+	if rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "旅行", "title": "  "}); rec.Code != 400 {
+		t.Fatalf("空 title 应 400: %d %s", rec.Code, rec.Body.String())
+	}
 
 	// events 列表（含 status 过滤）
 	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/events", nil)
@@ -407,8 +412,17 @@ func TestPersonEventAPI(t *testing.T) {
 	if len(listR.Events) != 1 {
 		t.Fatalf("应 1 条: %d", len(listR.Events))
 	}
-	if rec := doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/events?status=pending", nil); rec.Code != 200 {
+	// ?status=pending 过滤：此刻仅 1 条 active、0 条 pending → 应过滤为空
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/events?status=pending", nil)
+	if rec.Code != 200 {
 		t.Fatal("status 过滤失败")
+	}
+	var pendingR struct {
+		Events []repo.PersonEvent `json:"events"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pendingR)
+	if len(pendingR.Events) != 0 {
+		t.Fatalf("status=pending 此刻应 0 条: %d", len(pendingR.Events))
 	}
 
 	// 详情含 events + pending 计数（先造一条 pending：低置信）
@@ -450,6 +464,11 @@ func TestPersonEventAPI(t *testing.T) {
 	rec = doReq(t, h, "POST", "/api/profile/pending/event/"+evItemID+"/confirm", nil)
 	if rec.Code != 200 {
 		t.Fatalf("事件确认失败: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 删除不存在的事件（合法 id 但库中无此行）→ 404
+	if rec := doReq(t, h, "DELETE", "/api/persons/"+owner.ID.String()+"/events/"+ids.New().String(), nil); rec.Code != 404 {
+		t.Fatalf("删除不存在事件应 404: %d %s", rec.Code, rec.Body.String())
 	}
 
 	// 删除事件
