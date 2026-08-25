@@ -647,6 +647,32 @@
       </div>
     </div>
 
+    <!-- 确认队列：低置信/冲突的 AI 建议（全局，与人物详情无关） -->
+    <div class="card" v-if="pendingItems.length" style="border-color:var(--warn)">
+      <div class="kv" style="margin-bottom:8px">
+        <b style="color:var(--warn)">待确认 <span class="chip" style="background:var(--warn-soft); color:var(--warn)">{{ pendingItems.length }}</span></b>
+        <span class="muted" style="font-size:var(--fs-xs)">AI 从对话中抽取的低置信/冲突信息，确认后生效</span>
+      </div>
+      <div v-for="it in pendingItems" :key="it.kind + '-' + it.id" class="seg" style="align-items:flex-start">
+        <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ pendingKindText(it.kind) }}</span>
+        <div class="seg-text">
+          <div>
+            <b>{{ it.person_name }}</b> · {{ pendingSummary(it) }}
+            <span v-if="it.current_value" class="muted">（现值：{{ it.current_value }} → 建议改为 <b>{{ it.value }}</b>）</span>
+          </div>
+          <div class="muted" style="font-size:var(--fs-xs)">
+            置信度 {{ (it.confidence * 100).toFixed(0) }}%
+            <span v-if="it.session_id" style="cursor:pointer; text-decoration:underline" @click="jumpToSession(it.session_id)">来源录音</span>
+          </div>
+        </div>
+        <div style="display:flex; gap:4px; flex-shrink:0">
+          <button class="btn mini" style="background:var(--ok-soft); color:var(--ok); border-color:var(--ok)" @click="confirmPendingItem(it)">✓ 确认</button>
+          <button class="btn mini danger" @click="dismissPendingItem(it)">✕ 放弃</button>
+        </div>
+      </div>
+    </div>
+    <div v-else-if="pendingLoading" class="card empty">加载待确认项…</div>
+
     <!-- 新建人物 -->
     <div class="card" v-if="showNewPerson">
       <div class="kv" style="margin-bottom:12px"><b>新建人物</b><button class="btn-link" @click="cancelNewPerson">✕</button></div>

@@ -1159,6 +1159,45 @@ const app = createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 确认队列（跨平面 pending 并集；与名册/详情独立刷新） ----------
+    const pendingItems = ref([]);
+    const pendingLoading = ref(false);
+    async function loadPending() {
+      pendingLoading.value = true;
+      try {
+        const d = await api('GET', '/api/profile/pending');
+        pendingItems.value = d.items || [];
+      } catch (e) { showError(e); }
+      finally { pendingLoading.value = false; }
+    }
+    // 确认/放弃后三处联动刷新：队列本身 + 名册（pending 计数）+ 当前详情（若开着）
+    async function refreshAfterQueue() {
+      await loadPending();
+      await loadPersons();
+      if (personDetail.value) await reloadPersonDetail();
+    }
+    async function confirmPendingItem(it) {
+      try {
+        await api('POST', '/api/profile/pending/' + it.kind + '/' + it.id + '/confirm');
+        await refreshAfterQueue();
+      } catch (e) { showError(e); }
+    }
+    async function dismissPendingItem(it) {
+      try {
+        await api('POST', '/api/profile/pending/' + it.kind + '/' + it.id + '/dismiss');
+        await refreshAfterQueue();
+      } catch (e) { showError(e); }
+    }
+    // 队列条目摘要（kind 不同字段不同：attribute=建议值，relationship=类型+称呼，person=名字）
+    function pendingSummary(it) {
+      if (it.kind === 'attribute') return (it.attr_key || '') + '：' + (it.value || '');
+      if (it.kind === 'relationship') return (it.relation_type || '') + (it.label ? '（' + it.label + '）' : '');
+      return it.value || it.person_name; // person：名字
+    }
+    function pendingKindText(k) {
+      return { attribute: '属性', relationship: '关系', person: '新人物' }[k] || k;
+    }
+
     // ---------- 声纹 tab（名册管理：列表 / 录入 / 改名 / 删除 + 点开看关联录音并按时间段播放） ----------
     // 复用说话人面板既有能力：allSpeakers / enrollForm / enrolling / submitEnroll / onEnrollDrop、
     // renamingSpeaker / startRenameSpeaker / commitRenameSpeaker、askDeleteSpeaker、loadAllSpeakers、speakerColor。
@@ -1407,8 +1446,8 @@ const app = createApp({
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; loadTopics(); loadTodos(); loadDismissedTodos(); }
       // 声纹 tab：进入时复位本 tab 的临时态（收起录入表单/展开项/改名/播放）并拉全量名册。
       if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; loadAllSpeakers(); }
-      // 人物 tab：进入时复位详情/归档确认态并拉名册（loadPending 是 Task 5 的，先不引用）。
-      if (name === 'persons') { closePersonDetail(); archivingPersonId.value = null; loadPersons(); }
+      // 人物 tab：进入时复位详情/归档确认态，拉名册 + 确认队列（跨平面 pending 并集，独立刷新）。
+      if (name === 'persons') { closePersonDetail(); archivingPersonId.value = null; loadPersons(); loadPending(); }
     }
     loadSessions();
     // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
@@ -1453,6 +1492,7 @@ const app = createApp({
       epiText, personNameOf,
       ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
+      pendingItems, pendingLoading, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
     };
   }
 });
