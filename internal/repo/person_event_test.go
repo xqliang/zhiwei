@@ -37,6 +37,7 @@ func TestPersonEventQueries(t *testing.T) {
 		PersonID:         a.ID,
 		EventType:        "旅行",
 		Title:            "去云南旅游",
+		Description:      strp("和朋友自驾环游"),
 		OccurredAt:       &t1,
 		EndAt:            &t1End,
 		Location:         strp("云南"),
@@ -90,6 +91,17 @@ func TestPersonEventQueries(t *testing.T) {
 	if len(got.RelatedPersonIDs) != 1 || got.RelatedPersonIDs[0] != b.ID {
 		t.Fatalf("related_person_ids 还原异常: %+v", got.RelatedPersonIDs)
 	}
+	// 可空列回读：description/end_at/location 三个 NULL-able 列须能原样往返
+	//（Task 6 落库/回显依赖此扫描行为，这里钉死）。end_at 用 Equal 比较，避开时区/位置指针差异。
+	if got.Description == nil || *got.Description != "和朋友自驾环游" {
+		t.Fatalf("description 回读异常: %v", got.Description)
+	}
+	if got.EndAt == nil || !got.EndAt.Equal(t1End) {
+		t.Fatalf("end_at 回读异常: %v (期望 %v)", got.EndAt, t1End)
+	}
+	if got.Location == nil || *got.Location != "云南" {
+		t.Fatalf("location 回读异常: %v", got.Location)
+	}
 	// 未命中：标题不同应返回 nil。
 	miss, err := events.FindActiveByKeyExt(ctx, db, a.ID, "旅行", "去西藏旅游")
 	if err != nil {
@@ -99,6 +111,11 @@ func TestPersonEventQueries(t *testing.T) {
 		t.Fatalf("FindActiveByKeyExt 应未命中(不同标题): %+v", miss)
 	}
 
+	// Get 未命中路径：不存在的 id 应返回 (nil, nil)，不报 sql.ErrNoRows（调用方按 nil 判空）。
+	if g, err := events.Get(ctx, ids.New()); g != nil || err != nil {
+		t.Fatalf("Get(不存在 id) 应返回 (nil, nil): g=%+v err=%v", g, err)
+	}
+
 	// FindByNaturalKeyExt：任意 status 都能命中，这里命中 pending 的 e2。
 	nk, err := events.FindByNaturalKeyExt(ctx, db, sess, a.ID, "会议", "周会")
 	if err != nil {
@@ -106,6 +123,14 @@ func TestPersonEventQueries(t *testing.T) {
 	}
 	if nk == nil || nk.ID != e2.ID {
 		t.Fatalf("FindByNaturalKeyExt 未命中 e2: %+v", nk)
+	}
+	// 未命中：同 session 同 person 但 title 不存在 → nil（幂等去重不会误命中别的事件）。
+	nkMiss, err := events.FindByNaturalKeyExt(ctx, db, sess, a.ID, "会议", "不存在的标题")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nkMiss != nil {
+		t.Fatalf("FindByNaturalKeyExt 应未命中(不存在标题): %+v", nkMiss)
 	}
 
 	// ListByPerson：3 行，时间倒序 e1 → e2 → e3。
