@@ -142,6 +142,14 @@
   .btn.primary:disabled { background: #c8c3b4; cursor: not-allowed; }
   .btn.mini { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); padding: 6px 12px; }
   .btn.mini:hover { background: var(--surface-sunken); border-color: var(--border-strong); }
+  /* mini 主操作按钮（保存/确认合并/确认切换…）：尺寸与 .btn.mini 完全一致、
+     仅背景用主色区分。必须显式声明——.btn.primary 的 9px/20px 大内边距与
+     15px 大字号会被 mini 覆盖一半（背景/内边距被覆盖、字号/字重残留），
+     造成「同一行两个按钮一大一小、颜色却一样」的错乱。三类选择器(0,3,0)
+     优先级高于 .btn.primary(0,2,0)，逐属性钉死。 */
+  .btn.mini.primary { background: var(--accent); color: #fff; border-color: var(--accent); padding: 6px 12px; font-size: var(--fs-sm); font-weight: 500; }
+  .btn.mini.primary:hover { background: var(--accent-hover); }
+  .btn.mini.primary:disabled { background: #c8c3b4; border-color: #c8c3b4; }
   .btn.ghost { background: transparent; color: var(--muted); padding: 6px 10px; }
   .btn.ghost:hover { color: var(--text-2); background: var(--surface-sunken); }
   .btn.danger { background: var(--danger-soft); color: var(--danger); padding: 6px 12px; border: 1px solid #f3caca; }
