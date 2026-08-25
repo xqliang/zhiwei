@@ -286,6 +286,20 @@
             <label class="chip-add" v-if="!enrollOpen" @click="openEnroll">+ 新加说话人</label>
             <span v-if="speakerFilter" class="chip" style="cursor:pointer; opacity:.8" @click="speakerFilter=null">显示全部 ✕</span>
           </div>
+          <!-- 建议名字：speakername stage 用 LLM 从对话推断的候选（名称+置信度数值，倒排）。
+               仅随机名说话人展示；✓ 采纳（改名+清候选）· ✕ 忽略该候选；悬浮看依据。 -->
+          <div v-if="(detail.speakers||[]).some(hasNameCandidates)" style="margin:0 0 8px; display:flex; flex-direction:column; gap:4px">
+            <div v-for="sp in detail.speakers.filter(hasNameCandidates)" :key="'cand-'+sp.speaker_id"
+                 style="display:flex; align-items:center; gap:6px; flex-wrap:wrap">
+              <span class="muted" style="font-size:var(--fs-xs)">建议名字（{{ sp.name }}）</span>
+              <span v-for="c in sp.name_candidates" :key="c.name" class="chip"
+                    style="cursor:default" :title="c.evidence || '无依据记录'">
+                {{ c.name }} · {{ c.confidence.toFixed(2) }}
+                <button class="chip-x" @click.stop="acceptNameCandidate(sp, c)" title="采纳为正式名">✓</button>
+                <button class="chip-x" @click.stop="dismissNameCandidate(sp, c)" title="忽略该候选（下次识别可能再次建议；采纳后不再）">✕</button>
+              </span>
+            </div>
+          </div>
           <!-- 改名行（就地一行输入，回车/保存提交） -->
           <div v-if="renamingSpeaker" class="edit-form" style="margin:0 0 8px">
             <input class="txt inline" v-model="renamingSpeaker.name" @keyup.enter="commitRenameSpeaker">
@@ -559,6 +573,17 @@
           </button>
           <button class="btn mini" @click="askDeleteSpeaker(sp)">删除</button>
         </div>
+      </div>
+
+      <!-- 建议名字：随机名声纹的 LLM 候选（名称+置信度数值，倒排）；采纳后名字即确认、候选清空 -->
+      <div v-if="hasNameCandidates(sp)" style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:6px 0">
+        <span class="muted" style="font-size:var(--fs-xs)">建议名字</span>
+        <span v-for="c in sp.name_candidates" :key="c.name" class="chip"
+              style="cursor:default" :title="c.evidence || '无依据记录'">
+          {{ c.name }} · {{ c.confidence.toFixed(2) }}
+          <button class="chip-x" @click.stop="acceptNameCandidate(sp, c)" title="采纳为正式名">✓</button>
+          <button class="chip-x" @click.stop="dismissNameCandidate(sp, c)" title="忽略该候选（下次识别可能再次建议；采纳后不再）">✕</button>
+        </span>
       </div>
 
       <!-- 展开：关联录音（按 session 分组）+ 按时间段播放 -->

@@ -44,7 +44,13 @@ type StageDeps struct {
 	// ---- speaker stage ----
 	Voiceprint          voiceprint.Client
 	Speakers            *repo.SpeakerRepo
-	VoiceprintThreshold float64 // ZW_VOICEPRINT_THRESHOLD，0 表示用默认 0.5
+	VoiceprintThreshold float64 // ZW_VOICEPRINT_THRESHOLD，0 表示用默认 0.8
+
+	// ---- speakername stage（名字推断）----
+	NameInferPrompt       string                         // prompts/speaker_naming_v1.md 内容（system prompt）
+	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // 候选名存取（nil = no-op，兼容旧装配）
+	NameInferWindowMin    int                            // 上下文回看窗口（分钟），0 = 默认 10
+	NameInferMaxSegments  int                            // 上下文段数上限，0 = 默认 400
 
 	// ---- profile stage（用户画像 P1）----
 	Profile *profile.Service // 画像编排服务（ExtractSession / 手动 CRUD / 确认队列）
@@ -53,11 +59,12 @@ type StageDeps struct {
 // BuildStages 返回 stage 名 -> handler 的映射，供 Pool 装配。
 func BuildStages(d StageDeps) map[string]Handler {
 	return map[string]Handler{
-		"asr":     stageASR(d),
-		"segment": stageSegment(d),
-		"speaker": stageSpeaker(d),
-		"extract": stageExtract(d),
-		"profile": stageProfile(d),
+		"asr":         stageASR(d),
+		"segment":     stageSegment(d),
+		"speaker":     stageSpeaker(d),
+		"speakername": stageSpeakerName(d),
+		"extract":     stageExtract(d),
+		"profile":     stageProfile(d),
 	}
 }
 

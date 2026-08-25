@@ -41,19 +41,16 @@ func newExtractDeps(t *testing.T, llm provider.LLMProvider) StageDeps {
 	return StageDeps{
 		Sessions:     &repo.SessionRepo{DB: db},
 		Transcripts:  &repo.TranscriptRepo{DB: db},
+		Speakers:     &repo.SpeakerRepo{DB: db},
 		DB:           db,
 		Memories:     &repo.MemoryRepo{DB: db},
 		Todos:        &repo.TodoRepo{DB: db},
 		Topics:       &repo.TopicRepo{DB: db},
 		MemoryTopics: &repo.MemoryTopicRepo{DB: db},
 		TodoTopics:   &repo.TodoTopicRepo{DB: db},
-		// stageExtract 会调 buildSpeakerNameMap(ctx, d.Speakers) 做说话人名替换
-		//（commit 70f2aef「extract 区分说话人」引入），Speakers 为 nil 会 panic。
-		// 生产 main.go 与 profile 包 newExtractService 均装配此依赖。
-		Speakers: &repo.SpeakerRepo{DB: db},
-		LLM:      llm,
-		LLMModel: "fake-model",
-		Prompt:   "测试 system prompt",
+		LLM:          llm,
+		LLMModel:     "fake-model",
+		Prompt:       "测试 system prompt",
 		// PromptVersion 与生产对齐（cmd/zhiwei-server/main.go 用 extraction_v2.md），
 		// 避免 trace 里记的版本与线上不一致（评审 M3）。
 		PromptVersion: "extraction_v2",

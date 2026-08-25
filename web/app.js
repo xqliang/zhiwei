@@ -903,6 +903,34 @@ const app = createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 建议名字（speakername stage 的 LLM 候选：名称+置信度数值，用户点选确认） ----------
+    // 与后端 stage_speaker_name.go 的 autoNamePattern 保持一致：
+    // 只有名字仍是自动随机名（说话人+5位[a-z0-9]）的说话人才展示建议区——
+    // 用户改过名（含采纳过候选）后不再打扰。
+    const AUTO_NAME_RE = /^说话人[a-z0-9]{5}$/;
+    function hasNameCandidates(sp) {
+      return AUTO_NAME_RE.test(sp.name) && (sp.name_candidates || []).length > 0;
+    }
+    // 采纳候选：把候选名写为说话人正式名。复用改名 PATCH（后端改名成功即清空全部候选）。
+    // sp 兼容两种来源：时间线面板 detail.speakers（speaker_id 字段）/ 声纹 tab allSpeakers（id 字段）。
+    async function acceptNameCandidate(sp, cand) {
+      const id = sp.speaker_id || sp.id;
+      try {
+        await api('PATCH', '/api/speakers/' + id, { name: cand.name });
+        if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
+        await loadAllSpeakers();
+      } catch (e) { showError(e); }
+    }
+    // 忽略单个候选：删该行（后端幂等）。成功后刷新两处列表。
+    async function dismissNameCandidate(sp, cand) {
+      const id = sp.speaker_id || sp.id;
+      try {
+        await api('DELETE', '/api/speakers/' + id + '/name-candidates?name=' + encodeURIComponent(cand.name));
+        if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
+        await loadAllSpeakers();
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 声纹 tab（名册管理：列表 / 录入 / 改名 / 删除 + 点开看关联录音并按时间段播放） ----------
     // 复用说话人面板既有能力：allSpeakers / enrollForm / enrolling / submitEnroll / onEnrollDrop、
     // renamingSpeaker / startRenameSpeaker / commitRenameSpeaker、askDeleteSpeaker、loadAllSpeakers、speakerColor。
@@ -1175,6 +1203,7 @@ const app = createApp({
       speakerColor, segSpeakerBg, toggleSpeakerFilter, openEnroll, onEnrollDrop, submitEnroll, loadAllSpeakers,
       startEnrollRec, stopEnrollRec, enrollRecording, enrollRecSeconds, enrollPromptText,
       startRenameSpeaker, commitRenameSpeaker, askDeleteSpeaker, reassignSegment,
+      hasNameCandidates, acceptNameCandidate, dismissNameCandidate,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
       spMergeMode, spMergeSelected, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
       reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,

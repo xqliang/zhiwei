@@ -22,7 +22,9 @@ AI 全时生活记忆与个人智能体的云端服务。当前为 **Sprint 0-1*
   - `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`（`ZW_ASR_PROVIDER=file` 时必填，火山引擎 TOS 对象存储，文件 ASR 需上传音频换公网 URL；可放 `.env`）
   - `ZW_ASR_PROVIDER`（`file` 默认｜`realtime`；file 走 StepFun 异步文件 ASR 原生 diarization+ms 时间戳更准，realtime 走 WSS + prompt diarization 免 TOS）
   - `ZW_VOICEPRINT_SIDECAR_URL`（声纹 sidecar 地址，默认 `http://127.0.0.1:8010`）
-  - `ZW_VOICEPRINT_THRESHOLD`（1:N 余弦匹配阈值，默认 `0.5`，需用真实录音 benchmark 实调）
+  - `ZW_VOICEPRINT_THRESHOLD`（1:N 余弦匹配阈值，默认 `0.8`，需用真实录音 benchmark 实调）
+  - `ZW_NAME_INFER_WINDOW_MIN`（说话人名字推断回看窗口，分钟，默认 `10`）
+  - `ZW_NAME_INFER_MAX_SEGMENTS`（名字推断上下文段数上限，默认 `400`）
   - `ZW_PROFILE_AUTO_CONFIDENCE`（画像 LLM 抽取自动写入的置信阈值，默认 `0.75`）
   - `ZW_PROFILE_EXTRACT_ENABLED`（是否启用画像抽取流水线阶段，默认 `true`）
   - `ZW_PROFILE_EXTRACT_WINDOW`（画像抽取窗口大小，默认 `10`）
@@ -94,6 +96,7 @@ GET/PATCH /api/memories      记忆列表（type/topic_id 过滤）/ 修正与�
 GET/PATCH /api/todos         待办列表 / 状态流转（确认/完成/忽略）
 GET/POST/PATCH /api/topics   主题计数列表 / 新建 / 确认/改名/忽略
 GET/POST/PATCH/DELETE /api/speakers  说话人名册 / 录入声纹(multipart file+name) / 改名 / 删除
+DELETE /api/speakers/{id}/name-candidates?name=…   忽略单个建议名字候选
 GET  /api/sessions/{id}/speakers     会话内已解析说话人列表（面板用）
 PATCH /api/sessions/{id}/segments/{seg}/speaker  单段换人（手动纠正说话人）
 GET/POST         /api/persons                        人物名册（含 pending 计数）/ 新建
@@ -130,6 +133,9 @@ scripts/e2e.sh       e2e 冒烟脚本
 上传/录音 → data/uploads 落盘 + audio_session/pipeline_job 入库
   → [worker 池] asr 阶段：ffmpeg 转 wav16k → ASR → transcript/segments 落库
   → [worker 池] segment 阶段：汇总全文
+  → [worker 池] speaker 阶段：声纹 1:N 解析说话人 → 回填 segment.speaker_id
+  → [worker 池] speakername 阶段：LLM 推断说话人名字（尽力而为，失败不阻塞）
+  → [worker 池] extract 阶段：LLM 抽取记忆/待办/主题
   → [worker 池] profile 阶段：对话块 → LLM 抽取画像事实 → 置信闸门落库
     （高置信直接生效，低置信/冲突进确认队列 /api/profile/pending）
   → session 置 completed，时间线可查看

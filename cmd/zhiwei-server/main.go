@@ -27,6 +27,9 @@ import (
 // （如 extraction_v1），运行时从文件名推导并写进 job.trace。
 const promptPath = "prompts/extraction_v3.md"
 
+// nameInferPromptPath 说话人名字推断 prompt（speakername stage 用，版本号见文件名）。
+const nameInferPromptPath = "prompts/speaker_naming_v1.md"
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -59,6 +62,7 @@ func main() {
 	memoryTopics := &repo.MemoryTopicRepo{DB: db}
 	todoTopics := &repo.TodoTopicRepo{DB: db}
 	speakers := &repo.SpeakerRepo{DB: db}
+	nameCandidates := &repo.SpeakerNameCandidateRepo{DB: db}
 
 	persons := &repo.PersonRepo{DB: db}
 	personAttrs := &repo.PersonAttributeRepo{DB: db}
@@ -87,6 +91,12 @@ func main() {
 	memoryConsolidateBytes, err := os.ReadFile("prompts/memory_consolidate_v1.md")
 	if err != nil {
 		log.Fatal("读取记忆整理 prompt 失败: ", err)
+	}
+
+	// 说话人名字推断 prompt（版本化文件，speakername stage 用）
+	nameInferBytes, err := os.ReadFile(nameInferPromptPath)
+	if err != nil {
+		log.Fatal("读取名字推断 prompt 失败: ", err)
 	}
 
 	// 画像抽取 prompt（版本化文件；版本号见文件名）
@@ -139,10 +149,14 @@ func main() {
 		ExtractWindow: cfg.ExtractWindow,
 		Gate:          memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
 		Voiceprint:    voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
-		Profile: profileSvc,
+		NameInferPrompt:       string(nameInferBytes),
+		SpeakerNameCandidates: nameCandidates,
+		NameInferWindowMin:    cfg.NameInferWindowMin,
+		NameInferMaxSegments:  cfg.NameInferMaxSegments,
+		Profile:               profileSvc,
 	})
 	// profile stage 按开关追加（ZW_PROFILE_EXTRACT_ENABLED=false 时仅手动+回填端点）
-	stagesList := []string{"asr", "segment", "speaker", "extract"}
+	stagesList := []string{"asr", "segment", "speaker", "speakername", "extract"}
 	if cfg.ProfileExtractEnabled {
 		stagesList = append(stagesList, "profile")
 	}
@@ -164,12 +178,14 @@ func main() {
 	api.RegisterQuery(r, &api.QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,
+		SpeakerNameCandidates: nameCandidates,
 	})
 	api.RegisterSpeaker(r, &api.SpeakerHandler{
 		Speakers: speakers, Transcripts: transcripts,
 		Voiceprint: voiceprintCli, DataDir: cfg.DataDir,
-		EnrollMinDurationMS: cfg.EnrollMinDurationMS,
-		VoiceprintThreshold: cfg.VoiceprintThreshold,
+		EnrollMinDurationMS:   cfg.EnrollMinDurationMS,
+		VoiceprintThreshold:   cfg.VoiceprintThreshold,
+		SpeakerNameCandidates: nameCandidates,
 	})
 	api.RegisterMemory(r, &api.MemoryHandler{
 		Memories: memories, Topics: topics, MemoryTopics: memoryTopics,
