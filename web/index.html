@@ -242,6 +242,25 @@
   .tool-row:last-child { border-bottom: none; }
   .tool-empty { color: var(--muted); font-size: var(--fs-sm); padding: 4px 0; }
 
+  /* 写操作确认卡：agent 提议改记忆/话题/待办 → old→new diff + 理由 + 确认/放弃。
+     左边框用暖橙（待确认）；确认后转绿、放弃/过期转灰。沿用卡片/徽标/CSS 变量。 */
+  .confirm-card { background: var(--surface); border: 1px solid var(--border-strong); border-left: 3px solid var(--warn); border-radius: var(--radius-sm); padding: 12px 14px; max-width: 88%; box-shadow: var(--shadow); }
+  .confirm-card.applied { border-left-color: var(--ok); }
+  .confirm-card.dismissed { border-left-color: var(--muted); opacity: .82; }
+  .confirm-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .confirm-title { font-weight: 700; font-size: var(--fs-sm); color: var(--text); }
+  .confirm-context { margin-top: 6px; font-size: var(--fs-sm); font-weight: 600; color: var(--text-2); word-break: break-word; }
+  .confirm-effect { margin-top: 8px; font-size: var(--fs-sm); color: var(--text-2); line-height: 1.55; word-break: break-word; }
+  .confirm-body { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .confirm-row { font-size: var(--fs-sm); line-height: 1.5; display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: baseline; }
+  .confirm-field { font-size: var(--fs-xs); font-weight: 700; color: var(--muted); flex-shrink: 0; }
+  .confirm-old { color: var(--muted); text-decoration: line-through; word-break: break-word; }
+  .confirm-arrow { color: var(--accent); font-weight: 700; }
+  .confirm-new { color: var(--text); font-weight: 500; word-break: break-word; }
+  .confirm-rationale { margin-top: 8px; font-size: var(--fs-sm); color: var(--text-2); background: var(--surface-sunken); border-radius: var(--radius-sm); padding: 7px 10px; line-height: 1.5; word-break: break-word; }
+  .confirm-error { margin-top: 8px; font-size: var(--fs-sm); color: var(--danger); word-break: break-word; }
+  .confirm-actions { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+
   /* 「正在思考」指示 */
   .agent-typing { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--fs-sm); padding: 2px 2px; }
 
@@ -587,9 +606,47 @@
                   <span v-else v-html="renderMarkdown(m.content)"></span>
                 </div>
               </div>
-              <!-- 工具卡：未出结果=骨架「进行中」；出结果按工具类型渲染；is_error 走错误样式 -->
+              <!-- 工具卡：未出结果=骨架「进行中」；出结果按工具类型渲染；is_error 走错误样式。
+                   若结果是写-提议（propose_*）则改渲染「确认卡」（见下 m.proposal 分支）。 -->
               <div v-else-if="m.kind==='tool'" class="chat-msg assistant">
-                <div class="tool-card" :class="{error: m.result && m.result.is_error, pending: !m.result}">
+                <!-- 写操作提议 → 确认卡：old→new diff + 理由 + [确认]/[放弃]（值全走 {{ }} 自动转义） -->
+                <div v-if="m.proposal" class="confirm-card" :class="{applied: m.proposal.status==='applied', dismissed: m.proposal.status==='dismissed' || m.proposal.status==='expired'}">
+                  <div class="confirm-head">
+                    <span class="confirm-title">✍️ {{ m.pview.title }}</span>
+                    <span v-if="m.proposal.status==='applied'" class="badge done">已确认</span>
+                    <span v-else-if="m.proposal.status==='dismissed'" class="badge dismissed">已放弃</span>
+                    <span v-else-if="m.proposal.status==='expired'" class="badge dismissed">已过期</span>
+                    <span v-else class="badge pending">待确认</span>
+                  </div>
+                  <!-- 目标身份（改的是哪条；仅当变更字段本身不含 title/name 时显示，避免与 diff 重复） -->
+                  <div v-if="m.pview.showContext" class="confirm-context">「{{ m.pview.contextLabel }}」</div>
+                  <!-- 忽略/确认类：一句话效果 -->
+                  <div v-if="m.pview.isEffect" class="confirm-effect">{{ m.pview.effect }}</div>
+                  <!-- 逐字段 diff（新建=仅新值；改动=旧 → 新） -->
+                  <div v-else-if="m.pview.rows.length" class="confirm-body">
+                    <div v-for="(row, ri) in m.pview.rows" :key="ri" class="confirm-row">
+                      <span class="confirm-field">{{ row.field }}</span>
+                      <template v-if="row.hasOld">
+                        <span class="confirm-old">{{ row.old || '（空）' }}</span>
+                        <span class="confirm-arrow">→</span>
+                      </template>
+                      <span class="confirm-new">{{ row.new || '（空）' }}</span>
+                    </div>
+                  </div>
+                  <!-- agent 给用户看的理由 -->
+                  <div v-if="m.proposal.rationale" class="confirm-rationale">理由：{{ m.proposal.rationale }}</div>
+                  <!-- 操作出错：行内提示，按钮保留可重试 -->
+                  <div v-if="m.proposalError" class="confirm-error">操作失败：{{ m.proposalError }}</div>
+                  <!-- 确认/放弃（仅 pending 时；终态只留徽标） -->
+                  <div v-if="m.proposal.status==='pending'" class="confirm-actions">
+                    <button class="btn primary" style="padding:7px 18px" :disabled="m.proposalBusy" @click="confirmProposal(m)">
+                      <span v-if="m.proposalBusy" class="spinner"></span>确认
+                    </button>
+                    <button class="btn mini" :disabled="m.proposalBusy" @click="dismissProposal(m)">放弃</button>
+                  </div>
+                </div>
+                <!-- 读工具 → 常规工具卡 -->
+                <div v-else class="tool-card" :class="{error: m.result && m.result.is_error, pending: !m.result}">
                   <div class="tool-head">
                     <span v-if="!m.result" class="spinner"></span>
                     <span class="tool-name">🔧 {{ m.label }}</span>
@@ -1300,6 +1357,6 @@
   </div>
 </div>
 
-<script src="/app/app.4f16ae3b.js"></script>
+<script src="/app/app.ce84e132.js"></script>
 </body>
 </html>

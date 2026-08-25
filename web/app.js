@@ -1224,6 +1224,10 @@ const app = createApp({
       search_memory: '检索记忆', get_timeline: '查看时间线', get_topics: '查看主题',
       get_todos: '查看待办', get_topic_status: '话题状态', generate_report: '生成报告',
       zhiwei_ping: '连通性检查',
+      // 写-提议工具（propose_*）：出结果后会翻成「确认卡」，这里只是进行中骨架的友好名。
+      propose_memory_edit: '修改记忆', propose_memory_dismiss: '忽略记忆',
+      propose_topic_rename: '话题改名', propose_topic_confirm: '确认话题', propose_topic_dismiss: '忽略话题',
+      propose_todo_create: '新建待办', propose_todo_status: '待办状态',
     };
     function toolLabel(name) { return TOOL_LABELS[toolBase(name)] || (name || '工具'); }
     // 参数摘要：把 args(JSON 字符串) 折成 "k=v · k=v"，解析失败原样显示
@@ -1260,15 +1264,110 @@ const app = createApp({
     }
     function prettyJSON(text) { try { return JSON.stringify(JSON.parse(text), null, 2); } catch (e) { return String(text == null ? '' : text); } }
 
+    // ---- 写操作提议（propose_* 工具结果）→ 确认卡 ----
+    // 后端 propose_* 工具不直接改库，只落一条 pending agent_proposal 并把它作为 tool_result 回传
+    //（JSON：{id,kind,target_kind,target_id,payload:{old?,new?},rationale,status}）。前端据此渲染
+    // 「确认卡」：old→new diff + 理由 + [确认]/[放弃]。确认/放弃走 /api/agent/proposals/{id}/{action}
+    //（幂等）。所有展示值一律走 Vue {{ }} 自动转义，不用 v-html（rationale/old/new 均为不可信文本）。
+    const PROPOSAL_KINDS = ['memory_update', 'memory_dismiss', 'topic_rename', 'topic_confirm', 'topic_dismiss', 'todo_create', 'todo_status'];
+    const PROPOSAL_TITLES = {
+      memory_update: '修改记忆', memory_dismiss: '忽略记忆',
+      topic_rename: '话题改名', topic_confirm: '确认话题', topic_dismiss: '忽略话题',
+      todo_create: '新建待办', todo_status: '待办状态',
+    };
+    // 字段名 → 中文标签（diff 行左侧）
+    const PROPOSAL_FIELD_LABELS = { title: '标题', content: '内容', name: '名称', status: '状态', due_at: '截止', topic_id: '关联话题', type: '类型', kind: '类型' };
+    // 状态枚举 → 中文（memory/topic/todo 状态并集）
+    const PROPOSAL_STATUS_LABELS = { suggested: '待确认', pending: '待处理', confirmed: '已确认', active: '活跃', done: '已完成', dismissed: '已忽略', applied: '已应用', expired: '已过期' };
+    // 单字段值格式化：status 走中文枚举，*_at 走本地时间，其余按类型稳妥转字符串。
+    function fmtProposalField(k, v) {
+      if (v == null || v === '') return '';
+      if (k === 'status') return PROPOSAL_STATUS_LABELS[v] || String(v);
+      if (/_at$/.test(k)) return fmtTime(v);
+      if (typeof v === 'string') return v;
+      if (typeof v === 'boolean') return v ? '是' : '否';
+      if (typeof v === 'number') return String(v);
+      try { return JSON.stringify(v); } catch (e) { return String(v); }
+    }
+    // 检测 tool_result 是否为「提议」形状：对象(非数组) + 有 id/status + (已知 kind 或 payload.old/new)。
+    // 读工具结果（数组 / 报告对象 {content} / ping）都不满足此组合，故不会误判为提议。
+    function asProposal(parsed) {
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      if (!parsed.id || !parsed.status) return null;
+      const kindOK = parsed.kind && PROPOSAL_KINDS.indexOf(parsed.kind) >= 0;
+      const pl = parsed.payload;
+      const payloadOK = pl && typeof pl === 'object' && (pl.old !== undefined || pl.new !== undefined);
+      return (kindOK || payloadOK) ? parsed : null;
+    }
+    // proposalView：把提议预计算成模板就绪视图（标题 / 目标身份 / 效果句 / diff 行）。
+    // diff 只遍历 new 的键（真正被改的字段），old[k] 作改前值——避免把「old 有而 new 没有」的
+    // 上下文字段（如被忽略记忆的标题）误显示成「被清空」。忽略/确认类给一句话效果，不铺 diff。
+    function proposalView(p) {
+      if (!p) return null;
+      const kind = p.kind;
+      const payload = (p.payload && typeof p.payload === 'object') ? p.payload : {};
+      const old = (payload.old && typeof payload.old === 'object') ? payload.old : null;
+      const nw = (payload.new && typeof payload.new === 'object') ? payload.new : null;
+      const contextLabel = old ? (old.title || old.name || '') : '';
+      // 效果类（忽略/确认）：改前后差异不重要，直接给一句话说明将发生什么。
+      const EFFECTS = {
+        memory_dismiss: contextLabel ? ('将忽略记忆「' + contextLabel + '」') : '将忽略这条记忆',
+        topic_confirm: contextLabel ? ('将确认话题「' + contextLabel + '」为正式话题') : '将确认这个话题',
+        topic_dismiss: contextLabel ? ('将忽略话题「' + contextLabel + '」') : '将忽略这个话题',
+      };
+      const isEffect = !!EFFECTS[kind];
+      const rows = [];
+      if (nw) {
+        for (const k of Object.keys(nw)) {
+          const ns = fmtProposalField(k, nw[k]);
+          const hasOld = !!(old && old[k] !== undefined && old[k] !== null && old[k] !== '');
+          const os = hasOld ? fmtProposalField(k, old[k]) : '';
+          if (ns === '' && os === '') continue;
+          rows.push({ field: PROPOSAL_FIELD_LABELS[k] || k, old: os, new: ns, hasOld });
+        }
+      }
+      // 变更字段本身含 title/name 时，diff 行已展示身份，无需再单列目标身份行（去重）。
+      const changingIdentity = !!(nw && (('title' in nw) || ('name' in nw)));
+      const showContext = !!contextLabel && !isEffect && kind !== 'todo_create' && !changingIdentity;
+      return { title: PROPOSAL_TITLES[kind] || '提议', kind, isEffect, effect: EFFECTS[kind] || '', contextLabel, showContext, rows };
+    }
+    // 确认/放弃：POST /api/agent/proposals/{id}/{action}，回传更新后的提议 → 就地更新 status
+    //（applied→「已确认」/ dismissed→「已放弃」徽标，按钮消失）。端点幂等，重复确认返回当前状态。
+    // 出错保留按钮 + 行内错误提示，可重试。proposalBusy 防重复点击。
+    async function resolveProposal(it, action) {
+      const p = it && it.proposal;
+      if (!p || !p.id || it.proposalBusy) return;
+      it.proposalBusy = true; it.proposalError = '';
+      try {
+        const updated = await api('POST', '/api/agent/proposals/' + p.id + '/' + action);
+        // 端点回传整条更新后的提议；取其 status，兜底按动作推断（confirm→applied / dismiss→dismissed）。
+        const st = (updated && updated.status) ? updated.status : (action === 'confirm' ? 'applied' : 'dismissed');
+        it.proposal.status = st;
+      } catch (e) {
+        it.proposalError = (e && e.message) || String(e);
+      } finally {
+        it.proposalBusy = false;
+      }
+    }
+    function confirmProposal(it) { return resolveProposal(it, 'confirm'); }
+    function dismissProposal(it) { return resolveProposal(it, 'dismiss'); }
+
     // 工具展示项工厂：tool_call → 骨架卡（result=null）；tool_result → 填充。
+    // proposal/pview/proposalBusy/proposalError 为写-提议确认卡预留（读工具恒为 null/false，无害）。
     function makeToolItem(callId, name, args) {
       return { kind: 'tool', call_id: callId, name, base: toolBase(name), label: toolLabel(name),
-        args, argsSummary: toolArgsSummary(args), result: null, parsed: null, report: null };
+        args, argsSummary: toolArgsSummary(args), result: null, parsed: null, report: null,
+        proposal: null, pview: null, proposalBusy: false, proposalError: '' };
     }
     function fillTool(it, text, isErr) {
       it.result = { text: text || '', is_error: !!isErr };
       it.parsed = safeParse(text);
       if (it.base === 'generate_report' || it.base === 'get_topic_status') it.report = reportSections(it.parsed);
+      // 写-提议工具的成功结果 → 确认卡（错误结果不当提议，走通用错误样式）。
+      if (!isErr) {
+        it.proposal = asProposal(it.parsed);
+        it.pview = it.proposal ? proposalView(it.proposal) : null;
+      }
     }
     // 把 tool_result 填到 arr 里【最早一个未填充】的工具卡（FIFO 配对）。无匹配返回 false。
     function fillNextToolIn(arr, text, isErr) {
@@ -1582,6 +1681,7 @@ const app = createApp({
       // 问知微（流式对话）
       agentConversations, agentConvId, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
       loadAgentConversations, newAgentConversation, selectAgentConversation, sendAgentMessage,
+      confirmProposal, dismissProposal,
       renderMarkdown, reportSections, prettyJSON,
       // 报告（日报/周报 + 话题状态）
       reportKind, reportDate, reportWeekStart, reportRow, reportLoading, reportError, reportContent, reportFailed,
