@@ -392,8 +392,9 @@
             <select class="sp" :class="spClass(sg.speaker)" :style="{background: segSpeakerBg(sg)}"
                     @change="reassignSegment(sg, $event.target.value); $event.target.value=sg.speaker_id||''"
                     style="border:none; cursor:pointer" title="点击可改判此段说话人">
+              <!-- 首项 = 当前说话人（未解析段显示回退名）；名册列表排除当前说话人，避免同一人出现两次 -->
               <option :value="sg.speaker_id || ''">{{ sg.speaker }}</option>
-              <option v-for="sp in allSpeakers" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
+              <option v-for="sp in allSpeakers.filter(x => x.id !== sg.speaker_id)" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
               <option value="__new">+ 新加…</option>
             </select>
             <button class="btn mini seg-play" @click="toggleTimelineSegPlay(sg)" style="padding:2px 8px; flex-shrink:0" :title="tlPlayingSegId===sg.id?'播放中，点暂停':'播放此段音频'">{{ tlPlayingSegId===sg.id ? '⏸' : '▶' }}</button>
