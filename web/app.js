@@ -985,7 +985,8 @@ const app = createApp({
       // 属性手动管理临时态（Task 3）：加属性表单(含草稿) / 就地改值 / 删除确认 / 历史抽屉一并清空
       editingAttr.value = null; deletingAttrId.value = null; attrHistory.value = null;
       showAddAttr.value = false; addAttrForm.attr_key = ''; addAttrForm.value = '';
-      // Task 4 将在此追加：showAddRel 等关系相关临时态清理
+      // 关系手动管理临时态（Task 4）：加关系表单(含草稿) / 删除确认一并清空
+      showAddRel.value = false; resetAddRelForm(); deletingRelId.value = null;
     }
     async function reloadPersonDetail() {
       if (!personDetail.value) return;
@@ -1109,6 +1110,53 @@ const app = createApp({
     }
     // 历史 old/new_value 是 JSON 快照文本（如 "医生"），剥引号展示
     function snapText(v) { if (v == null) return ''; try { return JSON.parse(v); } catch (e) { return v; } }
+
+    // ---------- 关系管理 ----------
+    // 关系类型枚举（与后端 ValidRelations 14 项一致）
+    const RELATION_TYPES = ['配偶','子女','父母','兄弟姐妹','亲戚','朋友','同事','领导','下属','客户','供应商','合作方','组织','其他'];
+    const DIRECTIONS = ['upstream','downstream','peer'];
+
+    const showAddRel = ref(false);
+    const addRelForm = reactive({ relation_type: '', related_person_id: '', label: '', direction: '', org_name: '' });
+    const addingRel = ref(false);
+    const deletingRelId = ref(null);  // 2 步删除确认
+
+    async function submitAddRel() {
+      if (addingRel.value) return;
+      const rt = addRelForm.relation_type;
+      if (!rt) { toast.value = '请选择关系类型'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingRel.value = true;
+      try {
+        const body = { relation_type: rt };
+        if (addRelForm.related_person_id) body.related_person_id = addRelForm.related_person_id;
+        if (addRelForm.label.trim()) body.label = addRelForm.label.trim();
+        if (addRelForm.direction) body.direction = addRelForm.direction;
+        if (addRelForm.org_name.trim()) body.org_name = addRelForm.org_name.trim();
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/relationships', body);
+        await reloadPersonDetail();
+        showAddRel.value = false;
+        resetAddRelForm();
+      } catch (e) { showError(e); }
+      finally { addingRel.value = false; }
+    }
+    function resetAddRelForm() {
+      addRelForm.relation_type = ''; addRelForm.related_person_id = ''; addRelForm.label = ''; addRelForm.direction = ''; addRelForm.org_name = '';
+    }
+    // 开合切换：收起时清草稿（对齐 toggleAddAttr 的对称清理模式）
+    function toggleAddRel() {
+      if (showAddRel.value) { showAddRel.value = false; resetAddRelForm(); return; }
+      showAddRel.value = true;
+    }
+    function askDeleteRel(rel) { deletingRelId.value = rel.id; }
+    async function confirmDeleteRel() {
+      const id = deletingRelId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/relationships/' + id);
+        deletingRelId.value = null;
+        await reloadPersonDetail();
+      } catch (e) { showError(e); }
+    }
 
     // ---------- 声纹 tab（名册管理：列表 / 录入 / 改名 / 删除 + 点开看关联录音并按时间段播放） ----------
     // 复用说话人面板既有能力：allSpeakers / enrollForm / enrolling / submitEnroll / onEnrollDrop、
@@ -1403,6 +1451,7 @@ const app = createApp({
       persons, personDetail, showNewPerson, newPerson, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
       epiText, personNameOf,
       ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
+      RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
     };
   }
 });

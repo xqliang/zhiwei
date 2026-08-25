@@ -754,6 +754,14 @@
               <span v-if="rel.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
             </div>
           </div>
+          <div style="display:flex; gap:4px; flex-shrink:0">
+            <template v-if="deletingRelId === rel.id">
+              <span class="muted">删除？</span>
+              <button class="btn mini danger" @click="confirmDeleteRel">确认</button>
+              <button class="btn mini" @click="deletingRelId=null">取消</button>
+            </template>
+            <button v-else class="btn mini danger" @click="askDeleteRel(rel)" title="删除关系">🗑</button>
+          </div>
         </div>
       </div>
 
@@ -769,6 +777,30 @@
           <button class="btn primary" :disabled="addingAttr" @click="submitAddAttr">{{ addingAttr ? '保存中…' : '保存' }}</button>
         </div>
         <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；单值属性重复添加 = 改值，旧值留痕可查历史。</div>
+      </div>
+
+      <!-- 加关系表单 -->
+      <div class="card sunken" v-if="showAddRel" style="margin-bottom:10px">
+        <div class="kv" style="margin-bottom:8px"><b>加关系</b><button class="btn-link" @click="toggleAddRel">✕</button></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+          <select class="txt" v-model="addRelForm.relation_type" style="min-width:100px; background:var(--surface); border:1px solid var(--border); border-radius:9px; padding:8px 10px; font-size:var(--fs-base); font-family:inherit; color:var(--text)">
+            <option value="" disabled>关系类型</option>
+            <option v-for="t in RELATION_TYPES" :key="t" :value="t">{{ t }}</option>
+          </select>
+          <span class="muted">→</span>
+          <select class="txt" v-model="addRelForm.related_person_id" style="min-width:140px; background:var(--surface); border:1px solid var(--border); border-radius:9px; padding:8px 10px; font-size:var(--fs-base); font-family:inherit; color:var(--text)">
+            <option value="">（对端人物，可空）</option>
+            <option v-for="p in persons.filter(x => x.id !== personDetail.person.id)" :key="p.id" :value="p.id">{{ p.display_name }}</option>
+          </select>
+          <input class="txt" v-model="addRelForm.label" placeholder="称呼（如 老婆/大儿子，可空）" style="flex:1; min-width:120px">
+          <select class="txt" v-model="addRelForm.direction" style="min-width:100px; background:var(--surface); border:1px solid var(--border); border-radius:9px; padding:8px 10px; font-size:var(--fs-base); font-family:inherit; color:var(--text)">
+            <option value="">（上下游，可空）</option>
+            <option v-for="d in DIRECTIONS" :key="d" :value="d">{{ d }}</option>
+          </select>
+          <input class="txt" v-model="addRelForm.org_name" placeholder="组织名（组织关系用，可空）" style="flex:1; min-width:120px">
+          <button class="btn primary" :disabled="addingRel" @click="submitAddRel">{{ addingRel ? '保存中…' : '保存' }}</button>
+        </div>
+        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">对端人物可空（组织关系只填组织名）；手动添加立即生效（来源=人工 · 置信度 100%）。</div>
       </div>
 
       <!-- 修改历史抽屉 -->
@@ -799,6 +831,7 @@
 
       <div class="edit-actions">
         <button class="btn mini" @click="toggleAddAttr">{{ showAddAttr ? '收起加属性' : '＋ 加属性' }}</button>
+        <button class="btn mini" @click="toggleAddRel">{{ showAddRel ? '收起加关系' : '＋ 加关系' }}</button>
       </div>
     </div>
   </div>
