@@ -291,3 +291,23 @@ func TestStageSpeakerWeakMatchByDistinctiveness(t *testing.T) {
 		t.Fatal("领先不足（模糊匹配）时应登记新声纹")
 	}
 }
+
+// TestStageSpeakerSavesSegmentEmbeddings 验证逐段声纹向量落库（000007 列）：
+// stage 处理后每段应有 embedding BLOB（256×float32=1024B），供详情页按段
+// 展示与声纹库的相似度 top-N（一句话可能混多人，段级才能审计切分/归属）。
+func TestStageSpeakerSavesSegmentEmbeddings(t *testing.T) {
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: &fakeVoiceprint{matched: false}, DataDir: dataDir}
+	if err := runSpeakerStage(context.Background(), d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(context.Background(), tr.ID)
+	if len(segs) == 0 {
+		t.Fatal("无段")
+	}
+	for _, s := range segs {
+		if len(s.Embedding) != 1024 {
+			t.Fatalf("段 %d 应有逐段声纹向量 BLOB(1024B)，实际 %d 字节", s.SequenceNo, len(s.Embedding))
+		}
+	}
+}

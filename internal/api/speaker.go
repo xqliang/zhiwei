@@ -737,32 +737,37 @@ type voiceMatch struct {
 	Similarity float64 `json:"similarity"`
 }
 
-// topVoiceMatches 计算目标说话人声纹与全库（含本人）最相近的 top-n（调用方传 3）。
-// 用各 speaker 的灾备 BLOB 逐个余弦（与 FAISS 同向量，结果等价，同 MatchPreview）。
-// 含本人：自相似 1.00 排首位，恰好确认「自己的声纹在库中」；其后为最相近的他人，
-// 用于 timeline 详情审计识别质量——自动登记的新声纹若与某人明显相似（如 0.75，
-// 区分性弱命中的量级），说明识别时本应命中那个人，可据此「切换声纹」纠正。
-// 目标无有效向量或库中无有效声纹时返回 nil。
-func topVoiceMatches(all []repo.Speaker, targetID ids.ID, n int) []voiceMatch {
-	var target []float32
+// libVoice 预解码的库内声纹（speaker.Embedding BLOB → []float32，一次解码全库复用，
+// 避免逐段重复 decode）。
+type libVoice struct {
+	id   string
+	name string
+	vec  []float32
+}
+
+// decodeLibrary 把全量说话人的灾备 BLOB 预解码成向量列表（无有效向量的跳过）。
+func decodeLibrary(all []repo.Speaker) []libVoice {
+	lib := make([]libVoice, 0, len(all))
 	for _, sp := range all {
-		if sp.ID == targetID {
-			if emb, ok := decodeEmbedding(sp.Embedding); ok && len(emb) == 256 {
-				target = emb
-			}
-			break
+		if emb, ok := decodeEmbedding(sp.Embedding); ok && len(emb) == 256 {
+			lib = append(lib, libVoice{id: sp.ID.String(), name: sp.Name, vec: emb})
 		}
 	}
-	if target == nil {
+	return lib
+}
+
+// topVoiceMatchesVec 计算某声纹向量与库（预解码列表）的 top-N 相似，降序。
+// 用灾备 BLOB 的余弦（与 FAISS 同向量，结果等价，同 MatchPreview）。
+// 用途：timeline 详情按「每个 ASR 段」展示声纹相似度——一句话可能混多个人，
+// 段级 top-1 不是归属说话人即该段可能被 ASR 切错/归错，可据此换人或切换声纹。
+// vec 非 256 维返回 nil。
+func topVoiceMatchesVec(lib []libVoice, vec []float32, n int) []voiceMatch {
+	if len(vec) != 256 || len(lib) == 0 {
 		return nil
 	}
-	var ms []voiceMatch
-	for _, sp := range all {
-		emb, ok := decodeEmbedding(sp.Embedding)
-		if !ok || len(emb) != 256 {
-			continue // 无灾备向量或维度异常的跳过
-		}
-		ms = append(ms, voiceMatch{SpeakerID: sp.ID.String(), Name: sp.Name, Similarity: cosine(target, emb)})
+	ms := make([]voiceMatch, 0, len(lib))
+	for _, lv := range lib {
+		ms = append(ms, voiceMatch{SpeakerID: lv.id, Name: lv.name, Similarity: cosine(vec, lv.vec)})
 	}
 	sort.SliceStable(ms, func(i, j int) bool { return ms[i].Similarity > ms[j].Similarity })
 	if len(ms) > n {

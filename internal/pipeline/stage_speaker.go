@@ -58,6 +58,10 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		vecN  int // 该组有效向量数（用于 sample_count）
 	}
 	var reps []groupRep
+	// 逐段声纹向量 BLOB（segID→blob）：speaker stage 提取向量后落库，
+	// 供详情页按「每个 ASR 段」展示与声纹库的相似度 top-N——一句话可能混多个人，
+	// 段级相似度才能审计 diarization 切分/归属是否正确。
+	segEmbeds := map[ids.ID][]byte{}
 	for _, label := range order {
 		members := groups[label]
 		allAssigned := len(members) > 0
@@ -81,6 +85,7 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 				continue // 提向失败跳过
 			}
 			vecs = append(vecs, v)
+			segEmbeds[s.ID] = float32Blob(v)
 		}
 		if len(vecs) == 0 {
 			continue
@@ -89,6 +94,12 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 	}
 	if len(reps) == 0 {
 		return nil
+	}
+	// 逐段声纹向量落库（段级相似度审计的数据来源；失败按 DB 错误走 pool 重试）
+	if len(segEmbeds) > 0 {
+		if err := d.Transcripts.SaveSegmentEmbeddings(ctx, tr.ID, segEmbeds); err != nil {
+			return fmt.Errorf("落库逐段声纹: %w", err)
+		}
 	}
 
 	// 2) 每组（= 一个 ASR 说话人）独立做跨 session 1:N 检索/登记 → 回填该组未解析段。

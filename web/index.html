@@ -310,21 +310,6 @@
             <label class="chip-add" v-if="!enrollOpen" @click="openEnroll">+ 新加说话人</label>
             <span v-if="speakerFilter" class="chip" style="cursor:pointer; opacity:.8" @click="speakerFilter=null">显示全部 ✕</span>
           </div>
-          <!-- 相似声纹 top-3（含本人，自相似 1.00 居首确认声纹在库）：审计识别质量——
-               自动登记的新声纹若与某人明显相似（如 0.75），说明识别时本应命中，
-               可用说话人 chip 的 ⇄ 切换声纹一键纠正 -->
-          <div v-if="(detail.speakers||[]).some(sp => (sp.voice_matches||[]).length)" style="margin:-4px 0 8px; display:flex; flex-direction:column; gap:2px">
-            <div v-for="sp in detail.speakers.filter(sp => (sp.voice_matches||[]).length)" :key="'vm-'+sp.speaker_id"
-                 style="display:flex; align-items:center; gap:5px; flex-wrap:wrap">
-              <span class="muted" style="font-size:var(--fs-xs)">相似声纹 · {{ sp.name }} ≈</span>
-              <span v-for="(m, mi) in sp.voice_matches" :key="m.speaker_id"
-                    class="muted" style="font-size:var(--fs-xs)"
-                    :style="m.similarity >= 0.72 ? { color: 'var(--accent-2)', fontWeight: 600 } : {}"
-                    :title="m.similarity >= 0.72 ? '相似度 ≥ 0.72（区分性弱命中的量级）：识别时可能本应命中此人，可考虑 ⇄ 切换声纹' : ''">
-                {{ mi > 0 ? '·' : '' }} {{ m.name }} {{ m.similarity.toFixed(2) }}
-              </span>
-            </div>
-          </div>
           <!-- 建议名字：speakername stage 用 LLM 从对话推断的候选（名称+置信度数值，倒排）。
                仅随机名说话人展示；✓ 采纳（改名+清候选）· ✕ 忽略该候选；悬浮看依据。 -->
           <div v-if="(detail.speakers||[]).some(hasNameCandidates)" style="margin:0 0 8px; display:flex; flex-direction:column; gap:4px">
@@ -428,6 +413,18 @@
                   <button class="btn mini primary" @click="saveSegEdit(s, sg)" title="保存此段（⌘/Ctrl+Enter）">保存</button>
                   <button class="btn mini" @click="cancelEditSeg(sg)">取消</button>
                 </div>
+              </div>
+              <!-- 段级声纹相似度 top-3（该段音频的向量 vs 全库，含归属者）：一句话可能混
+                   多个人——top-1 不是归属说话人（或他人 ≥0.72）时该段可能被 ASR 切错/归错，
+                   可用段首下拉换人或说话人 chip 的 ⇄ 批量切换。存量会话无逐段向量则不显示 -->
+              <div v-if="(sg.voice_matches||[]).length" class="muted" style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
+                   title="该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错">
+                <span>声纹 ≈</span>
+                <span v-for="(m, mi) in sg.voice_matches" :key="m.speaker_id"
+                      :style="(m.similarity >= 0.72 && m.speaker_id !== sg.speaker_id) ? { color: 'var(--accent-2)', fontWeight: 600 } : {}"
+                      :title="m.speaker_id === sg.speaker_id ? '本段归属的说话人' : (m.similarity >= 0.72 ? '与他人相似度 ≥ 0.72：这句可能属于此人，可换人/切换声纹' : '')">
+                  {{ mi > 0 ? '·' : '' }} {{ m.name }} {{ m.similarity.toFixed(2) }}
+                </span>
               </div>
             </div>
           </div>

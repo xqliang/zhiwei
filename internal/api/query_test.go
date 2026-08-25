@@ -606,10 +606,9 @@ func TestReextract(t *testing.T) {
 	}
 }
 
-// TestGetSessionVoiceMatches 验证详情接口 speakers[] 附「声纹相似度 top-3」（含本人）：
-// 用各 speaker 的灾备 BLOB 算与全库的余弦，取最相近三个。
-// 用途：timeline 详情审计识别质量——自动登记的新声纹若与某人明显相似，
-// 说明识别时本应命中（区分性弱命中的量级），可据此「切换声纹」纠正。
+// TestGetSessionVoiceMatches 验证详情接口 segments[] 附「段级声纹相似度 top-3」：
+// 用 speaker stage 落库的逐段向量与全库声纹（灾备 BLOB）算余弦取前三。
+// 用途：一句话可能混多个人——段级 top-1 不是归属说话人即该段可能被切错/归错。
 func TestGetSessionVoiceMatches(t *testing.T) {
 	_ = ids.Init(1)
 	db, err := repo.NewDB(repo.TestDSN(t))
@@ -624,20 +623,18 @@ func TestGetSessionVoiceMatches(t *testing.T) {
 	todos := &repo.TodoRepo{DB: db}
 	speakers := &repo.SpeakerRepo{DB: db}
 
-	// 共享库隔离：清掉历史遗留说话人——既有用例（如 speaker stage 测试）会残留
-	// one-hot 向量的自动登记说话人，与甲完全同向量（相似度 1.0）会干扰 top-3 精确断言。
-	// 与 TestSpeakerListWithCandidates 的清表模式一致（本包无 per-test 清理机制）。
+	// 共享库隔离：清掉历史遗留说话人——既有用例会残留 one-hot 向量的自动登记
+	// 说话人，与本测试向量完全同向（相似度 1.0）会干扰 top-3 精确断言。
 	for _, q := range []string{`DELETE FROM speaker_name_candidate`, `DELETE FROM speaker`} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// 三个说话人：甲 = e1（本会话出场）、乙 = 0.6e1+0.8e2 归一（与甲余弦 0.6）、
-	// 丙 = e3（与甲正交，相似度 0）→ 甲的 voice_matches（含本人）应为
-	// [甲 1.0, 乙 0.6, 丙 0]，首项自相似确认声纹在库。
-	e1, e2, e3 := make([]float32, 256), make([]float32, 256), make([]float32, 256)
-	e1[0], e2[1], e3[2] = 1, 1, 1
+	// 三个说话人：甲 = e1（段的归属者）、乙 = 0.6e1+0.8e2 归一（与 e1 余弦 0.6）、
+	// 丙 = e3（与 e1 正交）→ 段向量取 e1 时，voice_matches 应为 [甲 1.0, 乙 0.6, 丙 0]。
+	e1, e3 := make([]float32, 256), make([]float32, 256)
+	e1[0], e3[2] = 1, 1
 	ab := make([]float32, 256)
 	ab[0], ab[1] = 0.6, 0.8 // 已归一（0.36+0.64=1），与 e1 的余弦 = 0.6
 	ji := &repo.Speaker{Name: "甲", Source: "enrolled", Embedding: float32BlobAPI(e1), SampleCount: 1}
@@ -665,12 +662,18 @@ func TestGetSessionVoiceMatches(t *testing.T) {
 	if err := transcripts.Create(ctx, tr); err != nil {
 		t.Fatal(err)
 	}
-	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+	segs := []repo.TranscriptSegment{
 		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "你好", StartMS: 0, EndMS: 1000},
-	}); err != nil {
+	}
+	if err := transcripts.InsertSegments(ctx, segs); err != nil {
 		t.Fatal(err)
 	}
+	// 归属甲 + 段声纹向量落库（模拟 speaker stage 的产物）
 	if err := transcripts.SetSegmentSpeaker(ctx, tr.ID, "1", ji.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.SaveSegmentEmbeddings(ctx, tr.ID,
+		map[ids.ID][]byte{segs[0].ID: float32BlobAPI(e1)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -685,26 +688,26 @@ func TestGetSessionVoiceMatches(t *testing.T) {
 		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
 	}
 	var detail struct {
-		Speakers []struct {
-			Name         string `json:"name"`
+		Segments []struct {
+			Text         string `json:"text"`
 			VoiceMatches []struct {
 				Name       string  `json:"name"`
 				Similarity float64 `json:"similarity"`
 			} `json:"voice_matches"`
-		} `json:"speakers"`
+		} `json:"segments"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
 		t.Fatalf("json: %v", err)
 	}
-	if len(detail.Speakers) != 1 || detail.Speakers[0].Name != "甲" {
-		t.Fatalf("应只有甲: %+v", detail.Speakers)
+	if len(detail.Segments) != 1 {
+		t.Fatalf("应 1 段，实际 %d", len(detail.Segments))
 	}
-	ms := detail.Speakers[0].VoiceMatches
+	ms := detail.Segments[0].VoiceMatches
 	if len(ms) != 3 {
-		t.Fatalf("甲应有 top-3 相似声纹，实际 %d: %+v", len(ms), ms)
+		t.Fatalf("段应有 top-3 相似声纹，实际 %d: %+v", len(ms), ms)
 	}
 	if ms[0].Name != "甲" || math.Abs(ms[0].Similarity-1) > 1e-6 {
-		t.Fatalf("top1 应为 甲/1.0（自相似，声纹在库确认），实际 %s/%.4f", ms[0].Name, ms[0].Similarity)
+		t.Fatalf("top1 应为 甲/1.0（归属者自相似），实际 %s/%.4f", ms[0].Name, ms[0].Similarity)
 	}
 	if ms[1].Name != "乙" || math.Abs(ms[1].Similarity-0.6) > 1e-6 {
 		t.Fatalf("top2 应为 乙/0.6，实际 %s/%.4f", ms[1].Name, ms[1].Similarity)

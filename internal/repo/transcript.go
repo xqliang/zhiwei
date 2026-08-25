@@ -29,7 +29,11 @@ type TranscriptSegment struct {
 	// SpeakerID 解析到的已登记说话人（speaker stage 回填，此前为 NULL）。
 	// 000004 迁移给 transcript_segment 加了 speaker_id 列，NewDB 走 sqlx safe 模式
 	// （无对应字段的列会扫描报错），故此处同步加字段，保 SELECT * 可扫描。
-	SpeakerID  *ids.ID   `db:"speaker_id" json:"speaker_id,omitempty"`
+	SpeakerID *ids.ID `db:"speaker_id" json:"speaker_id,omitempty"`
+	// Embedding 该段的 256 维声纹向量 BLOB（000007 迁移加列；speaker stage 逐段
+	// 提取后落库，供详情页按段展示与声纹库的相似度 top-N）。json:"-" 不外泄，
+	// API 层按需转成 top-N 明文列表。存量会话（新列前处理）为 NULL。
+	Embedding  []byte    `db:"embedding" json:"-"`
 	Text       string    `db:"text" json:"text"`
 	StartMS    int64     `db:"start_ms" json:"start_ms"`
 	EndMS      int64     `db:"end_ms" json:"end_ms"`
@@ -194,6 +198,20 @@ func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID
 		`UPDATE transcript_segment SET speaker_id = ? WHERE id = ? AND transcript_id = ?`,
 		speakerID.Int64(), segID.Int64(), transcriptID.Int64())
 	return err
+}
+
+// SaveSegmentEmbeddings 批量落库逐段声纹向量 BLOB（speaker stage 提取后调用）。
+// 带 transcript_id 作用域防跨会话误写；逐行 UPDATE 原子写（段数=会话内句数，量小）。
+// 用于详情页按段展示与声纹库的相似度 top-N（一句话可能混多人，段级才能审计切分）。
+func (r *TranscriptRepo) SaveSegmentEmbeddings(ctx context.Context, transcriptID ids.ID, blobs map[ids.ID][]byte) error {
+	for segID, blob := range blobs {
+		if _, err := r.DB.ExecContext(ctx,
+			`UPDATE transcript_segment SET embedding = ? WHERE id = ? AND transcript_id = ?`,
+			blob, segID.Int64(), transcriptID.Int64()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ReassignSpeakerSegments 把本 transcript 内某说话人的全部段一键改判给目标说话人
