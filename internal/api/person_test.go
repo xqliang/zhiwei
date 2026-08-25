@@ -45,7 +45,8 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 		Memories: &repo.MemoryRepo{DB: db}, Speakers: &repo.SpeakerRepo{DB: db},
 		Persons: &repo.PersonRepo{DB: db}, Attributes: &repo.PersonAttributeRepo{DB: db},
 		Relationships: &repo.PersonRelationshipRepo{DB: db}, ChangeLogs: &repo.PersonChangeLogRepo{DB: db},
-		LLM: &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
+		Events: &repo.PersonEventRepo{DB: db},
+		LLM:    &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
 		Gate: profile.GateConfig{AutoConf: 0.75},
 	}
 	if err := repo.EnsurePersonBootstrap(context.Background(), svc.Persons, svc.Speakers); err != nil {
@@ -54,7 +55,8 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 	r := chi.NewRouter()
 	RegisterPerson(r, &PersonHandler{
 		Persons: svc.Persons, Attributes: svc.Attributes,
-		Relationships: svc.Relationships, ChangeLogs: svc.ChangeLogs, Service: svc,
+		Relationships: svc.Relationships, ChangeLogs: svc.ChangeLogs,
+		Events: svc.Events, Service: svc,
 	})
 	return r, svc
 }
@@ -354,5 +356,108 @@ func TestPendingDismissHTTP(t *testing.T) {
 	a, _ := svc.Attributes.Get(ctx, aid)
 	if a == nil || a.Status != "dismissed" {
 		t.Fatalf("dismiss 后应 dismissed: %+v", a)
+	}
+}
+
+// TestPersonEventAPI 覆盖大事记 API 全链路：手动加事件（RFC3339 时区截断回归）、
+// event_type 枚举校验、列表 + status 过滤、详情内嵌 events + pending 计数、确认队列
+// 含 event 条目并 HTTP 确认、删除转 dismissed。跨包非自隔离：t.Cleanup 删掉 owner 的
+// person_event 行 + entity_kind='event' 审计行，防污染 profile 包同库断言。
+func TestPersonEventAPI(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+	t.Cleanup(func() {
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_event WHERE person_id = ?", owner.ID.Int64())
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'", owner.ID.Int64())
+	})
+
+	// 手动加事件（RFC3339 带时区 → 日期截断）
+	rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "旅行", "title": "API 测试-云南行", "occurred_at": "2026-07-20T05:00:00+08:00",
+			"end_at": "2026-07-27", "location": "云南", "description": "自驾"})
+	if rec.Code != 200 {
+		t.Fatalf("加事件失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var ev repo.PersonEvent
+	_ = json.Unmarshal(rec.Body.Bytes(), &ev)
+	if ev.Status != "active" || ev.Source != "manual" || ev.OccurredAt == nil {
+		t.Fatalf("手动事件错误: %+v", ev)
+	}
+	// M1 回归：+08:00 05:00 → 存库日期 07-20
+	if ev.OccurredAt.Format("2006-01-02") != "2026-07-20" {
+		t.Fatalf("occurred_at 日期错误: %v", ev.OccurredAt)
+	}
+
+	// 非法 event_type → 400
+	if rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "神秘", "title": "x"}); rec.Code != 400 {
+		t.Fatalf("非法类型应 400: %d", rec.Code)
+	}
+
+	// events 列表（含 status 过滤）
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/events", nil)
+	if rec.Code != 200 {
+		t.Fatalf("列表失败: %d", rec.Code)
+	}
+	var listR struct {
+		Events []repo.PersonEvent `json:"events"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if len(listR.Events) != 1 {
+		t.Fatalf("应 1 条: %d", len(listR.Events))
+	}
+	if rec := doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/events?status=pending", nil); rec.Code != 200 {
+		t.Fatal("status 过滤失败")
+	}
+
+	// 详情含 events + pending 计数（先造一条 pending：低置信）
+	_, err := svc.ApplyFacts(ctx, ids.New(), 1, []profile.Fact{
+		{Plane: "event", Subject: profile.Subject{Kind: "self"}, EventType: "里程碑", EventTitle: "API 测试-升职",
+			OccurredAt: "2026-01-15", Confidence: 0.5, EpistemicType: "observed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String(), nil)
+	var detail struct {
+		Events       []repo.PersonEvent `json:"events"`
+		PendingCount int                `json:"pending_count"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail)
+	if len(detail.Events) != 2 {
+		t.Fatalf("详情应含 2 条事件: %d", len(detail.Events))
+	}
+	if detail.PendingCount < 1 {
+		t.Fatalf("pending 计数应含事件: %d", detail.PendingCount)
+	}
+
+	// 队列含 event 条目并 HTTP 确认
+	rec = doReq(t, h, "GET", "/api/profile/pending", nil)
+	var pend struct {
+		Items []map[string]any `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pend)
+	var evItemID string
+	for _, it := range pend.Items {
+		if it["kind"] == "event" && it["value"] == "API 测试-升职" {
+			evItemID, _ = it["id"].(string)
+		}
+	}
+	if evItemID == "" {
+		t.Fatal("队列缺 event 条目")
+	}
+	rec = doReq(t, h, "POST", "/api/profile/pending/event/"+evItemID+"/confirm", nil)
+	if rec.Code != 200 {
+		t.Fatalf("事件确认失败: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 删除事件
+	rec = doReq(t, h, "DELETE", "/api/persons/"+owner.ID.String()+"/events/"+ev.ID.String(), nil)
+	if rec.Code != 200 {
+		t.Fatalf("删除失败: %d", rec.Code)
+	}
+	if d, _ := svc.Events.Get(ctx, ev.ID); d.Status != "dismissed" {
+		t.Fatalf("删除后应 dismissed: %+v", d)
 	}
 }
