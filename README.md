@@ -47,7 +47,7 @@ make sidecar-start
 # 4. 起服务（会读取 .env 里的密钥）
 set -a; source .env; set +a
 make dev
-# 打开 http://localhost:8080 —— 时间线 / 录音 两个标签页
+# 打开 http://localhost:8080 —— 时间线 / 录音 / 声纹 / 人物 / 主题 / 记忆 / 待办 标签页
 ```
 
 > 启动顺序：MySQL → 声纹 sidecar → 服务。sidecar 未起时转写仍可用，但说话人解析 stage 会失败重试（不丢转写）。
