@@ -111,7 +111,7 @@ func Load() (*Config, error) {
 		AgentEnabled:      getenvBool("ZW_AGENT_ENABLED", true),
 		AgentModel:        getenv("ZW_AGENT_MODEL", ""),
 		AgentSidecarCmd:   getenv("ZW_AGENT_SIDECAR_CMD", "node services/agent-sidecar/node_modules/.bin/dsh-jsonrpc-agent"),
-		AgentCordisConfig: getenv("ZW_AGENT_CORDIS_CONFIG", "services/agent-sidecar/cordis.yml"),
+		AgentCordisConfig: getenv("ZW_AGENT_CORDIS_CONFIG", "services/agent-sidecar/cordis.agent.yml"),
 		AgentMCPURL:       getenv("ZW_AGENT_MCP_URL", "http://127.0.0.1:8080/internal/mcp"),
 		DSHSessionRoot:    getenv("DSH_SESSION_ROOT", "./data/dsh-sessions"),
 		DSHSystemPrompt:   getenv("DSH_SYSTEM_PROMPT", "你是知微(zhiwei)个人智能体，基于用户的记忆/时间线/话题/待办用简体中文亲切、简洁地回答；需要时调用工具读取用户数据，不要编造。"),

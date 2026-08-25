@@ -94,7 +94,7 @@ func TestAgentConfigDefaults(t *testing.T) {
 	if !cfg.AgentEnabled {
 		t.Error("AgentEnabled 默认应为 true")
 	}
-	if cfg.AgentCordisConfig != "services/agent-sidecar/cordis.yml" {
+	if cfg.AgentCordisConfig != "services/agent-sidecar/cordis.agent.yml" {
 		t.Errorf("AgentCordisConfig 默认错误: %q", cfg.AgentCordisConfig)
 	}
 	if cfg.AgentSidecarCmd != "node services/agent-sidecar/node_modules/.bin/dsh-jsonrpc-agent" {
