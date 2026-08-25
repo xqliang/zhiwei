@@ -1,6 +1,9 @@
 .PHONY: build dev dev-start dev-stop dev-restart dev-status dev-logs test test-integration migrate-up migrate-down compose-up compose-down init-testdb spike-llm spike-embed spike-asr spike-voiceprint e2e sidecar-start sidecar-stop sidecar-restart sidecar-status sidecar-logs
 
-# 给 web/app.js 生成内容 hash 文件名（缓存破除，无构建方案）。build 自动依赖。
+# 给 web/app.js 生成内容 hash 文件名（缓存破除，无构建方案）。
+# build / dev-start / dev-restart 自动依赖：改完 app.js 后任一入口都会重算指纹，
+# 避免出现「index.html 引用旧 hash 副本 + 新模板」的 hasNameCandidates 未定义类事故
+# （静态文件从磁盘实时 serve，不依赖编译，但指纹副本与 index.html 引用必须同步重算）。
 hash-web:
 	bash scripts/hash-web.sh
 
@@ -10,12 +13,12 @@ build: hash-web
 dev: build
 	./bin/zhiwei-server
 
-# 调试进程后台管理（scripts/dev.sh 封装）
-dev-start:
+# 调试进程后台管理（scripts/dev.sh 封装）；start/restart 先重算 web 指纹再起服务
+dev-start: hash-web
 	bash scripts/dev.sh start
 dev-stop:
 	bash scripts/dev.sh stop
-dev-restart:
+dev-restart: hash-web
 	bash scripts/dev.sh restart
 dev-status:
 	bash scripts/dev.sh status
