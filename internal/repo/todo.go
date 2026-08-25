@@ -82,15 +82,24 @@ func (r *TodoRepo) Get(ctx context.Context, id ids.ID) (*Todo, error) {
 	return &td, err
 }
 
-// UpdateStatus 更新状态。状态值先做合法性校验（防绕过 API 层校验的垃圾值入库）；
-// 流转合法性（CanTransition）仍由调用方负责。「不存在或状态未变」返回 nil（MySQL
-// 同值 UPDATE 的 RowsAffected 为 0，无法与不存在区分，MVP 接受该语义）。
-func (r *TodoRepo) UpdateStatus(ctx context.Context, id ids.ID, status string) error {
+// UpdateStatusExt 是 UpdateStatus 的事务版：状态枚举校验 + SQL 与非事务版一致，
+// 只把执行器由 r.DB 换成 ext（传 *sqlx.Tx 即加入调用方事务）。供「写-提议闸门」的
+// 确认端点在与 Proposals.Resolve 同一事务内改 todo 状态用（apply-once）。
+// 流转合法性（CanTransition）仍由调用方负责。
+func (r *TodoRepo) UpdateStatusExt(ctx context.Context, ext ExecerContext, id ids.ID, status string) error {
 	if !validTodoStatus(status) {
 		return fmt.Errorf("非法 todo 状态: %q", status)
 	}
-	_, err := r.DB.ExecContext(ctx, `UPDATE todo SET status = ? WHERE id = ?`, status, id.Int64())
+	_, err := ext.ExecContext(ctx, `UPDATE todo SET status = ? WHERE id = ?`, status, id.Int64())
 	return err
+}
+
+// UpdateStatus 更新状态。状态值先做合法性校验（防绕过 API 层校验的垃圾值入库）；
+// 流转合法性（CanTransition）仍由调用方负责。「不存在或状态未变」返回 nil（MySQL
+// 同值 UPDATE 的 RowsAffected 为 0，无法与不存在区分，MVP 接受该语义）。
+// 委托 UpdateStatusExt（传 r.DB，非事务），行为与重构前完全一致。
+func (r *TodoRepo) UpdateStatus(ctx context.Context, id ids.ID, status string) error {
+	return r.UpdateStatusExt(ctx, r.DB, id, status)
 }
 
 // UpdateTitle 改待办标题（用户手改）。不做状态校验；状态流转走 UpdateStatus。

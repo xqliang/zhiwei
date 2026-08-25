@@ -121,14 +121,30 @@ ORDER BY t.updated_at DESC`, userID)
 	return list, err
 }
 
-func (r *TopicRepo) UpdateStatus(ctx context.Context, id ids.ID, status string) error {
-	_, err := r.DB.ExecContext(ctx, `UPDATE topic SET status = ? WHERE id = ?`, status, id.Int64())
+// UpdateStatusExt 是 UpdateStatus 的事务版：SQL 与非事务版一致，只把执行器由 r.DB
+// 换成 ext（传 *sqlx.Tx 即加入调用方事务）。供确认闸门在与 Proposals.Resolve 同一事务内
+// 改 topic 状态用（topic_confirm→active / topic_dismiss→dismissed）。
+func (r *TopicRepo) UpdateStatusExt(ctx context.Context, ext ExecerContext, id ids.ID, status string) error {
+	_, err := ext.ExecContext(ctx, `UPDATE topic SET status = ? WHERE id = ?`, status, id.Int64())
 	return err
 }
 
-func (r *TopicRepo) UpdateName(ctx context.Context, id ids.ID, name string) error {
-	_, err := r.DB.ExecContext(ctx, `UPDATE topic SET name = ? WHERE id = ?`, name, id.Int64())
+// UpdateStatus 委托 UpdateStatusExt（传 r.DB，非事务），行为与重构前完全一致。
+func (r *TopicRepo) UpdateStatus(ctx context.Context, id ids.ID, status string) error {
+	return r.UpdateStatusExt(ctx, r.DB, id, status)
+}
+
+// UpdateNameExt 是 UpdateName 的事务版：SQL 与非事务版一致（原 UpdateName 无额外
+// 规范化/校验，仅一条 UPDATE topic SET name），只把执行器由 r.DB 换成 ext。
+// 供确认闸门在与 Proposals.Resolve 同一事务内改名用（topic_rename）。
+func (r *TopicRepo) UpdateNameExt(ctx context.Context, ext ExecerContext, id ids.ID, name string) error {
+	_, err := ext.ExecContext(ctx, `UPDATE topic SET name = ? WHERE id = ?`, name, id.Int64())
 	return err
+}
+
+// UpdateName 委托 UpdateNameExt（传 r.DB，非事务），行为与重构前完全一致。
+func (r *TopicRepo) UpdateName(ctx context.Context, id ids.ID, name string) error {
+	return r.UpdateNameExt(ctx, r.DB, id, name)
 }
 
 // MergeGroup 一组合并：canonical_name 是规范名（命中已有 active/suggested 同名则复用，

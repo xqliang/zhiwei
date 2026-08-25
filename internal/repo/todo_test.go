@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -220,4 +221,43 @@ func repoMemoryFixture(t *testing.T, db *sqlx.DB, sessionID ids.ID) *Memory {
 		t.Fatal(err)
 	}
 	return mem
+}
+
+// TestTodoUpdateStatusExt 验证 UpdateStatusExt（事务版）传 db 执行时与 UpdateStatus 等价：
+// 合法状态落库、非法状态被拒（不落库）。确认闸门 todo_status 落库依赖此方法
+// （与 Proposals.Resolve 同事务）。
+func TestTodoUpdateStatusExt(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &TodoRepo{DB: db}
+	mr := &MemoryRepo{DB: db}
+	ctx := t.Context()
+
+	sid := ids.New()
+	// 清理顺序：先删 todo（其按 session 删的子查询依赖 memory 仍在），再删 memory。
+	// t.Cleanup 里 ctx 已取消，须用 context.Background()。
+	t.Cleanup(func() {
+		_ = tr.DeleteBySessionExt(context.Background(), db, sid)
+		_ = mr.DeleteBySessionExt(context.Background(), db, sid)
+	})
+	mem := repoMemoryFixture(t, db, sid)
+	td := &Todo{Title: "Ext 等价用例", SourceMemoryID: &mem.ID, Status: "suggested", Confidence: 0.8}
+	if err := tr.InsertExt(ctx, db, []*Todo{td}); err != nil {
+		t.Fatalf("InsertExt: %v", err)
+	}
+
+	// 合法状态：传 db 调 UpdateStatusExt，效果同 UpdateStatus
+	if err := tr.UpdateStatusExt(ctx, db, td.ID, "confirmed"); err != nil {
+		t.Fatalf("UpdateStatusExt: %v", err)
+	}
+	got, _ := tr.Get(ctx, td.ID)
+	if got.Status != "confirmed" {
+		t.Fatalf("status = %q, want confirmed", got.Status)
+	}
+	// 非法状态：与 UpdateStatus 一致地被拒（枚举校验，不落库）
+	if err := tr.UpdateStatusExt(ctx, db, td.ID, "bogus"); err == nil {
+		t.Fatal("非法状态 bogus 应返回错误")
+	}
 }

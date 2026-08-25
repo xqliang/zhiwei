@@ -375,3 +375,42 @@ func TestMemoryApplyConsolidation(t *testing.T) {
 		t.Fatalf("B topic 关联=%d, want 0（已迁删）", len(bLinks[b.ID]))
 	}
 }
+
+// TestMemorySaveExt 验证 SaveExt（事务版 Save）传 db 执行时与 Save 等价：
+// 更新 title/content/version 落库、Get 读回一致。确认闸门 memory_update 落库依赖此方法
+// （与 Proposals.Resolve 同事务）。
+func TestMemorySaveExt(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := &MemoryRepo{DB: db}
+	ctx := t.Context()
+
+	sid := ids.New()
+	// t.Cleanup 里 ctx 已取消，须用 context.Background()。
+	t.Cleanup(func() { _ = mr.DeleteBySessionExt(context.Background(), db, sid) })
+	m := newTestMemory(sid)
+	if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {
+		t.Fatalf("InsertExt: %v", err)
+	}
+
+	// 读回插入后的版本再 +1（不假设 DB 默认版本值），传 db 调 SaveExt
+	cur, err := mr.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	cur.Title = "SaveExt 改后标题"
+	cur.Content = "SaveExt 改后内容"
+	cur.Version++
+	if err := mr.SaveExt(ctx, db, cur); err != nil {
+		t.Fatalf("SaveExt: %v", err)
+	}
+	got, err := mr.Get(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("Get after SaveExt: %v", err)
+	}
+	if got.Title != "SaveExt 改后标题" || got.Content != "SaveExt 改后内容" || got.Version != cur.Version {
+		t.Fatalf("SaveExt 效果异常: %+v", got)
+	}
+}

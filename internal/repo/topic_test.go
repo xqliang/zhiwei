@@ -214,3 +214,38 @@ func TestTopicListWithCounts(t *testing.T) {
 		}
 	}
 }
+
+// TestTopicUpdateNameStatusExt 验证 UpdateNameExt / UpdateStatusExt（事务版）传 db 执行时
+// 与非事务版等价：改名、改状态落库，Get 读回一致。确认闸门 topic_rename/confirm/dismiss
+// 落库依赖这两个方法（与 Proposals.Resolve 同事务）。
+func TestTopicUpdateNameStatusExt(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &TopicRepo{DB: db}
+	ctx := t.Context()
+
+	tp := &Topic{Name: "Ext 原名", Status: "suggested", CreatedBy: "ai"}
+	if err := r.Create(ctx, tp); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// t.Cleanup 里 ctx 已取消，须用 context.Background()。Delete 硬删 topic + 关联。
+	t.Cleanup(func() { _ = r.Delete(context.Background(), tp.ID) })
+
+	// UpdateNameExt(db) 效果同 UpdateName
+	if err := r.UpdateNameExt(ctx, db, tp.ID, "Ext 新名"); err != nil {
+		t.Fatalf("UpdateNameExt: %v", err)
+	}
+	// UpdateStatusExt(db) 效果同 UpdateStatus
+	if err := r.UpdateStatusExt(ctx, db, tp.ID, "active"); err != nil {
+		t.Fatalf("UpdateStatusExt: %v", err)
+	}
+	got, err := r.Get(ctx, tp.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Name != "Ext 新名" || got.Status != "active" {
+		t.Fatalf("Ext 效果异常: name=%q status=%q", got.Name, got.Status)
+	}
+}

@@ -156,12 +156,24 @@ func (r *MemoryRepo) Get(ctx context.Context, id ids.ID) (*Memory, error) {
 	return &m, err
 }
 
-// Save 保存用户修正（version 由调用方 +1 后整体写回）。
-func (r *MemoryRepo) Save(ctx context.Context, m *Memory) error {
-	_, err := r.DB.ExecContext(ctx, `
+// SaveExt 是 Save 的事务版：SQL 与非事务版 Save 完全一致，只把执行器由 r.DB 换成 ext
+// （传 *sqlx.Tx 即加入调用方事务）。供「写-提议闸门」的确认端点在与
+// AgentProposalRepo.Resolve 同一事务内落库用：领域写 + 提议置终态原子提交（apply-once）。
+//
+// 注意（与 Save 保持一致的约束）：本 SQL 只更新 title/content/status/version，不含 type 列。
+// memory.type 仅在插入时写定；如需改 type 需另加迁移 + 新方法，本期确认闸门的 memory_update
+// 只落 title/content（详见 mcp_write_tools.go / proposals.go 的说明）。
+func (r *MemoryRepo) SaveExt(ctx context.Context, ext ExecerContext, m *Memory) error {
+	_, err := ext.ExecContext(ctx, `
 UPDATE memory SET title = ?, content = ?, status = ?, version = ? WHERE id = ?`,
 		m.Title, m.Content, m.Status, m.Version, m.ID.Int64())
 	return err
+}
+
+// Save 保存用户修正（version 由调用方 +1 后整体写回）。委托 SaveExt（传 r.DB，非事务），
+// 行为与重构前完全一致。
+func (r *MemoryRepo) Save(ctx context.Context, m *Memory) error {
+	return r.SaveExt(ctx, r.DB, m)
 }
 
 func (r *MemoryRepo) List(ctx context.Context, f MemoryFilter) ([]MemoryRow, error) {

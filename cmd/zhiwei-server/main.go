@@ -193,18 +193,26 @@ func main() {
 
 	// MCP 工具端点（仅供本机 dsh 边车经 streamable-http 连回；不对外）。
 	// 进程内运行、复用上面已开库的 repo 实例（同一个 DB 池）。
+	agentProposals := &repo.AgentProposalRepo{DB: db}
 	mcpSrv := agent.NewMCPServer(agent.MCPDeps{
 		Memory:     memories,
 		Session:    sessions,
 		Transcript: transcripts,
 		Topic:      topics,
 		Todo:       todos,
+		Proposals:  agentProposals,
 	})
 	// 报告工具（generate_report / get_topic_status）注册进同一 MCP server，供 dsh agent 调用。
 	review.RegisterReportTools(mcpSrv, reviewer)
 	mcpHandler := agent.MCPHandler(mcpSrv)
 	r.Handle("/internal/mcp", mcpHandler)
 	r.Handle("/internal/mcp/*", mcpHandler)
+
+	// 写-提议闸门人审端点：列出/确认/放弃 agent 提议（POST confirm 单事务 apply-once, spec §8）。
+	agent.RegisterProposals(r, agent.ProposalDeps{
+		DB: db, Proposals: agentProposals,
+		Memories: memories, Topics: topics, Todos: todos, TodoTopics: todoTopics,
+	})
 
 	// Agent 运行时（惰性 spawn dsh；首次对话时启动，此时 /internal/mcp 已监听）。
 	if cfg.AgentEnabled {
