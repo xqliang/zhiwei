@@ -270,6 +270,38 @@ func TestApplyEventFacts(t *testing.T) {
 		t.Fatalf("reaffirm 不应加行: %d", len(evs2))
 	}
 
+	// M1/M2 回归：parseEventAt 时区截断 + 扩展格式（用不同 title 避开自然键去重）
+	sess3 := ids.New()
+	st5, err := svc.ApplyFacts(ctx, sess3, 1, []Fact{
+		// ① RFC3339 带 +08:00 凌晨：应截断到当日零点，落库日期仍是 07-20（防 M1 时区偏移回归——
+		//    直存会在驱动转 UTC 时把 05:00+08 偏移到前一天 07-19）
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "会议", EventTitle: "季度评审会",
+			OccurredAt: "2026-07-20T05:00:00+08:00", Confidence: 0.9, EpistemicType: "observed"},
+		// ② 斜杠日期：扩展格式应解析成功、非 NULL（防 M2 常见 LLM 格式静默丢时间）
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "聚会", EventTitle: "老友饭局",
+			OccurredAt: "2026/07/20", Confidence: 0.9, EpistemicType: "observed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st5.Active != 2 {
+		t.Fatalf("扩展格式两条应 active: %+v", st5)
+	}
+	rev, _ := svc.Events.FindActiveByKeyExt(ctx, svc.DB, oid, "会议", "季度评审会")
+	if rev == nil || rev.OccurredAt == nil {
+		t.Fatalf("会议事件应有 occurred_at: %+v", rev)
+	}
+	if got := rev.OccurredAt.UTC().Format("2006-01-02"); got != "2026-07-20" {
+		t.Fatalf("M1 时区截断回归：+08:00 凌晨应落库 2026-07-20，实得 %s", got)
+	}
+	party, _ := svc.Events.FindActiveByKeyExt(ctx, svc.DB, oid, "聚会", "老友饭局")
+	if party == nil || party.OccurredAt == nil {
+		t.Fatalf("M2 斜杠日期应解析成功（非 NULL）: %+v", party)
+	}
+	if got := party.OccurredAt.UTC().Format("2006-01-02"); got != "2026-07-20" {
+		t.Fatalf("M2 斜杠日期应落库 2026-07-20，实得 %s", got)
+	}
+
 	// 手动加/删事件
 	me, err := svc.ManualAddEvent(ctx, oid, "健康", "确诊高血压", "长期服药", "2025-06-01", "", "北京协和", nil)
 	if err != nil {

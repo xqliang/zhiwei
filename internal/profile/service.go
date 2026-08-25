@@ -239,6 +239,11 @@ func (s *Service) applyRelationshipFact(ctx context.Context, tx *sqlx.Tx, userID
 
 // applyEventFact 事件落库：闸门（同键佐证/新键按置信度）+ 单事务 + 审计。
 // related 为可选增强（解析不到存空 RelatedPersonIDs，不阻断事件创建——见 fact.go 注释）。
+//
+// 已知限制：自然键 / 同键查询（FindActiveByKeyExt、FindByNaturalKeyExt）对 title 是原始
+// 精确匹配（不归一化）——LLM 标题字面近重复（「去云南旅游」vs「云南旅游」）会各建一条 active
+// 而非互相佐证；与关系平面 org_name 不入自然键（见 applyRelationshipFact）同类，属 P2 已知
+// 取舍，后续如需再对 title 归一化后纳入键。
 func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
 	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
 
@@ -586,14 +591,28 @@ func idPtr(id ids.ID) *ids.ID {
 	return &id
 }
 
-// parseEventAt 尽力解析事件时间：RFC3339 → YYYY-MM-DD → YYYY-MM（月份精度）；
-// 全部失败返回 ok=false（调用方存 NULL——事件仍创建，标题里常含时间信息）。
-// 解析职责在此而非 ParseFacts：Fact 是传输载体，时间精度策略属落库层。
+// parseEventAt 尽力解析事件时间并归一到「UTC 当日零点」（事件只需日期精度）。
+// 支持格式：RFC3339（带时区）、2006-01-02T15:04:05（无时区 ISO）、2006-01-02、
+// 2006/01/02（斜杠）、2006-01（月份精度）；全部失败返回 ok=false（调用方存 NULL——
+// 事件仍创建，标题里常含时间信息）。解析职责在此而非 ParseFacts：Fact 是传输载体，
+// 时间精度策略属落库层。
+//
+// 为何统一锚定 UTC 零点而非直存解析结果：occurred_at 是 DATETIME(3)，DSN 未配 loc → 驱动
+// 写库时按 UTC 转换（v.In(UTC)）。带时区/带时刻的串直存会在转 UTC 时把凌晨偏移到前一天
+// （实测 +08:00 05:00 → 前一日）。故取解析出的「原时区日历日」Y/M/D，重建为 UTC 当日零点，
+// 保证落库日期＝用户书写的日历日。注意用 time.UTC 而非 t.Location()：后者（如 +08 零点）
+// 转 UTC 仍落到前一日 16:00，修不掉偏移。
 func parseEventAt(s string) (time.Time, bool) {
 	s = strings.TrimSpace(s)
-	for _, layout := range []string{time.RFC3339, "2006-01-02", "2006-01"} {
+	for _, layout := range []string{
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+		"2006/01/02",
+		"2006-01",
+	} {
 		if t, err := time.Parse(layout, s); err == nil {
-			return t, true
+			return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), true
 		}
 	}
 	return time.Time{}, false
