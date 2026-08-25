@@ -82,6 +82,14 @@ func (r *TodoRepo) Get(ctx context.Context, id ids.ID) (*Todo, error) {
 	return &td, err
 }
 
+// GetExt 事务内加行锁读取（SELECT ... FOR UPDATE）。写-提议闸门确认 todo_status 时需先锁行
+// 读当前状态做 CanTransition 校验再改，锁读避免与并发状态变更竞争（评审 I1/I2）。
+func (r *TodoRepo) GetExt(ctx context.Context, q QueryRowxContext, id ids.ID) (*Todo, error) {
+	var td Todo
+	err := q.QueryRowxContext(ctx, `SELECT * FROM todo WHERE id = ? FOR UPDATE`, id.Int64()).StructScan(&td)
+	return &td, err
+}
+
 // UpdateStatusExt 是 UpdateStatus 的事务版：状态枚举校验 + SQL 与非事务版一致，
 // 只把执行器由 r.DB 换成 ext（传 *sqlx.Tx 即加入调用方事务）。供「写-提议闸门」的
 // 确认端点在与 Proposals.Resolve 同一事务内改 todo 状态用（apply-once）。

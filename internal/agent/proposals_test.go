@@ -206,3 +206,38 @@ func TestConfirmTodoCreate(t *testing.T) {
 		t.Errorf("新 todo 异常: title=%q status=%q", td.Title, td.Status)
 	}
 }
+
+// TestConfirmTodoStatusIllegalTransition 锁定 I1：闸门确认也须守 todo 状态机——
+// dismissed→confirmed 非法, 确认应失败且 todo 不变、提议仍 pending（不被静默 applied）。
+func TestConfirmTodoStatusIllegalTransition(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	td := &repo.Todo{Title: "已放弃待办IT", Status: "dismissed", Confidence: 1} // 终态
+	if err := pd.Todos.InsertExt(ctx, pd.DB, []*repo.Todo{td}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pd.DB.Exec("DELETE FROM todo WHERE id = ?", td.ID.Int64()) })
+
+	res, _, err := proposeTodoStatusHandler(md)(ctx, nil, proposeTodoStatusArgs{
+		TodoID: td.ID.String(), NewStatus: "confirmed",
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	_ = json.Unmarshal([]byte(mcpText(t, res)), &p)
+	cleanupProposal(t, pd, p.ID)
+
+	code, _ := postProposal(t, pd, p.ID, "confirm")
+	if code == http.StatusOK {
+		t.Fatalf("dismissed→confirmed 非法流转不应确认成功(code=%d)", code)
+	}
+	got, _ := md.Todo.Get(ctx, td.ID)
+	if got.Status != "dismissed" {
+		t.Errorf("非法确认不应改 todo, status=%q", got.Status)
+	}
+	after, _ := pd.Proposals.Get(ctx, p.ID)
+	if after.Status != "pending" {
+		t.Errorf("非法确认后提议应仍 pending, got %q", after.Status)
+	}
+}

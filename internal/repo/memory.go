@@ -156,6 +156,15 @@ func (r *MemoryRepo) Get(ctx context.Context, id ids.ID) (*Memory, error) {
 	return &m, err
 }
 
+// GetExt 事务内加行锁读取（SELECT ... FOR UPDATE）。写-提议闸门的 memory_update/dismiss
+// 是「读-改-写全行」，必须在同一事务内锁行读，否则并发确认/并发编辑会丢更新、撞 version
+// （评审 I2）。事务外调用（传 r.DB）时 FOR UPDATE 为 autocommit 无害。
+func (r *MemoryRepo) GetExt(ctx context.Context, q QueryRowxContext, id ids.ID) (*Memory, error) {
+	var m Memory
+	err := q.QueryRowxContext(ctx, `SELECT * FROM memory WHERE id = ? FOR UPDATE`, id.Int64()).StructScan(&m)
+	return &m, err
+}
+
 // SaveExt 是 Save 的事务版：SQL 与非事务版 Save 完全一致，只把执行器由 r.DB 换成 ext
 // （传 *sqlx.Tx 即加入调用方事务）。供「写-提议闸门」的确认端点在与
 // AgentProposalRepo.Resolve 同一事务内落库用：领域写 + 提议置终态原子提交（apply-once）。

@@ -108,8 +108,13 @@ func (d ProposalDeps) dismissProposal(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "提议已被处理"})
 		return
 	}
-	if _, err := d.Proposals.Resolve(r.Context(), d.DB, id, "dismissed", nil); err != nil {
+	ok, err := d.Proposals.Resolve(r.Context(), d.DB, id, "dismissed", nil)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !ok { // 并发 confirm 抢先(pending 检查与 Resolve 之间)：状态码与 body 一致→409
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "提议已被处理"})
 		return
 	}
 	if p2, err := d.Proposals.Get(r.Context(), id); err == nil {
@@ -143,7 +148,7 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if p.TargetID == nil {
 			return nil, fmt.Errorf("memory_update 缺 target_id")
 		}
-		m, err := d.Memories.Get(ctx, *p.TargetID)
+		m, err := d.Memories.GetExt(ctx, tx, *p.TargetID)
 		if err != nil {
 			return nil, err
 		}
@@ -162,7 +167,7 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if p.TargetID == nil {
 			return nil, fmt.Errorf("memory_dismiss 缺 target_id")
 		}
-		m, err := d.Memories.Get(ctx, *p.TargetID)
+		m, err := d.Memories.GetExt(ctx, tx, *p.TargetID)
 		if err != nil {
 			return nil, err
 		}
@@ -230,6 +235,13 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		st := newStr("status")
 		if st == "" {
 			return nil, fmt.Errorf("todo_status 缺 new.status")
+		}
+		td, err := d.Todos.GetExt(ctx, tx, *p.TargetID) // 锁行读当前状态
+		if err != nil {
+			return nil, err
+		}
+		if !repo.CanTransition(td.Status, st) { // 闸门须与 REST 端点同样守状态机(评审 I1)
+			return nil, fmt.Errorf("非法待办状态流转: %s → %s", td.Status, st)
 		}
 		if err := d.Todos.UpdateStatusExt(ctx, tx, *p.TargetID, st); err != nil {
 			return nil, err
