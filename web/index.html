@@ -731,7 +731,7 @@
               <button class="btn mini" @click="deletingAttrId=null">取消</button>
             </template>
             <template v-else>
-              <button class="btn mini" @click="startEditAttr(a)" title="改值（旧行留痕）">✎</button>
+              <button v-if="a.status !== 'pending'" class="btn mini" @click="startEditAttr(a)" title="改值（旧行留痕）">✎</button>
               <button class="btn mini" @click="showAttrHistory(a)" title="修改历史">⟲</button>
               <button class="btn mini danger" @click="askDeleteAttr(a)" title="删除">🗑</button>
             </template>
@@ -759,7 +759,7 @@
 
       <!-- 加属性表单 -->
       <div class="card sunken" v-if="showAddAttr" style="margin-bottom:10px">
-        <div class="kv" style="margin-bottom:8px"><b>加属性</b><button class="btn-link" @click="showAddAttr=false">✕</button></div>
+        <div class="kv" style="margin-bottom:8px"><b>加属性</b><button class="btn-link" @click="toggleAddAttr">✕</button></div>
         <div style="display:flex; gap:8px; flex-wrap:wrap">
           <input class="txt" list="attr-keys" v-model="addAttrForm.attr_key" placeholder="属性 key（如 occupation）" style="flex:1; min-width:140px">
           <datalist id="attr-keys">
@@ -798,7 +798,7 @@
       </div>
 
       <div class="edit-actions">
-        <button class="btn mini" @click="showAddAttr = !showAddAttr">{{ showAddAttr ? '收起加属性' : '＋ 加属性' }}</button>
+        <button class="btn mini" @click="toggleAddAttr">{{ showAddAttr ? '收起加属性' : '＋ 加属性' }}</button>
       </div>
     </div>
   </div>

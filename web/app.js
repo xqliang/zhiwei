@@ -974,6 +974,7 @@ const app = createApp({
     // 点名册卡片：已展开收起；否则拉详情（Task 2 渲染详情卡；本任务先实现数据拉取与切换）
     async function togglePerson(id) {
       if (personDetail.value && personDetail.value.person.id === id) { closePersonDetail(); return; }
+      closePersonDetail(); // 切换前清旧人物的临时态（历史抽屉/加属性草稿/编辑删除态），防跨人泄漏
       try { personDetail.value = await api('GET', '/api/persons/' + id); }
       catch (e) { showError(e); }
     }
@@ -981,8 +982,9 @@ const app = createApp({
       personDetail.value = null;
       renamingPerson.value = null;
       archivingPersonId.value = null; // 切换详情/收起时一并清归档确认态（对齐 toggleSession 折叠清 deletingSessionId）
-      // 属性手动管理临时态（Task 3）：加属性表单 / 就地改值 / 删除确认 / 历史抽屉一并清空
-      editingAttr.value = null; deletingAttrId.value = null; attrHistory.value = null; showAddAttr.value = false;
+      // 属性手动管理临时态（Task 3）：加属性表单(含草稿) / 就地改值 / 删除确认 / 历史抽屉一并清空
+      editingAttr.value = null; deletingAttrId.value = null; attrHistory.value = null;
+      showAddAttr.value = false; addAttrForm.attr_key = ''; addAttrForm.value = '';
       // Task 4 将在此追加：showAddRel 等关系相关临时态清理
     }
     async function reloadPersonDetail() {
@@ -1061,6 +1063,12 @@ const app = createApp({
         await reloadPersonDetail(); await loadPersons(); // 名册 pending 计数可能变化
       } catch (e) { showError(e); }
       finally { addingAttr.value = false; }
+    }
+    // 加属性表单开合切换：收起时一并清草稿（对齐 toggleNewPerson，防重开残留旧输入的不对称）。
+    // 底部「＋ 加属性」与表单 ✕ 均走此函数，保证「关闭 ⇒ 清草稿」在所有路径对称。
+    function toggleAddAttr() {
+      showAddAttr.value = !showAddAttr.value;
+      if (!showAddAttr.value) { addAttrForm.attr_key = ''; addAttrForm.value = ''; }
     }
     // 改值 = PATCH（后端 supersede 旧行留痕；body 必须带行自身的 attr_key，与目标行不一致会 400）
     function startEditAttr(a) { deletingAttrId.value = null; editingAttr.value = { id: a.id, attr_key: a.attr_key, value: a.value_text }; }
@@ -1394,7 +1402,7 @@ const app = createApp({
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       persons, personDetail, showNewPerson, newPerson, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
       epiText, personNameOf,
-      ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
+      ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
     };
   }
 });
