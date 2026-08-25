@@ -116,6 +116,47 @@ func TestExtractorRelationSubjectNoCollapse(t *testing.T) {
 	}
 }
 
+// TestExtractorEventNoCollapse 是 event 平面 factKey 判别的回归测试（对齐
+// TestExtractorRelationSubjectNoCollapse 的先例）：同一窗口内产出多条 self event
+// 事实——主体全是 self、attr/relation 字段全空，仅靠 event_type/title 区分。
+// 修复前去重键漏 event 字段会把所有 self event 塌缩成 1 条；修复后判别键不同，
+// 应逐条保留（对齐下游 DB：每条 event 是独立一行）。
+func TestExtractorEventNoCollapse(t *testing.T) {
+	blocks := []memory.Block{
+		{SpeakerLabel: "我", Text: "上个月去云南旅游，还参加了同学会，之前也去过西藏", SegmentIDs: []ids.ID{501}},
+	}
+	// 三条 self event，主体/时间等其余字段相同，仅 event_type/title 不同：
+	//   旅行·去云南 vs 聚会·同学会（类型+标题都不同）
+	//   旅行·去云南 vs 旅行·去西藏（同类型、不同标题——单独盯住 title 判别位）
+	resp := `{"facts":[
+		{"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去云南",
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"event","subject":{"kind":"self"},"event_type":"聚会","title":"同学会",
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去西藏",
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1}
+	]}`
+	ex := &Extractor{LLM: &fakeLLM{resps: []string{resp}}, Model: "m", Prompt: "s", Window: 10}
+	facts, err := ex.Extract(context.Background(), blocks, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 3 {
+		t.Fatalf("event 判别(event_type/title)不同不应塌缩，应 3 条: %+v", facts)
+	}
+	// 顺序保持输入序，逐条核对判别字段
+	if facts[0].EventType != "旅行" || facts[0].EventTitle != "去云南" {
+		t.Fatalf("event0 错误: %+v", facts[0])
+	}
+	if facts[1].EventType != "聚会" || facts[1].EventTitle != "同学会" {
+		t.Fatalf("event1 错误: %+v", facts[1])
+	}
+	// 同类型(旅行)不同 title 也保留——证明 title 参与判别键
+	if facts[2].EventType != "旅行" || facts[2].EventTitle != "去西藏" {
+		t.Fatalf("event2(同类型不同标题)错误: %+v", facts[2])
+	}
+}
+
 // TestExtractorInvalidBlockIndex 覆盖 factProvenance 越界兜底：block_index=0 或 >len
 // 时用整个窗口的 segment 并集回填（对照 memory 包同名用例）。
 func TestExtractorInvalidBlockIndex(t *testing.T) {

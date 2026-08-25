@@ -11,13 +11,15 @@ func TestParseFacts(t *testing.T) {
 		"\"attr_key\":\"occupation\",\"value\":\"医生\",\"confidence\":0.6,\"epistemic_type\":\"observed\",\"block_index\":2},\n" +
 		"{\"plane\":\"relationship\",\"subject\":{\"kind\":\"self\"}," +
 		"\"related\":{\"kind\":\"mentioned\",\"name\":\" Alice \"},\"relation_type\":\"配偶\"," +
-		"\"label\":\"老婆\",\"confidence\":0.85,\"block_index\":2}\n]}\n```"
+		"\"label\":\"老婆\",\"confidence\":0.85,\"block_index\":2},\n" +
+		"{\"plane\":\"event\",\"subject\":{\"kind\":\"self\"},\"event_type\":\"旅行\"," +
+		"\"title\":\" 去云南旅游 \",\"occurred_at\":\" 2026-07-20 \",\"confidence\":0.8,\"block_index\":3}\n]}\n```"
 	facts, err := ParseFacts(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(facts) != 3 {
-		t.Fatalf("应解析 3 条: %d", len(facts))
+	if len(facts) != 4 {
+		t.Fatalf("应解析 4 条: %d", len(facts))
 	}
 	f0 := facts[0]
 	if f0.Plane != "attribute" || f0.Subject.Kind != "self" || f0.AttrKey != "occupation" ||
@@ -33,6 +35,11 @@ func TestParseFacts(t *testing.T) {
 	if f2.Plane != "relationship" || f2.RelationType != "配偶" || f2.Related.Name != "Alice" || f2.Label != "老婆" {
 		t.Fatalf("fact2 错误: %+v", f2)
 	}
+	// event 平面：title/occurred_at 的前后空格应被 TrimSpace 归一化
+	f3 := facts[3]
+	if f3.Plane != "event" || f3.EventType != "旅行" || f3.EventTitle != "去云南旅游" || f3.OccurredAt != "2026-07-20" {
+		t.Fatalf("event fact3 错误（trim 应生效）: %+v", f3)
+	}
 }
 
 func TestParseFactsDropsInvalid(t *testing.T) {
@@ -45,7 +52,9 @@ func TestParseFactsDropsInvalid(t *testing.T) {
 		{"plane":"attribute","subject":{"kind":"self"},"attr_key":"gender","value":"男","confidence":0.9,"epistemic_type":"神谕"},
 		{"plane":"attribute","subject":{"kind":"self"},"attr_key":"city","value":"北京","direction":"diagonal","confidence":0.9},
 		{"plane":"relationship","subject":{"kind":"self"},"related":{},"relation_type":"配偶","confidence":0.9},
-		{"plane":"attribute","subject":{"kind":"bogus"},"attr_key":"city","value":"北京","confidence":0.9}
+		{"plane":"attribute","subject":{"kind":"bogus"},"attr_key":"city","value":"北京","confidence":0.9},
+		{"plane":"event","subject":{"kind":"self"},"event_type":"神秘事件","title":"某事","confidence":0.9},
+		{"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"","confidence":0.9}
 	]}`
 	facts, err := ParseFacts(raw)
 	if err != nil {
@@ -53,7 +62,7 @@ func TestParseFactsDropsInvalid(t *testing.T) {
 	}
 	// 除「置信度越界」那条被钳制保留外，其余全部因条目级非法被丢弃：空 key / 空值 /
 	// 非法 plane / 非法关系类型 / 非法 epistemic / 非法 direction / related.kind 空 /
-	// subject.kind 非法。共保留 1 条（confidence 钳制到 1.0）。
+	// subject.kind 非法 / 非法事件类型 / event 空标题。共保留 1 条（confidence 钳制到 1.0）。
 	if len(facts) != 1 {
 		t.Fatalf("应保留 1 条: %+v", facts)
 	}
@@ -69,5 +78,31 @@ func TestParseFactsEmpty(t *testing.T) {
 	}
 	if _, err := ParseFacts(`完全不是 JSON`); err == nil {
 		t.Fatal("非法 JSON 应报错")
+	}
+}
+
+func TestParseFactsEvent(t *testing.T) {
+	raw := `{"facts":[
+		{"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去云南旅游一周",
+		 "description":"和朋友自驾","occurred_at":"2026-07-20","end_at":"2026-07-27","location":"云南",
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"event","subject":{"kind":"self"},"event_type":"聚会","title":"同学十年聚会",
+		 "confidence":0.7,"epistemic_type":"observed","block_index":2}
+	]}`
+	facts, err := ParseFacts(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("应 2 条: %d", len(facts))
+	}
+	f0 := facts[0]
+	if f0.EventType != "旅行" || f0.EventTitle != "去云南旅游一周" || f0.OccurredAt != "2026-07-20" ||
+		f0.EndAt != "2026-07-27" || f0.EventLocation != "云南" || f0.EventDescription != "和朋友自驾" {
+		t.Fatalf("event fact0 错误: %+v", f0)
+	}
+	// occurred_at 缺省允许（事件仍创建，时间列 NULL 由 service 处理）
+	if facts[1].OccurredAt != "" {
+		t.Fatalf("occurred_at 应允许为空: %q", facts[1].OccurredAt)
 	}
 }

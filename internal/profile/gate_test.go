@@ -103,3 +103,28 @@ func TestDecideRelationship(t *testing.T) {
 		t.Fatalf("低置信应 create_pending: %v", d)
 	}
 }
+
+func TestDecideEvent(t *testing.T) {
+	cfg := GateConfig{AutoConf: 0.75}
+	f := Fact{Plane: "event", EventType: "旅行", EventTitle: "去云南旅游",
+		Subject:    Subject{Kind: "self"},
+		Confidence: 0.9, EpistemicType: "observed"}
+
+	if d := DecideEvent(f, nil, false, cfg); d != DecisionCreateActive {
+		t.Fatalf("高置信新事件应 create_active: %v", d)
+	}
+	if d := DecideEvent(f, nil, true, cfg); d != DecisionSkip {
+		t.Fatalf("dedupHit 应 skip: %v", d)
+	}
+	if d := DecideEvent(f, &repo.PersonEvent{}, false, cfg); d != DecisionReaffirm {
+		t.Fatalf("同键事件应 reaffirm: %v", d)
+	}
+	low := f
+	low.Confidence = 0.6
+	if d := DecideEvent(low, nil, false, cfg); d != DecisionCreatePending {
+		t.Fatalf("低置信应 create_pending: %v", d)
+	}
+	if d := DecideEvent(f, nil, false, GateConfig{}); d != DecisionCreateActive {
+		t.Fatalf("默认阈值 0.75，0.9 应 active: %v", d)
+	}
+}

@@ -33,6 +33,13 @@ func TestMemoryInsertAndQuery(t *testing.T) {
 	mtr := &MemoryTopicRepo{DB: db}
 
 	sid := ids.New()
+	// 跨包隔离：本用例建的 memory（active 的 m + dismissed 的 dm）都挂在 sid 上，收尾按
+	// session 删净——否则残留的 active event 行会污染 api 包 TestMemoryListAndFilter 的
+	// type=event 计数（repo→api 逆序跑才暴露；make test-integration 字母序 api 在前掩盖）。
+	// 用 t.Cleanup 提前注册，任一断言 t.Fatal 提前退出也会清理。
+	t.Cleanup(func() {
+		_, _ = mr.DB.ExecContext(context.Background(), `DELETE FROM memory WHERE session_id = ?`, sid.Int64())
+	})
 	m := newTestMemory(sid)
 	// 必须传 *Memory 指针切片，ID 才能回填到调用方的 m。
 	if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {
@@ -123,6 +130,11 @@ func TestMemoryListSince(t *testing.T) {
 
 	// 两条不同 event_at 的记忆（标题加 since 前缀隔离共享测试库的脏数据）
 	sid := ids.New()
+	// 跨包隔离：本用例建的两条 active event 记忆都挂在 sid 上，收尾按 session 删净——否则
+	// 残留会污染 api 包 TestMemoryListAndFilter 的 type=event 计数（repo→api 逆序跑才暴露）。
+	t.Cleanup(func() {
+		_, _ = mr.DB.ExecContext(context.Background(), `DELETE FROM memory WHERE session_id = ?`, sid.Int64())
+	})
 	// 预清理：共享测试库可能残留历史运行的同名行（脏库重跑），先删掉保证计数断言稳定
 	if _, err := mr.DB.ExecContext(ctx,
 		`DELETE FROM memory WHERE title IN (?, ?)`, "since 用例-早", "since 用例-晚"); err != nil {

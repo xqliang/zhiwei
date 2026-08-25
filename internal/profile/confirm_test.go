@@ -189,3 +189,74 @@ func TestManualAndConfirmFlows(t *testing.T) {
 		t.Fatal("非法 kind 应报错")
 	}
 }
+
+func TestConfirmEvent(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+	t.Cleanup(func() {
+		// 清理：owner 的 event 行 + event 审计行（防跨包污染）
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_event WHERE person_id = ?", oid.Int64())
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'", oid.Int64())
+	})
+
+	// 造一条 pending 事件（低置信 LLM 路径）
+	sess := ids.New()
+	if _, err := svc.ApplyFacts(ctx, sess, 1, []Fact{
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "里程碑", EventTitle: "确认事件测试-升职",
+			OccurredAt: "2026-01-15", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	evs, _ := svc.Events.ListPending(ctx, 1)
+	var evID ids.ID
+	for _, e := range evs {
+		if e.Title == "确认事件测试-升职" {
+			evID = e.ID
+		}
+	}
+	if evID == 0 {
+		t.Fatal("pending 事件未生成")
+	}
+
+	// 确认 → active + confirm 审计
+	if err := svc.ConfirmPending(ctx, "event", evID); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := svc.Events.Get(ctx, evID)
+	if e.Status != "active" {
+		t.Fatalf("确认后应 active: %+v", e)
+	}
+
+	// 再造一条 → 放弃 → dismissed
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "聚会", EventTitle: "确认事件测试-聚会",
+			Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	evs2, _ := svc.Events.ListPending(ctx, 1)
+	var evID2 ids.ID
+	for _, e := range evs2 {
+		if e.Title == "确认事件测试-聚会" {
+			evID2 = e.ID
+		}
+	}
+	if evID2 == 0 {
+		t.Fatal("第二条 pending 事件未生成")
+	}
+	if err := svc.DismissPending(ctx, "event", evID2); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := svc.Events.Get(ctx, evID2); d.Status != "dismissed" {
+		t.Fatalf("放弃后应 dismissed: %+v", d)
+	}
+
+	// 非 pending 再确认 → 报错；非法 kind → 报错
+	if err := svc.ConfirmPending(ctx, "event", evID); err == nil {
+		t.Fatal("非 pending 再确认应报错")
+	}
+	if err := svc.ConfirmPending(ctx, "bogus", evID); err == nil {
+		t.Fatal("非法 kind 应报错")
+	}
+}

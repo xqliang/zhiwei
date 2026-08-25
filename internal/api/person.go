@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -20,6 +21,7 @@ type PersonHandler struct {
 	Persons       *repo.PersonRepo
 	Attributes    *repo.PersonAttributeRepo
 	Relationships *repo.PersonRelationshipRepo
+	Events        *repo.PersonEventRepo
 	ChangeLogs    *repo.PersonChangeLogRepo
 	Service       *profile.Service
 }
@@ -36,6 +38,9 @@ func RegisterPerson(r chi.Router, h *PersonHandler) {
 	r.Delete("/api/persons/{id}/attributes/{aid}", h.DeleteAttribute)
 	r.Post("/api/persons/{id}/relationships", h.AddRelationship)
 	r.Delete("/api/persons/{id}/relationships/{rid}", h.DeleteRelationship)
+	r.Get("/api/persons/{id}/events", h.ListEvents)
+	r.Post("/api/persons/{id}/events", h.AddEvent)
+	r.Delete("/api/persons/{id}/events/{eid}", h.DeleteEvent)
 	r.Get("/api/persons/{id}/history", h.History)
 
 	r.Get("/api/profile/pending", h.ListPending)
@@ -51,7 +56,7 @@ var validPersonStatuses = map[string]bool{
 
 // validPendingKinds 是确认队列 kind 的合法取值（confirm/dismiss 端点白名单）。
 var validPendingKinds = map[string]bool{
-	"person": true, "attribute": true, "relationship": true,
+	"person": true, "attribute": true, "relationship": true, "event": true,
 }
 
 // ---- 名册 ----
@@ -115,6 +120,7 @@ type personDetailResp struct {
 	Person           *repo.Person              `json:"person"`
 	Groups           []attrGroup               `json:"groups"`
 	Relationships    []repo.PersonRelationship `json:"relationships"`
+	Events           []repo.PersonEvent        `json:"events"`
 	RecentSessionIDs []ids.ID                  `json:"recent_session_ids"`
 	PendingCount     int                       `json:"pending_count"`
 }
@@ -178,8 +184,25 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 			pending++
 		}
 	}
+	// 大事记（event 平面）：只展示 active+pending，时间倒序保持（ListByPerson 已按
+	// occurred_at DESC 排）；pending 事件也计入详情页的 pending 计数。
+	events, err := h.Events.ListByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	evShown := make([]repo.PersonEvent, 0, len(events))
+	for _, e := range events {
+		if e.Status != "active" && e.Status != "pending" {
+			continue
+		}
+		evShown = append(evShown, e)
+		if e.Status == "pending" {
+			pending++
+		}
+	}
 	writeJSON(w, personDetailResp{
-		Person: p, Groups: groups, Relationships: relShown,
+		Person: p, Groups: groups, Relationships: relShown, Events: evShown,
 		RecentSessionIDs: sids, PendingCount: pending,
 	})
 }
@@ -441,6 +464,98 @@ func (h *PersonHandler) DeleteRelationship(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// ---- 大事记（event 平面）----
+
+// ListEvents 人物大事记（全状态，时间倒序——repo ListByPerson 已排序）。
+// ?status=active 只看已生效（前端时间线默认态可过滤）。
+func (h *PersonHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	list, err := h.Events.ListByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if st := r.URL.Query().Get("status"); st != "" {
+		filtered := make([]repo.PersonEvent, 0, len(list))
+		for _, e := range list {
+			if e.Status == st {
+				filtered = append(filtered, e)
+			}
+		}
+		list = filtered
+	}
+	writeJSON(w, map[string]any{"events": list})
+}
+
+// AddEvent 手动加大事记（走 Service：active/manual/conf=1.0 + 审计）。
+// event_type 9 枚举校验；occurred_at/endAt 原始串由 Service 的 parseEventAt 尽力解析。
+func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
+	pid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		EventType       string `json:"event_type"`
+		Title           string `json:"title"`
+		Description     string `json:"description"`
+		OccurredAt      string `json:"occurred_at"`
+		EndAt           string `json:"end_at"`
+		Location        string `json:"location"`
+		RelatedPersonID string `json:"related_person_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	if !profile.ValidEventTypes[req.EventType] {
+		http.Error(w, "event_type 非法", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		http.Error(w, "title 必填", http.StatusBadRequest)
+		return
+	}
+	var related *ids.ID
+	if req.RelatedPersonID != "" {
+		rid, err := ids.ParseID(req.RelatedPersonID)
+		if err != nil {
+			http.Error(w, "related_person_id 非法", http.StatusBadRequest)
+			return
+		}
+		related = &rid
+	}
+	e, err := h.Service.ManualAddEvent(r.Context(), pid, req.EventType, req.Title,
+		req.Description, req.OccurredAt, req.EndAt, req.Location, related)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, e)
+}
+
+// DeleteEvent 手动删事件 → dismissed + delete 审计。
+func (h *PersonHandler) DeleteEvent(w http.ResponseWriter, r *http.Request) {
+	eid, err := ids.ParseID(chi.URLParam(r, "eid"))
+	if err != nil {
+		http.Error(w, "eid 非法", http.StatusBadRequest)
+		return
+	}
+	if err := h.Service.ManualDeleteEvent(r.Context(), eid); err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "事件不存在", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 // ---- 修改历史 ----
 
 func (h *PersonHandler) History(w http.ResponseWriter, r *http.Request) {
@@ -461,19 +576,21 @@ func (h *PersonHandler) History(w http.ResponseWriter, r *http.Request) {
 // ---- 确认队列（跨平面 pending 并集）----
 
 type pendingItem struct {
-	Kind          string  `json:"kind"` // attribute|relationship|person
-	ID            ids.ID  `json:"id"`
-	PersonID      ids.ID  `json:"person_id"`
-	PersonName    string  `json:"person_name"`
-	AttrKey       string  `json:"attr_key,omitempty"`
-	Value         string  `json:"value,omitempty"`         // attribute:建议值 / relationship:类型 / person:名字
-	CurrentValue  string  `json:"current_value,omitempty"` // 冲突时的现值（supersedes 行）
-	RelationType  string  `json:"relation_type,omitempty"`
-	Label         string  `json:"label,omitempty"`
-	Confidence    float64 `json:"confidence"`
-	EpistemicType string  `json:"epistemic_type"`
-	SessionID     *ids.ID `json:"session_id,omitempty"`
-	SupersedesID  *ids.ID `json:"supersedes_id,omitempty"`
+	Kind          string     `json:"kind"` // attribute|relationship|person|event
+	ID            ids.ID     `json:"id"`
+	PersonID      ids.ID     `json:"person_id"`
+	PersonName    string     `json:"person_name"`
+	AttrKey       string     `json:"attr_key,omitempty"`
+	Value         string     `json:"value,omitempty"`         // attribute:建议值 / relationship:类型 / person:名字
+	CurrentValue  string     `json:"current_value,omitempty"` // 冲突时的现值（supersedes 行）
+	RelationType  string     `json:"relation_type,omitempty"`
+	EventType     string     `json:"event_type,omitempty"`
+	OccurredAt    *time.Time `json:"occurred_at,omitempty"`
+	Label         string     `json:"label,omitempty"`
+	Confidence    float64    `json:"confidence"`
+	EpistemicType string     `json:"epistemic_type"`
+	SessionID     *ids.ID    `json:"session_id,omitempty"`
+	SupersedesID  *ids.ID    `json:"supersedes_id,omitempty"`
 }
 
 func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
@@ -526,6 +643,20 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	events, err := h.Events.ListPending(ctx, 1)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, e := range events {
+		items = append(items, pendingItem{
+			Kind: "event", ID: e.ID, PersonID: e.PersonID, PersonName: nameOf[e.PersonID],
+			EventType: e.EventType, Value: e.Title, OccurredAt: e.OccurredAt,
+			Confidence: e.Confidence, EpistemicType: e.EpistemicType,
+			SessionID: e.SessionID, SupersedesID: e.SupersedesID,
+		})
+	}
+
 	for _, p := range persons {
 		if p.Status == "pending" {
 			items = append(items, pendingItem{
@@ -540,7 +671,7 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
 	kind := chi.URLParam(r, "kind")
 	if !validPendingKinds[kind] {
-		http.Error(w, "kind 非法（person|attribute|relationship）", http.StatusBadRequest)
+		http.Error(w, "kind 非法（person|attribute|relationship|event）", http.StatusBadRequest)
 		return
 	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
@@ -558,7 +689,7 @@ func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
 func (h *PersonHandler) DismissPending(w http.ResponseWriter, r *http.Request) {
 	kind := chi.URLParam(r, "kind")
 	if !validPendingKinds[kind] {
-		http.Error(w, "kind 非法（person|attribute|relationship）", http.StatusBadRequest)
+		http.Error(w, "kind 非法（person|attribute|relationship|event）", http.StatusBadRequest)
 		return
 	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))

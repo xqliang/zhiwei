@@ -29,7 +29,7 @@ type PersonRef struct {
 type Extractor struct {
 	LLM    provider.LLMProvider
 	Model  string // 模型名（Tier 1 flash）
-	Prompt string // prompts/profile_extraction_v1.md 内容
+	Prompt string // prompts/profile_extraction_v2.md 内容
 	Window int    // 窗口大小（块数），<=0 时 memory.SplitWindows 内部回退默认 10
 
 	// stats 记录最近一次 Extract 的统计（每个 stage 各自 new 一个，无并发共享）。
@@ -89,19 +89,24 @@ func factProvenance(win []memory.Block, idx int) []ids.ID {
 }
 
 // factKey 批内去重自然键：平面 + 主体身份(kind/name/relation) + 内容(attr_key/value)
-// + 关系类型 + 关系对端身份(kind/name/relation)。
+// + 关系类型 + 关系对端身份(kind/name/relation) + 事件判别(event_type/title)。
 //
 // 主体与对端的 Relation 字段必须纳入：kind=relation 的指代其身份藏在 Relation 里
 // （「我老婆」→ Relation=配偶，Name 为空）。若只取 Kind+Name，「我老婆是老师」与
 // 「我妈是老师」的键都会退化成 attribute|relation||occupation|老师 而被误判为同一条、
 // 静默塌缩——这比下游 DB 自然键（含 resolveSubject 解析后的 person_id，两个不同人）
 // 更激进，去重方向反了。故补 Subject.Relation / Related.Kind / Related.Relation 三个判别字段。
+//
+// event 平面同理：主体多为 self、attr/relation 字段全空，若不纳入 event_type/title
+// 判别，「旅行·去云南」与「聚会·同学会」两条都会塌缩成 event|self||... 被误判同一条。
+// 故末尾追加 EventType/EventTitle 两个判别字段（防批内塌缩：同 key 不同事件）。
 func factKey(f Fact) string {
 	return f.Plane + "\x00" +
 		f.Subject.Kind + "\x00" + f.Subject.Name + "\x00" + f.Subject.Relation + "\x00" +
 		f.AttrKey + "\x00" + f.Value + "\x00" +
 		f.RelationType + "\x00" +
-		f.Related.Kind + "\x00" + f.Related.Name + "\x00" + f.Related.Relation
+		f.Related.Kind + "\x00" + f.Related.Name + "\x00" + f.Related.Relation + "\x00" +
+		f.EventType + "\x00" + f.EventTitle
 }
 
 // buildProfileUserMessage 组装用户消息：对话块 + 已知人物名单。
