@@ -218,7 +218,7 @@ func main() {
 	if cfg.AgentEnabled {
 		rt := agent.NewDSHRuntime(agent.RuntimeConfig{
 			CordisConfig: cfg.AgentCordisConfig,
-			Model:        cfg.AgentModel,
+			Model:        agentModel, // 解析后的模型(ZW_AGENT_MODEL 空则回退 LLMStrongModel), 与报告/抽取一致(评审 I2)
 			SessionRoot:  cfg.DSHSessionRoot,
 			SystemPrompt: cfg.DSHSystemPrompt,
 			MCPURL:       "http://127.0.0.1:" + cfg.Port + "/internal/mcp",
