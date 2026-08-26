@@ -2,12 +2,10 @@
 -- 复用现有 agent_message / daily_review；本迁移新增 4 表 + 扩展 agent_message。
 -- 注意：memory 的 session_id 可空化 + conversation_id 列留到 Plan 3（对话转记忆）再加。
 --
--- ⚠️【合并协调点：迁移号 000005 + 000006 双撞号】main 已占用 000005_speaker_name_candidate /
--- 000006_person / 000007_segment_embedding / 000008_event（现 v8）。本分支的 000005_agent 与
--- 000006_conversation_memory 与之撞号——【合并到 main 时两个都要重编号】到 v8 之后（如
--- 000005_agent→000009_agent、000006_conversation_memory→000010_conversation_memory；两者仅依赖
--- 000001 期的 memory/agent_message/daily_review，排在 v8 后安全）。golang-migrate 按数字前缀去重：
--- 不重编号会 "duplicate migration version" 中止；在已到 v8 的既有库上则会【静默跳过本迁移】→ agent 表不建。
+-- 【迁移号协调：已重编号】本迁移原为 000005_agent，与 main 的 000005_speaker_name_candidate 撞号
+-- （main 现 v8：speaker_name_candidate / person / segment_embedding / event），故已重编号为
+-- 000009_agent，排在 v8 之后（仅依赖 000001 期的 memory / agent_message / daily_review，安全）。
+-- 配套的对话转记忆迁移同步由 000006 重编号为 000010_conversation_memory。
 
 -- 会话分组：一个「问知微」对话 = 一行；映射到 dsh sessionId。
 CREATE TABLE agent_conversation (
