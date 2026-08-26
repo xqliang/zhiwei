@@ -762,8 +762,11 @@
       <div class="kv" style="margin-bottom:12px"><b>新建人物</b><button class="btn-link" @click="cancelNewPerson">✕</button></div>
       <label class="field-label">姓名 *</label>
       <input class="txt" v-model="newPerson.display_name" placeholder="如：张三" style="margin-bottom:8px">
-      <label class="field-label">关联声纹 speaker_id（可空；只被提到的人可不绑）</label>
-      <input class="txt" v-model="newPerson.speaker_id" placeholder="从声纹 tab 复制 id，可留空" style="margin-bottom:8px">
+      <label class="field-label">关联声纹（可空；只被提到的人可不绑）</label>
+      <select class="txt" v-model="newPerson.speaker_id" style="margin-bottom:8px">
+        <option value="">不关联声纹（可留空）</option>
+        <option v-for="sp in newPersonSpeakers" :key="sp.id" :value="sp.id">{{ sp.name }}（{{ sp.id }}）</option>
+      </select>
       <label class="field-label">备注</label>
       <input class="txt" v-model="newPerson.summary" placeholder="一句话备注（可空）" style="margin-bottom:8px">
       <div class="edit-actions">

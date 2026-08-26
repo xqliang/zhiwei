@@ -999,6 +999,9 @@ const app = createApp({
     const personDetail = ref(null);     // 当前详情（GET /api/persons/{id}，Task 2 用）
     const showNewPerson = ref(false);   // 新建人物表单开合
     const newPerson = ref({ display_name: '', speaker_id: '', summary: '' });
+    // 新建人物「关联声纹」下拉的数据源 + 懒加载缓存标志（详见 loadNewPersonSpeakers）。
+    const newPersonSpeakers = ref([]);          // GET /api/speakers 的说话人列表（{id,name,...}）
+    const newPersonSpeakersLoaded = ref(false); // 简单缓存：已加载则跳过重复拉取（新建表单期间名册少变化）
     const creatingPerson = ref(false);  // 防重复提交
     const renamingPerson = ref(null);   // { id, name } 详情改名（Task 2 用）
 
@@ -1008,21 +1011,43 @@ const app = createApp({
         persons.value = d.persons || [];
       } catch (e) { showError(e); }
     }
+    // 新建人物「关联声纹」下拉的数据源：GET /api/speakers（响应结构同 loadAllSpeakers，
+    // {speakers:[{id,name,...}]}）。带 newPersonSpeakersLoaded 简单缓存——已加载则跳过
+    // （新建表单期间名册极少变化，无需每次重拉）。失败走 showError 提示但不阻塞表单：
+    // 下拉此时为空，用户仍可「不关联声纹」留空提交，不影响建档主流程。
+    async function loadNewPersonSpeakers() {
+      if (newPersonSpeakersLoaded.value) return; // 已加载：跳过（简单缓存标志）
+      try {
+        const d = await api('GET', '/api/speakers');
+        newPersonSpeakers.value = d.speakers || [];
+        newPersonSpeakersLoaded.value = true;
+      } catch (e) { showError(e); } // 仅提示不阻塞：下拉空 → 只能留空，但仍可提交
+    }
     function cancelNewPerson() {
       showNewPerson.value = false;
       newPerson.value = { display_name: '', speaker_id: '', summary: '' };
       creatingPerson.value = false;
+      // 注意：不清 newPersonSpeakers/newPersonSpeakersLoaded——纯只读列表，缓存无泄漏风险，
+      // 保留可让下次打开表单即时显示下拉（免二次拉取）。
     }
     // 工具栏「＋ 新建/收起」切换：收起时走 cancelNewPerson 一并清草稿（对齐 toggleNewTopic，
     // 避免 inline `showNewPerson = !showNewPerson` 收起不重置、重开残留旧输入的不对称）。
-    function toggleNewPerson() { if (showNewPerson.value) cancelNewPerson(); else showNewPerson.value = true; }
+    // 打开时懒加载声纹下拉数据源（不 await：表单立即展开，下拉数据返回后再填充，不卡展开）。
+    function toggleNewPerson() {
+      if (showNewPerson.value) { cancelNewPerson(); return; }
+      showNewPerson.value = true;
+      loadNewPersonSpeakers();
+    }
     async function createPerson() {
       if (creatingPerson.value) return;
       const name = newPerson.value.display_name.trim();
       if (!name) { toast.value = '请输入姓名'; setTimeout(() => { toast.value = ''; }, 2000); return; }
       creatingPerson.value = true;
       try {
-        // speaker_id 可空（只被提到、没录音的人也能建档）；后端校验声纹冲突返回 409
+        // speaker_id 可空（只被提到、没录音的人也能建档）；后端校验声纹冲突返回 409。
+        // 现在 speaker_id 来自下拉 <select>（值=声纹 id 或空串「不关联」），无首尾空格，
+        // 故 .trim() 纯为兼容旧自由输入、此处无害。选到已被占用的声纹提交时，后端回 409
+        // 纯文本「该声纹已绑定人物「张三」」——经 Task 1 的 api() 纯文本透传，showError 能显示原文。
         const body = { display_name: name };
         if (newPerson.value.speaker_id.trim()) body.speaker_id = newPerson.value.speaker_id.trim();
         if (newPerson.value.summary.trim()) body.summary = newPerson.value.summary.trim();
@@ -1934,7 +1959,7 @@ const app = createApp({
       loadTodos, setTodoStatus, jumpToSession,
       editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
-      persons, personDetail, showNewPerson, newPerson, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
+      persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
       epiText, personNameOf,
       ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
