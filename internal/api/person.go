@@ -694,8 +694,10 @@ func (h *PersonHandler) DeleteMetric(w http.ResponseWriter, r *http.Request) {
 // （anchor+period）的纯时间估算，非医疗建议。随列表下发（响应体 note 字段），前端须展示。
 const cyclesDisclaimer = "周期下次时间为按历史周期估算，仅供参考，非医疗建议"
 
-// ListCycles 周期/日程列表（全状态，repo 按 cycle_type 分组、组内 id 排序）。
-// 响应体带 note 免责文案（spec §9），前端展示「下次预测」时须一并呈现。
+// ListCycles 周期/日程列表（repo 按 cycle_type 分组、组内 id 排序）。默认只展示 active+pending
+// （对齐详情 events 的过滤语义——单值语义下 superseded/dismissed 历史版本混入会干扰）；
+// ?status= 显式过滤某状态（照 ListMetrics/ListEvents 的 status 写法）。响应体带 note 免责文案
+// （spec §9），前端展示「下次预测」时须一并呈现。
 func (h *PersonHandler) ListCycles(w http.ResponseWriter, r *http.Request) {
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
@@ -706,6 +708,25 @@ func (h *PersonHandler) ListCycles(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// 默认只展示 active+pending（单值语义的历史版本 superseded/dismissed 混入会干扰）；
+	// ?status= 显式过滤（对齐 ListMetrics/ListEvents）。
+	if st := r.URL.Query().Get("status"); st != "" {
+		filtered := make([]repo.PersonCycle, 0, len(list))
+		for _, c := range list {
+			if c.Status == st {
+				filtered = append(filtered, c)
+			}
+		}
+		list = filtered
+	} else {
+		filtered := make([]repo.PersonCycle, 0, len(list))
+		for _, c := range list {
+			if c.Status == "active" || c.Status == "pending" {
+				filtered = append(filtered, c)
+			}
+		}
+		list = filtered
 	}
 	writeJSON(w, map[string]any{"cycles": list, "note": cyclesDisclaimer})
 }

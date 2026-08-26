@@ -699,4 +699,29 @@ func TestPersonCycleAPI(t *testing.T) {
 	if d, _ := svc.Cycles.Get(ctx, c.ID); d == nil || d.Status != "dismissed" {
 		t.Fatalf("删除后应 dismissed: %+v", d)
 	}
+
+	// ListCycles 默认滤历史版本：c 已 dismissed，默认列表（无 status）不应含它
+	// （json.Unmarshal 会先把 listR.Cycles 长度重置为 0 再 append，可安全复用）。
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/cycles", nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	for _, cy := range listR.Cycles {
+		if cy.ID == c.ID {
+			t.Fatalf("默认列表不应含 dismissed 周期 c(id=%s): %+v", c.ID, listR.Cycles)
+		}
+	}
+	// ?status=dismissed 显式过滤时才含（对齐 ListMetrics/ListEvents 的 status 语义）
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/cycles?status=dismissed", nil)
+	var dismissedR struct {
+		Cycles []repo.PersonCycle `json:"cycles"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &dismissedR)
+	foundDismissed := false
+	for _, cy := range dismissedR.Cycles {
+		if cy.ID == c.ID {
+			foundDismissed = true
+		}
+	}
+	if !foundDismissed {
+		t.Fatalf("?status=dismissed 应含刚删除的周期 c(id=%s): %+v", c.ID, dismissedR.Cycles)
+	}
 }

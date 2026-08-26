@@ -569,6 +569,32 @@ func TestApplyCycleFacts(t *testing.T) {
 		t.Fatalf("同参佐证不应加行，medication 应仍 1 条，实得 %d", nMed)
 	}
 
+	// 详细记录后「裸重提」：另一 session 只给 type+label（anchor/period/dosage/frequency 全空、
+	// 高置信）——缺省兼容语义下「新事实未给的参数不主张变化」，与现值任意值兼容 → Reaffirm，
+	// 不再因「anchor/period 有→无」被误判为变化而进 ConflictPending（确认疲劳边界修复；review Important）。
+	sessBare := ids.New()
+	st3b, err := svc.ApplyFacts(ctx, sessBare, 1, []Fact{
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "medication",
+			CycleLabel: "降压药", Confidence: 0.9, EpistemicType: "observed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st3b.Reaffirmed != 1 || st3b.Active != 0 || st3b.Pending != 0 || st3b.Conflicts != 0 {
+		t.Fatalf("详细记录后裸重提应 Reaffirm 不进冲突: %+v", st3b)
+	}
+	// 不加行：medication 仍只有 sess1 那条 active
+	csb, _ := svc.Cycles.ListByPerson(ctx, oid)
+	nMedBare := 0
+	for _, c := range csb {
+		if c.CycleType == "medication" {
+			nMedBare++
+		}
+	}
+	if nMedBare != 1 {
+		t.Fatalf("裸重提不应加行，medication 应仍 1 条，实得 %d", nMedBare)
+	}
+
 	// 冲突：另一 session 同 (type,label) 不同参数 → ConflictPending + supersedes 指向 active 行
 	sess2 := ids.New()
 	st3, err := svc.ApplyFacts(ctx, sess2, 1, []Fact{
@@ -639,7 +665,7 @@ func TestApplyCycleFacts(t *testing.T) {
 	if d, _ := svc.Cycles.Get(ctx, mc.ID); d == nil || d.Status != "dismissed" {
 		t.Fatalf("删除应 dismissed: %+v", d)
 	}
-	// 审计：cycle 平面条目（llm create×5 + reaffirm + user create + delete = 8）
+	// 审计：cycle 平面条目（llm create×5 + reaffirm×2〔同参重提 + 裸重提〕 + user create + delete = 9）
 	logs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "cycle", "")
 	if len(logs) < 5 {
 		t.Fatalf("cycle 审计不足: %d", len(logs))

@@ -720,30 +720,29 @@ func applyCycleParams(row *repo.PersonCycle, anchorDate string, periodDays, dura
 	}
 }
 
-// cycleParamsEqual 判断已存在 active 周期的关键参数与新事实是否一致（anchor/period/duration/
-// dosage/frequency；label 已由 FindActiveByKey 的自然键保证一致）。nil 安全逐字段比较：anchor
-// 走 parseEventAt 后 .Equal 比时刻（两侧均 UTC 午夜），period/duration/dosage/frequency 解指针
-// 与 Fact 的零值/trim 值比。供 applyCycleFact 的「同参佐证短路」用（防确认疲劳）。
+// cycleParamsEqual 判断已存在 active 周期的关键参数与新事实是否一致。
+// 缺省兼容：新事实未给的参数（空串/0）不主张变化，与现值任意值兼容——
+// 否则「详细记录后裸重提」（fact 只有 type+label）会被误判为变化而进冲突队列。
+// 仅当新事实显式给出参数且与现值不同才视为变化。
 func cycleParamsEqual(e *repo.PersonCycle, f Fact) bool {
-	// anchor：先比「有无」是否一致，再比日期
-	if (e.AnchorDate == nil) != (strings.TrimSpace(f.AnchorDate) == "") {
-		return false
-	}
-	if e.AnchorDate != nil {
-		if t, ok := parseEventAt(f.AnchorDate); !ok || !t.Equal(*e.AnchorDate) {
+	if fa := strings.TrimSpace(f.AnchorDate); fa != "" {
+		if e.AnchorDate == nil {
+			return false
+		}
+		if t, ok := parseEventAt(fa); !ok || !t.Equal(*e.AnchorDate) {
 			return false
 		}
 	}
-	if derefInt(e.PeriodDays) != f.PeriodDays {
+	if f.PeriodDays > 0 && derefInt(e.PeriodDays) != f.PeriodDays {
 		return false
 	}
-	if derefInt(e.DurationDays) != f.DurationDays {
+	if f.DurationDays > 0 && derefInt(e.DurationDays) != f.DurationDays {
 		return false
 	}
-	if derefStr(e.Dosage) != strings.TrimSpace(f.Dosage) {
+	if d := strings.TrimSpace(f.Dosage); d != "" && derefStr(e.Dosage) != d {
 		return false
 	}
-	if derefStr(e.FrequencyText) != strings.TrimSpace(f.FrequencyText) {
+	if fr := strings.TrimSpace(f.FrequencyText); fr != "" && derefStr(e.FrequencyText) != fr {
 		return false
 	}
 	return true
