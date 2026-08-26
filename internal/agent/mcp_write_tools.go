@@ -15,42 +15,43 @@ import (
 // registerWriteTools 注册全部写-提议工具（propose_*）。每个工具只读现值 + 建一条 pending
 // agent_proposal（{old,new} 载荷），绝不直接改领域行；用户经 /api/agent/proposals/{id}/confirm
 // 确认后才在单事务落库（见 proposals.go）。这是提示注入的根防线（spec §8）：对话/转写里的
-// 「把 X 改成 Y」最多生成一个待确认提议，永远要人点确认。全部限 user_id=1。
-func registerWriteTools(s *mcp.Server, d MCPDeps) {
+// 「把 X 改成 Y」最多生成一个待确认提议，永远要人点确认。userID 由 NewMCPServer 注入、透传给各
+// handler 工厂，决定读/写「谁」的领域行（2B-A 起替代写死的 toolUserID；当前装配仍传 1）。
+func registerWriteTools(s *mcp.Server, d MCPDeps, userID int64) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_memory_edit",
 		Description: "提议修改一条记忆的标题/内容（不立即生效，返回待确认提议；用户确认后才落库）。至少给 new_title 或 new_content 之一。",
-	}, proposeMemoryEditHandler(d))
+	}, proposeMemoryEditHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_memory_dismiss",
 		Description: "提议忽略(dismiss)一条记忆（不立即生效，返回待确认提议）。",
-	}, proposeMemoryDismissHandler(d))
+	}, proposeMemoryDismissHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_topic_rename",
 		Description: "提议给话题改名（不立即生效，返回待确认提议）。",
-	}, proposeTopicRenameHandler(d))
+	}, proposeTopicRenameHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_topic_confirm",
 		Description: "提议把建议话题确认为正式话题(status=active)（不立即生效，返回待确认提议）。",
-	}, proposeTopicStatusHandler(d, "topic_confirm", "active"))
+	}, proposeTopicStatusHandler(d, userID, "topic_confirm", "active"))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_topic_dismiss",
 		Description: "提议忽略(dismiss)一个话题（不立即生效，返回待确认提议）。",
-	}, proposeTopicStatusHandler(d, "topic_dismiss", "dismissed"))
+	}, proposeTopicStatusHandler(d, userID, "topic_dismiss", "dismissed"))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_todo_create",
 		Description: "提议新建一条待办（不立即生效，返回待确认提议；用户确认后才入库为 confirmed）。",
-	}, proposeTodoCreateHandler(d))
+	}, proposeTodoCreateHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_todo_status",
 		Description: "提议改变一条待办的状态(confirmed|done|dismissed)（不立即生效，返回待确认提议）。",
-	}, proposeTodoStatusHandler(d))
+	}, proposeTodoStatusHandler(d, userID))
 }
 
 // proposeResult 把落库的 pending 提议序列化返回，供前端渲染确认卡（old/new 并排 + 确认/放弃）。
@@ -66,13 +67,13 @@ type proposeMemoryEditArgs struct {
 	Rationale  string `json:"rationale,omitempty" jsonschema:"给用户看的修改理由"`
 }
 
-func proposeMemoryEditHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeMemoryEditArgs) (*mcp.CallToolResult, any, error) {
+func proposeMemoryEditHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeMemoryEditArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeMemoryEditArgs) (*mcp.CallToolResult, any, error) {
 		id, err := ids.ParseID(a.MemoryID)
 		if err != nil {
 			return nil, nil, err
 		}
-		m, err := d.Memory.Get(ctx, toolUserID, id)
+		m, err := d.Memory.Get(ctx, userID, id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -104,13 +105,13 @@ type proposeMemoryDismissArgs struct {
 	Rationale string `json:"rationale,omitempty" jsonschema:"忽略理由"`
 }
 
-func proposeMemoryDismissHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeMemoryDismissArgs) (*mcp.CallToolResult, any, error) {
+func proposeMemoryDismissHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeMemoryDismissArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeMemoryDismissArgs) (*mcp.CallToolResult, any, error) {
 		id, err := ids.ParseID(a.MemoryID)
 		if err != nil {
 			return nil, nil, err
 		}
-		m, err := d.Memory.Get(ctx, toolUserID, id)
+		m, err := d.Memory.Get(ctx, userID, id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -132,7 +133,7 @@ type proposeTopicRenameArgs struct {
 	Rationale string `json:"rationale,omitempty" jsonschema:"改名理由"`
 }
 
-func proposeTopicRenameHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeTopicRenameArgs) (*mcp.CallToolResult, any, error) {
+func proposeTopicRenameHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeTopicRenameArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeTopicRenameArgs) (*mcp.CallToolResult, any, error) {
 		if a.NewName == "" {
 			return nil, nil, fmt.Errorf("propose_topic_rename 需给出 new_name")
@@ -141,7 +142,7 @@ func proposeTopicRenameHandler(d MCPDeps) func(context.Context, *mcp.CallToolReq
 		if err != nil {
 			return nil, nil, err
 		}
-		t, err := d.Topic.Get(ctx, toolUserID, id)
+		t, err := d.Topic.Get(ctx, userID, id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -162,13 +163,13 @@ type proposeTopicStatusArgs struct {
 	Rationale string `json:"rationale,omitempty" jsonschema:"理由"`
 }
 
-func proposeTopicStatusHandler(d MCPDeps, kind, newStatus string) func(context.Context, *mcp.CallToolRequest, proposeTopicStatusArgs) (*mcp.CallToolResult, any, error) {
+func proposeTopicStatusHandler(d MCPDeps, userID int64, kind, newStatus string) func(context.Context, *mcp.CallToolRequest, proposeTopicStatusArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeTopicStatusArgs) (*mcp.CallToolResult, any, error) {
 		id, err := ids.ParseID(a.TopicID)
 		if err != nil {
 			return nil, nil, err
 		}
-		t, err := d.Topic.Get(ctx, toolUserID, id)
+		t, err := d.Topic.Get(ctx, userID, id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -191,7 +192,9 @@ type proposeTodoCreateArgs struct {
 	Rationale string `json:"rationale,omitempty" jsonschema:"新建理由"`
 }
 
-func proposeTodoCreateHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeTodoCreateArgs) (*mcp.CallToolResult, any, error) {
+// proposeTodoCreateHandler：新建类无 target 行、也不读任何用户域数据，故第二参 userID 未用
+// （取 _ 保持与其它工厂签名一致，便于 registerWriteTools 统一透传）。归属 owner 在 confirm 侧落库。
+func proposeTodoCreateHandler(d MCPDeps, _ int64) func(context.Context, *mcp.CallToolRequest, proposeTodoCreateArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeTodoCreateArgs) (*mcp.CallToolResult, any, error) {
 		if a.Title == "" {
 			return nil, nil, fmt.Errorf("propose_todo_create 需给出 title")
@@ -224,7 +227,7 @@ type proposeTodoStatusArgs struct {
 	Rationale string `json:"rationale,omitempty" jsonschema:"理由"`
 }
 
-func proposeTodoStatusHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeTodoStatusArgs) (*mcp.CallToolResult, any, error) {
+func proposeTodoStatusHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeTodoStatusArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeTodoStatusArgs) (*mcp.CallToolResult, any, error) {
 		switch a.NewStatus {
 		case "confirmed", "done", "dismissed":
@@ -235,7 +238,7 @@ func proposeTodoStatusHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequ
 		if err != nil {
 			return nil, nil, err
 		}
-		td, err := d.Todo.Get(ctx, toolUserID, id)
+		td, err := d.Todo.Get(ctx, userID, id)
 		if err != nil {
 			return nil, nil, err
 		}

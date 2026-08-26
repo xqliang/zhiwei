@@ -10,7 +10,12 @@ type FakeRuntime struct {
 	LastSessionID string
 	LastText      string
 	Err           error // 非 nil 时 Prompt 返回该错误
-	calls         int
+	// Cfg 记录构造本运行时的配置（RuntimePool 的 makeRT 注入）；pool_test 据此断言每用户
+	// MCPURL/SessionRoot 的派生。普通编排测试用 &FakeRuntime{...} 直接构造，Cfg 留零值即可。
+	Cfg RuntimeConfig
+	// Closed 记录 Close 被调用的次数；pool_test 的 LRU 回收断言用（被淘汰运行时应恰 Close 一次）。
+	Closed int
+	calls  int
 }
 
 func (f *FakeRuntime) Prompt(_ context.Context, sessionID, text string) (<-chan Event, error) {
@@ -33,4 +38,4 @@ func (f *FakeRuntime) Prompt(_ context.Context, sessionID, text string) (<-chan 
 	return ch, nil
 }
 
-func (f *FakeRuntime) Close() error { return nil }
+func (f *FakeRuntime) Close() error { f.Closed++; return nil }

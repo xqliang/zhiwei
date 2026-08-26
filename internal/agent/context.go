@@ -35,16 +35,17 @@ var headPriorityKeys = []string{"occupation", "industry", "city", "education", "
 
 // Head 组装对话上下文头（owner 概要 + 关键 active 属性 + 当天日期）。
 //
+// userID 指定「谁」的画像（2B-B：由 runTurn 传 conv.UserID，多用户隔离，绝不串用别人的 owner）。
 // 无 owner（未 bootstrap）/ 读库失败 / 既无 summary 也无任何 active 属性 → 返回 ""；
 // 调用方据此不加前缀（退化为原行为，绝不阻断对话）。
 //
 // now 由调用方传入（runTurn 传 time.Now()）：一是服务端本就可用系统时间，二是便于单测注入
 // 固定日期做断言。
-func (pc *ProfileContext) Head(ctx context.Context, now time.Time) string {
+func (pc *ProfileContext) Head(ctx context.Context, userID int64, now time.Time) string {
 	if pc == nil || pc.Persons == nil {
 		return ""
 	}
-	owner, err := pc.Persons.GetOwner(ctx, toolUserID)
+	owner, err := pc.Persons.GetOwner(ctx, userID)
 	if err != nil || owner == nil {
 		return "" // owner 未建立或读失败：不注入（降级，不因画像问题影响对话）
 	}
@@ -72,11 +73,12 @@ func (pc *ProfileContext) Head(ctx context.Context, now time.Time) string {
 
 // Seeds 按本轮 query 召回 top-k 相关记忆，拼成上下文头的「相关记忆」块；
 // 无 Retrieve / query 空 / 无命中 → ""。每轮一次 query 向量化（未配 embedder 时 Retrieve=nil 不触发）。
-func (pc *ProfileContext) Seeds(ctx context.Context, query string) string {
+// userID 指定「谁」的记忆（2B-B：由 runTurn 传 conv.UserID，多用户隔离，绝不召回别人的记忆）。
+func (pc *ProfileContext) Seeds(ctx context.Context, userID int64, query string) string {
 	if pc == nil || pc.Retrieve == nil || strings.TrimSpace(query) == "" {
 		return ""
 	}
-	ms, err := pc.Retrieve.Search(ctx, toolUserID, query, "", 0) // limit=0 → Retriever.TopK
+	ms, err := pc.Retrieve.Search(ctx, userID, query, "", 0) // limit=0 → Retriever.TopK
 	if err != nil || len(ms) == 0 {
 		return ""
 	}

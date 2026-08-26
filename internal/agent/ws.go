@@ -54,12 +54,19 @@ func (c *wsConn) writeJSON(v any) error {
 // 写失败被吞掉并记录，但 runTurn 仍会把 runtime 事件 channel drain 到关闭（满足单 readLoop
 // 契约）后才返回——绝不因断连提前 return 而拖死 runtime。
 func (h *AgentHandler) handleWS(w http.ResponseWriter, r *http.Request) {
+	uid, ok := reqUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	cid, err := ids.ParseID(chi.URLParam(r, "cid"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cid"})
 		return
 	}
-	conv, err := h.Conversations.Get(r.Context(), toolUserID, cid)
+	// Upgrade 前按当前登录用户取会话（2B-B：越权访问他人会话直接 404；conv.UserID 供 orchestrator
+	// 路由到该用户的 dsh 运行时，每轮闭包捕获 conv 即可，无需再单独捕获 uid）。
+	conv, err := h.Conversations.Get(r.Context(), uid, cid)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
 		return

@@ -9,8 +9,20 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/auth"
+	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
+
+// injectUser 是测试中间件：模拟生产 authGate 往请求 ctx 注入已鉴权 userID（2B-B 起 agent
+// 端点从 ctx 取 auth.UserID；不注入会 401）。同包内 ws_test 也复用它。
+func injectUser(uid int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(auth.WithUserID(r.Context(), ids.ID(uid))))
+		})
+	}
+}
 
 func TestPostMessageEndToEndFake(t *testing.T) {
 	db, err := repo.NewDB(orchDSN(t))
@@ -29,8 +41,9 @@ func TestPostMessageEndToEndFake(t *testing.T) {
 		{"type": "text", "text": "答复内容"},
 	}}})
 	fake := &FakeRuntime{Script: [][]Event{{{Type: EvAssistantMessage, Data: msgData}}}}
-	h := &AgentHandler{Orch: NewOrchestrator(fake, convRepo, msgRepo), Conversations: convRepo, Messages: msgRepo}
+	h := &AgentHandler{Orch: NewOrchestrator(rtFor(fake), convRepo, msgRepo), Conversations: convRepo, Messages: msgRepo}
 	r := chi.NewRouter()
+	r.Use(injectUser(1)) // 模拟 authGate 注入 uid=1
 	RegisterAgent(r, h)
 
 	req := httptest.NewRequest("POST", "/api/agent/conversations/"+conv.ID.String()+"/messages",
@@ -58,8 +71,9 @@ func TestCreateConversationBackfill(t *testing.T) {
 	}
 	convRepo := &repo.AgentConversationRepo{DB: db}
 	msgRepo := &repo.AgentMessageRepo{DB: db}
-	h := &AgentHandler{Orch: NewOrchestrator(&FakeRuntime{}, convRepo, msgRepo), Conversations: convRepo, Messages: msgRepo}
+	h := &AgentHandler{Orch: NewOrchestrator(rtFor(&FakeRuntime{}), convRepo, msgRepo), Conversations: convRepo, Messages: msgRepo}
 	r := chi.NewRouter()
+	r.Use(injectUser(1)) // 模拟 authGate 注入 uid=1
 	RegisterAgent(r, h)
 
 	req := httptest.NewRequest("POST", "/api/agent/conversations", strings.NewReader(`{"title":"新对话"}`))

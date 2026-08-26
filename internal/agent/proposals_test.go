@@ -85,9 +85,11 @@ func ensureOwner(t *testing.T, persons *repo.PersonRepo) *repo.Person {
 }
 
 // postProposal 经真 HTTP 路由 confirm/dismiss 一条提议, 返回状态码与响应体解析出的提议。
+// 注入 uid=1（模拟 authGate；测试里的提议默认归 user 1），使 2B-B 的鉴权 + IDOR 归属校验放行。
 func postProposal(t *testing.T, pd ProposalDeps, id ids.ID, action string) (int, repo.AgentProposal) {
 	t.Helper()
 	r := chi.NewRouter()
+	r.Use(injectUser(1))
 	RegisterProposals(r, pd)
 	req := httptest.NewRequest("POST", "/api/agent/proposals/"+id.String()+"/"+action, nil)
 	rec := httptest.NewRecorder()
@@ -114,6 +116,37 @@ func cleanupProposal(t *testing.T, pd ProposalDeps, id ids.ID) {
 	t.Cleanup(func() { _, _ = pd.DB.Exec("DELETE FROM agent_proposal WHERE id = ?", id.Int64()) })
 }
 
+// TestProposalIDORCrossUser 锁定 2B-B 的 IDOR 归属校验：某用户不能 confirm/dismiss 他人的提议。
+// 造一条归 user 2 的提议，以 user 1（postProposal 注入的身份）confirm/dismiss → 均 404，
+// 且提议仍 pending（越权尝试绝不改其状态、绝不经 applyInTx 落库到他人数据）。
+func TestProposalIDORCrossUser(t *testing.T) {
+	_, pd := p2dDeps(t)
+	ctx := t.Context()
+
+	// 归 user 2 的提议（直接建行，UserID=2 显式，Create 尊重非 0 值）。
+	p := &repo.AgentProposal{UserID: 2, Kind: "todo_create", TargetKind: "todo", Rationale: "他人的提议IDOR"}
+	if err := pd.Proposals.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	cleanupProposal(t, pd, p.ID)
+
+	// user 1 尝试 confirm / dismiss → 均按「不存在」404（不泄露存在性）。
+	if code, _ := postProposal(t, pd, p.ID, "confirm"); code != http.StatusNotFound {
+		t.Errorf("跨用户 confirm 应 404, got %d", code)
+	}
+	if code, _ := postProposal(t, pd, p.ID, "dismiss"); code != http.StatusNotFound {
+		t.Errorf("跨用户 dismiss 应 404, got %d", code)
+	}
+	// 越权尝试后，提议必须仍是 pending（未被处理）。
+	got, err := pd.Proposals.Get(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "pending" {
+		t.Errorf("越权尝试后提议应仍 pending, got %q", got.Status)
+	}
+}
+
 // TestProposeMemoryEditNoMutation 锁定 §8 根防线：propose_* 只建 pending 提议, 绝不改领域行。
 func TestProposeMemoryEditNoMutation(t *testing.T) {
 	md, pd := p2dDeps(t)
@@ -124,7 +157,7 @@ func TestProposeMemoryEditNoMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, _, err := proposeMemoryEditHandler(md)(ctx, nil, proposeMemoryEditArgs{
+	res, _, err := proposeMemoryEditHandler(md, toolUserID)(ctx, nil, proposeMemoryEditArgs{
 		MemoryID: m.ID.String(), NewTitle: "新标题NM", Rationale: "更清晰",
 	})
 	if err != nil {
@@ -155,7 +188,7 @@ func TestConfirmMemoryUpdateApplyOnce(t *testing.T) {
 	m := seedMemory(t, md.Memory, "旧标题AO", "旧内容AO")
 	before, _ := md.Memory.Get(ctx, 1, m.ID)
 
-	res, _, err := proposeMemoryEditHandler(md)(ctx, nil, proposeMemoryEditArgs{
+	res, _, err := proposeMemoryEditHandler(md, toolUserID)(ctx, nil, proposeMemoryEditArgs{
 		MemoryID: m.ID.String(), NewTitle: "新标题AO", NewContent: "新内容AO",
 	})
 	if err != nil {
@@ -198,7 +231,7 @@ func TestDismissProposal(t *testing.T) {
 	ctx := t.Context()
 	m := seedMemory(t, md.Memory, "放弃标题DZ", "放弃内容DZ")
 
-	res, _, err := proposeMemoryEditHandler(md)(ctx, nil, proposeMemoryEditArgs{MemoryID: m.ID.String(), NewTitle: "不该生效DZ"})
+	res, _, err := proposeMemoryEditHandler(md, toolUserID)(ctx, nil, proposeMemoryEditArgs{MemoryID: m.ID.String(), NewTitle: "不该生效DZ"})
 	if err != nil {
 		t.Fatalf("propose: %v", err)
 	}
@@ -221,7 +254,7 @@ func TestConfirmTodoCreate(t *testing.T) {
 	md, pd := p2dDeps(t)
 	ctx := t.Context()
 
-	res, _, err := proposeTodoCreateHandler(md)(ctx, nil, proposeTodoCreateArgs{
+	res, _, err := proposeTodoCreateHandler(md, toolUserID)(ctx, nil, proposeTodoCreateArgs{
 		Title: "P2D新待办TC", Rationale: "用户要求",
 	})
 	if err != nil {
@@ -259,7 +292,7 @@ func TestConfirmTodoStatusIllegalTransition(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = pd.DB.Exec("DELETE FROM todo WHERE id = ?", td.ID.Int64()) })
 
-	res, _, err := proposeTodoStatusHandler(md)(ctx, nil, proposeTodoStatusArgs{
+	res, _, err := proposeTodoStatusHandler(md, toolUserID)(ctx, nil, proposeTodoStatusArgs{
 		TodoID: td.ID.String(), NewStatus: "confirmed",
 	})
 	if err != nil {
@@ -327,7 +360,7 @@ func TestGetProfileAndPerson(t *testing.T) {
 	t.Cleanup(func() { _, _ = md.PersonEvents.DB.Exec("DELETE FROM person_event WHERE id = ?", ev.ID.Int64()) })
 
 	// get_profile：含 owner + seed 的属性/事件
-	res, _, err := getProfileHandler(md)(ctx, nil, getProfileArgs{})
+	res, _, err := getProfileHandler(md, toolUserID)(ctx, nil, getProfileArgs{})
 	if err != nil {
 		t.Fatalf("get_profile: %v", err)
 	}
@@ -360,7 +393,7 @@ func TestGetProfileAndPerson(t *testing.T) {
 		_, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_attribute WHERE id = ?", pattr.ID.Int64())
 	})
 
-	res2, _, err := getPersonHandler(md)(ctx, nil, getPersonArgs{Name: "画像测试人物GP"})
+	res2, _, err := getPersonHandler(md, toolUserID)(ctx, nil, getPersonArgs{Name: "画像测试人物GP"})
 	if err != nil {
 		t.Fatalf("get_person 命中: %v", err)
 	}
@@ -373,7 +406,7 @@ func TestGetProfileAndPerson(t *testing.T) {
 	}
 
 	// get_person 不命中 → {found:false}
-	res3, _, err := getPersonHandler(md)(ctx, nil, getPersonArgs{Name: "查无此人ZZZ"})
+	res3, _, err := getPersonHandler(md, toolUserID)(ctx, nil, getPersonArgs{Name: "查无此人ZZZ"})
 	if err != nil {
 		t.Fatalf("get_person 不命中: %v", err)
 	}
@@ -403,7 +436,7 @@ func TestProposeProfileAttrNoMutation(t *testing.T) {
 		_, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_attribute WHERE person_id = ? AND attr_key = ?", owner.ID.Int64(), key)
 	})
 
-	res, _, err := proposeProfileAttrHandler(md)(ctx, nil, proposeProfileAttrArgs{
+	res, _, err := proposeProfileAttrHandler(md, toolUserID)(ctx, nil, proposeProfileAttrArgs{
 		AttrKey: key, Value: "华为NM", Rationale: "换手机了",
 	})
 	if err != nil {
@@ -430,19 +463,19 @@ func TestProposeProfileAttrNoMutation(t *testing.T) {
 	}
 
 	// 非法 attr_key → tool-error
-	if _, _, e := proposeProfileAttrHandler(md)(ctx, nil, proposeProfileAttrArgs{AttrKey: "不存在的键xx", Value: "x"}); e == nil {
+	if _, _, e := proposeProfileAttrHandler(md, toolUserID)(ctx, nil, proposeProfileAttrArgs{AttrKey: "不存在的键xx", Value: "x"}); e == nil {
 		t.Error("非法 attr_key 应报 tool-error")
 	}
 	// 空 value → tool-error
-	if _, _, e := proposeProfileAttrHandler(md)(ctx, nil, proposeProfileAttrArgs{AttrKey: key, Value: "   "}); e == nil {
+	if _, _, e := proposeProfileAttrHandler(md, toolUserID)(ctx, nil, proposeProfileAttrArgs{AttrKey: key, Value: "   "}); e == nil {
 		t.Error("空 value 应报 tool-error")
 	}
 	// 非法 event_type → tool-error
-	if _, _, e := proposeProfileEventHandler(md)(ctx, nil, proposeProfileEventArgs{EventType: "不存在类型", Title: "x"}); e == nil {
+	if _, _, e := proposeProfileEventHandler(md, toolUserID)(ctx, nil, proposeProfileEventArgs{EventType: "不存在类型", Title: "x"}); e == nil {
 		t.Error("非法 event_type 应报 tool-error")
 	}
 	// 空 title → tool-error
-	if _, _, e := proposeProfileEventHandler(md)(ctx, nil, proposeProfileEventArgs{EventType: "里程碑", Title: "  "}); e == nil {
+	if _, _, e := proposeProfileEventHandler(md, toolUserID)(ctx, nil, proposeProfileEventArgs{EventType: "里程碑", Title: "  "}); e == nil {
 		t.Error("空 title 应报 tool-error")
 	}
 }
@@ -461,7 +494,7 @@ func TestConfirmProfileAttrApplyOnce(t *testing.T) {
 		_, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_change_log WHERE person_id = ? AND attr_key = ?", owner.ID.Int64(), key)
 	})
 
-	res, _, err := proposeProfileAttrHandler(md)(ctx, nil, proposeProfileAttrArgs{AttrKey: key, Value: "特斯拉AO"})
+	res, _, err := proposeProfileAttrHandler(md, toolUserID)(ctx, nil, proposeProfileAttrArgs{AttrKey: key, Value: "特斯拉AO"})
 	if err != nil {
 		t.Fatalf("propose: %v", err)
 	}
@@ -510,7 +543,7 @@ func TestConfirmProfileEvent(t *testing.T) {
 		_, _ = md.PersonEvents.DB.Exec("DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'", owner.ID.Int64())
 	})
 
-	res, _, err := proposeProfileEventHandler(md)(ctx, nil, proposeProfileEventArgs{
+	res, _, err := proposeProfileEventHandler(md, toolUserID)(ctx, nil, proposeProfileEventArgs{
 		EventType: "旅行", Title: title, OccurredAt: "2026-05-01", Rationale: "去了趟三亚",
 	})
 	if err != nil {
@@ -593,7 +626,7 @@ func TestProposeProfileRelationshipNoMutation(t *testing.T) {
 		t.Fatalf("前置：关联人不应已存在: %+v", before)
 	}
 
-	res, _, err := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+	res, _, err := proposeProfileRelationshipHandler(md, toolUserID)(ctx, nil, proposeProfileRelationshipArgs{
 		RelationType: "朋友", RelatedPersonName: relatedName, Label: label, Rationale: "老朋友",
 	})
 	if err != nil {
@@ -616,19 +649,19 @@ func TestProposeProfileRelationshipNoMutation(t *testing.T) {
 	}
 
 	// 非法 relation_type → tool-error
-	if _, _, e := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+	if _, _, e := proposeProfileRelationshipHandler(md, toolUserID)(ctx, nil, proposeProfileRelationshipArgs{
 		RelationType: "不存在的关系", RelatedPersonName: relatedName,
 	}); e == nil {
 		t.Error("非法 relation_type 应报 tool-error")
 	}
 	// related_person_name 与 org_name 皆空 → tool-error
-	if _, _, e := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+	if _, _, e := proposeProfileRelationshipHandler(md, toolUserID)(ctx, nil, proposeProfileRelationshipArgs{
 		RelationType: "朋友",
 	}); e == nil {
 		t.Error("两名皆空应报 tool-error")
 	}
 	// 非法 direction → tool-error
-	if _, _, e := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+	if _, _, e := proposeProfileRelationshipHandler(md, toolUserID)(ctx, nil, proposeProfileRelationshipArgs{
 		RelationType: "同事", RelatedPersonName: relatedName, Direction: "sideways",
 	}); e == nil {
 		t.Error("非法 direction 应报 tool-error")
@@ -651,7 +684,7 @@ func TestConfirmProfileRelationshipResolveExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, _, err := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+	res, _, err := proposeProfileRelationshipHandler(md, toolUserID)(ctx, nil, proposeProfileRelationshipArgs{
 		RelationType: "同事", RelatedPersonName: relatedName, Direction: "peer", Label: label,
 	})
 	if err != nil {
@@ -697,7 +730,7 @@ func TestConfirmProfileRelationshipResolveCreate(t *testing.T) {
 		t.Fatalf("前置：关联人不应已存在: %+v", before)
 	}
 
-	res, _, err := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+	res, _, err := proposeProfileRelationshipHandler(md, toolUserID)(ctx, nil, proposeProfileRelationshipArgs{
 		RelationType: "朋友", RelatedPersonName: relatedName, Label: label, Rationale: "新朋友",
 	})
 	if err != nil {
@@ -749,7 +782,7 @@ func TestConfirmProfileRelationshipOrgOnly(t *testing.T) {
 	const label = "关系组织标签RO"
 	cleanupRel(t, pd, label, "") // 组织关系不涉及新建人物
 
-	res, _, err := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+	res, _, err := proposeProfileRelationshipHandler(md, toolUserID)(ctx, nil, proposeProfileRelationshipArgs{
 		RelationType: "组织", OrgName: orgName, Direction: "upstream", Label: label,
 	})
 	if err != nil {
@@ -803,7 +836,7 @@ func TestProposeProfileMetricNoMutation(t *testing.T) {
 	before := countActiveMetrics(t, pd, owner.ID, "weight") // 基线（差值法，免受共享库既有测点串扰）
 
 	vn := 70.0
-	res, _, err := proposeProfileMetricHandler(md)(ctx, nil, proposeProfileMetricArgs{
+	res, _, err := proposeProfileMetricHandler(md, toolUserID)(ctx, nil, proposeProfileMetricArgs{
 		MetricKey: "weight", ValueNum: &vn, Unit: "kg", Rationale: "量了体重",
 	})
 	if err != nil {
@@ -823,15 +856,15 @@ func TestProposeProfileMetricNoMutation(t *testing.T) {
 	}
 
 	// 非法 metric_key → tool-error
-	if _, _, e := proposeProfileMetricHandler(md)(ctx, nil, proposeProfileMetricArgs{MetricKey: "不存在指标xx", ValueNum: &vn}); e == nil {
+	if _, _, e := proposeProfileMetricHandler(md, toolUserID)(ctx, nil, proposeProfileMetricArgs{MetricKey: "不存在指标xx", ValueNum: &vn}); e == nil {
 		t.Error("非法 metric_key 应报 tool-error")
 	}
 	// 数值型指标(weight)缺 value_num → tool-error
-	if _, _, e := proposeProfileMetricHandler(md)(ctx, nil, proposeProfileMetricArgs{MetricKey: "weight"}); e == nil {
+	if _, _, e := proposeProfileMetricHandler(md, toolUserID)(ctx, nil, proposeProfileMetricArgs{MetricKey: "weight"}); e == nil {
 		t.Error("数值指标缺 value_num 应报 tool-error")
 	}
 	// 类别型指标(diet)缺 value_text → tool-error
-	if _, _, e := proposeProfileMetricHandler(md)(ctx, nil, proposeProfileMetricArgs{MetricKey: "diet"}); e == nil {
+	if _, _, e := proposeProfileMetricHandler(md, toolUserID)(ctx, nil, proposeProfileMetricArgs{MetricKey: "diet"}); e == nil {
 		t.Error("类别指标缺 value_text 应报 tool-error")
 	}
 }
@@ -847,7 +880,7 @@ func TestConfirmProfileMetricApplyOnce(t *testing.T) {
 	before := countActiveMetrics(t, pd, owner.ID, "weight")
 
 	vn := 70.0
-	res, _, err := proposeProfileMetricHandler(md)(ctx, nil, proposeProfileMetricArgs{
+	res, _, err := proposeProfileMetricHandler(md, toolUserID)(ctx, nil, proposeProfileMetricArgs{
 		MetricKey: "weight", ValueNum: &vn, Unit: "kg", MeasuredAt: "2026-06-15", Rationale: "体检",
 	})
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 
+	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/profile"
 	"zhiwei/internal/repo"
@@ -41,7 +42,12 @@ func RegisterProposals(r chi.Router, d ProposalDeps) {
 }
 
 func (d ProposalDeps) listProposals(w http.ResponseWriter, r *http.Request) {
-	rows, err := d.Proposals.ListPending(r.Context(), toolUserID)
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	rows, err := d.Proposals.ListPending(r.Context(), uid.Int64())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -52,6 +58,11 @@ func (d ProposalDeps) listProposals(w http.ResponseWriter, r *http.Request) {
 // confirmProposal 在单事务内落库并把提议置 applied（apply-once, spec §8）：
 // 领域写 + Resolve 同事务；Resolve 返回 false（并发/重复确认的输方）则回滚领域写。
 func (d ProposalDeps) confirmProposal(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
@@ -59,6 +70,12 @@ func (d ProposalDeps) confirmProposal(w http.ResponseWriter, r *http.Request) {
 	}
 	p, err := d.Proposals.Get(r.Context(), id)
 	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "proposal not found"})
+		return
+	}
+	// IDOR 归属校验（2B-B）：Proposals.Get 不带 user 过滤，须在此比对提议归属；不匹配按「不存在」
+	// 返回 404（不泄露「存在但非你的」）。防止 A 确认/查看 B 的提议、进而经 applyInTx 改 B 的数据。
+	if p.UserID != uid.Int64() {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "proposal not found"})
 		return
 	}
@@ -99,6 +116,11 @@ func (d ProposalDeps) confirmProposal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d ProposalDeps) dismissProposal(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
@@ -106,6 +128,11 @@ func (d ProposalDeps) dismissProposal(w http.ResponseWriter, r *http.Request) {
 	}
 	p, err := d.Proposals.Get(r.Context(), id)
 	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "proposal not found"})
+		return
+	}
+	// IDOR 归属校验（2B-B，同 confirm）：不匹配按「不存在」返回 404，杜绝跨用户放弃他人提议。
+	if p.UserID != uid.Int64() {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "proposal not found"})
 		return
 	}
@@ -117,12 +144,12 @@ func (d ProposalDeps) dismissProposal(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "提议已被处理"})
 		return
 	}
-	ok, err := d.Proposals.Resolve(r.Context(), d.DB, id, "dismissed", nil)
+	resolved, err := d.Proposals.Resolve(r.Context(), d.DB, id, "dismissed", nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if !ok { // 并发 confirm 抢先(pending 检查与 Resolve 之间)：状态码与 body 一致→409
+	if !resolved { // 并发 confirm 抢先(pending 检查与 Resolve 之间)：状态码与 body 一致→409
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "提议已被处理"})
 		return
 	}
@@ -283,7 +310,7 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if !isKnownAttrKey(attrKey) { // 双保险：confirm 端也校验 catalog(propose 已校，但防未来别的提议源不 gate 就静默写入非法键)
 			return nil, fmt.Errorf("profile_attr 非法属性键: %s", attrKey)
 		}
-		row, err := d.Profile.ManualAddAttributeExt(ctx, tx, toolUserID, *p.TargetID, attrKey, value)
+		row, err := d.Profile.ManualAddAttributeExt(ctx, tx, p.UserID, *p.TargetID, attrKey, value)
 		if err != nil {
 			return nil, err
 		}
@@ -297,7 +324,7 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		eventType := newStr("event_type")
 		title := newStr("title")
 		occurredAt := newStr("occurred_at")
-		row, err := d.Profile.ManualAddEventExt(ctx, tx, toolUserID, *p.TargetID, eventType, title, "", occurredAt, "", "", nil)
+		row, err := d.Profile.ManualAddEventExt(ctx, tx, p.UserID, *p.TargetID, eventType, title, "", occurredAt, "", "", nil)
 		if err != nil {
 			return nil, err
 		}
@@ -319,7 +346,7 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		}
 		var relID *ids.ID
 		if name := newStr("related_person_name"); name != "" {
-			ex, err := d.Persons.FindByNameExt(ctx, tx, toolUserID, name)
+			ex, err := d.Persons.FindByNameExt(ctx, tx, p.UserID, name)
 			if err != nil {
 				return nil, err
 			}
@@ -327,14 +354,14 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 				id := ex.ID
 				relID = &id
 			} else { // 未命中 → 在同事务内新建人物（active/manual），再用其 id 建关系
-				np, err := d.Profile.ManualCreatePersonExt(ctx, tx, toolUserID, name, nil, nil)
+				np, err := d.Profile.ManualCreatePersonExt(ctx, tx, p.UserID, name, nil, nil)
 				if err != nil {
 					return nil, err
 				}
 				relID = &np.ID
 			}
 		}
-		row, err := d.Profile.ManualAddRelationshipExt(ctx, tx, toolUserID, *p.TargetID, relationType, relID,
+		row, err := d.Profile.ManualAddRelationshipExt(ctx, tx, p.UserID, *p.TargetID, relationType, relID,
 			newStr("direction"), newStr("org_name"), newStr("label"))
 		if err != nil {
 			return nil, err
@@ -358,7 +385,7 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if t, ok := parseMetricMeasuredAt(newStr("measured_at")); ok {
 			measuredAt = t
 		}
-		row, err := d.Profile.ManualAddMetricExt(ctx, tx, toolUserID, *p.TargetID, metricKey,
+		row, err := d.Profile.ManualAddMetricExt(ctx, tx, p.UserID, *p.TargetID, metricKey,
 			newFloatPtr("value_num"), newStr("value_text"), newStr("unit"), measuredAt)
 		if err != nil {
 			return nil, err

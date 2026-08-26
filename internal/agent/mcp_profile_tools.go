@@ -20,45 +20,46 @@ import (
 //     agent_proposal（{old?,new}），用户经确认端点确认后才在单事务内经 profile.Service 的
 //     Ext 变体落库（apply-once，见 proposals.go）。
 //
-// 全部限 user_id=1（toolUserID），写目标恒为 owner「我」。「owner 概要注入对话头」由
+// 全部限某一 userID（由 NewMCPServer 注入、透传给各 handler 工厂；2B-A 起替代写死的 toolUserID，
+// 当前装配仍传 1），写目标恒为该用户的 owner「我」。「owner 概要注入对话头」由
 // ProfileContext.Head 承担（见 context.go / orchestrator.go），不在此工具层。
-func registerProfileTools(s *mcp.Server, d MCPDeps) {
+func registerProfileTools(s *mcp.Server, d MCPDeps, userID int64) {
 	// ---- 读工具 ----
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_profile",
 		Description: "读取我（画像 owner「我」）的个人画像：显示名、简介、属性列表(键/值/认知类型/状态) 与大事记(类型/标题/时间/状态)。无参。owner 尚未建立时返回空画像({found:false})。",
-	}, getProfileHandler(d))
+	}, getProfileHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_person",
 		Description: "按姓名读取某个人物的画像(属性 + 大事记)。入参 name(精确匹配显示名)。找不到返回 {found:false}。",
-	}, getPersonHandler(d))
+	}, getPersonHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_metrics",
 		Description: "读取我的时序个人指标(第 5 平面 person_metric)：情绪/体重/睡眠/精力/饮食/健康等测点序列。可选 metric_key 过滤(emotion|weight|sleep|mood_energy|diet|health)，留空返回全部。按指标键分组返回，每组含 key/label(中文名)/unit(单位)/numeric(是否数值型) 及 points(测点，每点含 measured_at/value_num/value_text/status，按时间升序)。owner 尚未建立时返回 {found:false}。",
-	}, getMetricsHandler(d))
+	}, getMetricsHandler(d, userID))
 
 	// ---- 写-提议工具 ----
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_profile_attr",
 		Description: "提议更新我的一条画像属性(不立即生效，返回待确认提议；用户确认后才落库)。attr_key 必须是画像目录内的合法字段键(如 occupation/city/hobbies)。",
-	}, proposeProfileAttrHandler(d))
+	}, proposeProfileAttrHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_profile_event",
 		Description: "提议给我记录一条大事记(不立即生效，返回待确认提议)。event_type 必须是合法事件类型(里程碑|聚会|会议|旅行|健康|成就|挫折|负面|其他)，title 非空。",
-	}, proposeProfileEventHandler(d))
+	}, proposeProfileEventHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_profile_relationship",
 		Description: "提议给我(画像 owner「我」)新增一条人物关系或组织关系(不立即生效，返回待确认提议；用户确认后才落库)。relation_type 必须合法(配偶|子女|父母|兄弟姐妹|亲戚|朋友|同事|领导|下属|客户|供应商|合作方|组织|其他)；related_person_name(关联到某人，如「我朋友李四」) 与 org_name(关联到某组织) 至少给一个。确认时若 related_person_name 对应人物不存在会自动新建。",
-	}, proposeProfileRelationshipHandler(d))
+	}, proposeProfileRelationshipHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_profile_metric",
 		Description: "提议给我记录一个时序指标测点(不立即生效，返回待确认提议；用户确认后才落库)。metric_key 必须合法(emotion|weight|sleep|mood_energy|diet|health)。数值型指标(体重/睡眠/情绪/精力)必须给 value_num；类别型指标(饮食/健康)必须给 value_text。unit 可选(留空取目录默认，如 kg/h)；measured_at 可选(如 2026-07-20 / '2026-07-20 15:04' / RFC3339，解析失败或留空取当前时间)。",
-	}, proposeProfileMetricHandler(d))
+	}, proposeProfileMetricHandler(d, userID))
 }
 
 // ---- 读工具输出结构（JSON tag 直接暴露给模型；status 只含 active/pending）----
@@ -125,9 +126,9 @@ func buildProfileOut(ctx context.Context, d MCPDeps, p *repo.Person) (profileOut
 // getProfileArgs：无参（空 struct → object schema 无属性）。
 type getProfileArgs struct{}
 
-func getProfileHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, getProfileArgs) (*mcp.CallToolResult, any, error) {
+func getProfileHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, getProfileArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, _ getProfileArgs) (*mcp.CallToolResult, any, error) {
-		owner, err := d.Persons.GetOwner(ctx, toolUserID)
+		owner, err := d.Persons.GetOwner(ctx, userID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -147,13 +148,13 @@ type getPersonArgs struct {
 	Name string `json:"name" jsonschema:"要查询的人物姓名(精确匹配显示名)"`
 }
 
-func getPersonHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, getPersonArgs) (*mcp.CallToolResult, any, error) {
+func getPersonHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, getPersonArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a getPersonArgs) (*mcp.CallToolResult, any, error) {
 		name := strings.TrimSpace(a.Name)
 		if name == "" {
 			return nil, nil, fmt.Errorf("get_person 需给出 name")
 		}
-		p, err := d.Persons.FindByName(ctx, toolUserID, name)
+		p, err := d.Persons.FindByName(ctx, userID, name)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -199,9 +200,9 @@ type getMetricsArgs struct {
 
 // getMetricsHandler 读 owner「我」的时序指标测点（只取 active/pending，见 ListByPerson），
 // 按 metric_key 分组返回；owner 未建立时返回 {found:false}（仿 get_profile）。
-func getMetricsHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, getMetricsArgs) (*mcp.CallToolResult, any, error) {
+func getMetricsHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, getMetricsArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a getMetricsArgs) (*mcp.CallToolResult, any, error) {
-		owner, err := d.Persons.GetOwner(ctx, toolUserID)
+		owner, err := d.Persons.GetOwner(ctx, userID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -260,7 +261,7 @@ type proposeProfileAttrArgs struct {
 	Rationale string `json:"rationale,omitempty" jsonschema:"给用户看的修改理由"`
 }
 
-func proposeProfileAttrHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeProfileAttrArgs) (*mcp.CallToolResult, any, error) {
+func proposeProfileAttrHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeProfileAttrArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeProfileAttrArgs) (*mcp.CallToolResult, any, error) {
 		attrKey := strings.TrimSpace(a.AttrKey)
 		value := strings.TrimSpace(a.Value)
@@ -271,7 +272,7 @@ func proposeProfileAttrHandler(d MCPDeps) func(context.Context, *mcp.CallToolReq
 		if value == "" {
 			return nil, nil, fmt.Errorf("propose_profile_attr 需给出非空 value")
 		}
-		owner, err := d.Persons.GetOwner(ctx, toolUserID)
+		owner, err := d.Persons.GetOwner(ctx, userID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -301,7 +302,7 @@ type proposeProfileEventArgs struct {
 	Rationale  string `json:"rationale,omitempty" jsonschema:"给用户看的记录理由"`
 }
 
-func proposeProfileEventHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeProfileEventArgs) (*mcp.CallToolResult, any, error) {
+func proposeProfileEventHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeProfileEventArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeProfileEventArgs) (*mcp.CallToolResult, any, error) {
 		eventType := strings.TrimSpace(a.EventType)
 		title := strings.TrimSpace(a.Title)
@@ -312,7 +313,7 @@ func proposeProfileEventHandler(d MCPDeps) func(context.Context, *mcp.CallToolRe
 		if title == "" {
 			return nil, nil, fmt.Errorf("propose_profile_event 需给出非空 title")
 		}
-		owner, err := d.Persons.GetOwner(ctx, toolUserID)
+		owner, err := d.Persons.GetOwner(ctx, userID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -345,7 +346,7 @@ type proposeProfileRelationshipArgs struct {
 	Rationale         string `json:"rationale,omitempty" jsonschema:"给用户看的修改理由"`
 }
 
-func proposeProfileRelationshipHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeProfileRelationshipArgs) (*mcp.CallToolResult, any, error) {
+func proposeProfileRelationshipHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeProfileRelationshipArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeProfileRelationshipArgs) (*mcp.CallToolResult, any, error) {
 		relationType := strings.TrimSpace(a.RelationType)
 		relatedName := strings.TrimSpace(a.RelatedPersonName)
@@ -365,7 +366,7 @@ func proposeProfileRelationshipHandler(d MCPDeps) func(context.Context, *mcp.Cal
 		if direction != "" && direction != "upstream" && direction != "downstream" && direction != "peer" {
 			return nil, nil, fmt.Errorf("非法 direction: %q（合法: upstream|downstream|peer）", a.Direction)
 		}
-		owner, err := d.Persons.GetOwner(ctx, toolUserID)
+		owner, err := d.Persons.GetOwner(ctx, userID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -391,7 +392,7 @@ func proposeProfileRelationshipHandler(d MCPDeps) func(context.Context, *mcp.Cal
 		// 据此在 rationale 里追加「关联到已有人物X / 将新建人物X」提示，帮用户判断确认后果。
 		rationale := strings.TrimSpace(a.Rationale)
 		if relatedName != "" {
-			ex, err := d.Persons.FindByName(ctx, toolUserID, relatedName)
+			ex, err := d.Persons.FindByName(ctx, userID, relatedName)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -428,7 +429,7 @@ type proposeProfileMetricArgs struct {
 	Rationale  string   `json:"rationale,omitempty" jsonschema:"给用户看的记录理由"`
 }
 
-func proposeProfileMetricHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeProfileMetricArgs) (*mcp.CallToolResult, any, error) {
+func proposeProfileMetricHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeProfileMetricArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeProfileMetricArgs) (*mcp.CallToolResult, any, error) {
 		metricKey := strings.TrimSpace(a.MetricKey)
 		// 校验（非法 → tool-error 供模型读）：
@@ -445,7 +446,7 @@ func proposeProfileMetricHandler(d MCPDeps) func(context.Context, *mcp.CallToolR
 		} else if valueText == "" {
 			return nil, nil, fmt.Errorf("类别指标 %s 需给出 value_text", metricKey)
 		}
-		owner, err := d.Persons.GetOwner(ctx, toolUserID)
+		owner, err := d.Persons.GetOwner(ctx, userID)
 		if err != nil {
 			return nil, nil, err
 		}

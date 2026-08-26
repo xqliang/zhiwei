@@ -13,7 +13,9 @@ import (
 // Orchestrator 跑一轮对话：落用户消息 → 驱动 runtime → 消费事件流（拼助手文本、
 // 记工具活动）→ 落助手消息 → 刷新会话活跃时间 → 返回落库后的助手消息。
 type Orchestrator struct {
-	Runtime       AgentRuntime
+	// RuntimeFor 按会话所属 userID 选运行时（2B-B 多用户隔离：每登录用户一个独立 dsh 进程）。
+	// 生产 = RuntimePool.Get；单测注入 func(int64) AgentRuntime { return fake }。
+	RuntimeFor    func(userID int64) AgentRuntime
 	Conversations *repo.AgentConversationRepo
 	Messages      *repo.AgentMessageRepo
 	// Ctx 可选：非 nil 时，每轮把 owner 画像上下文头前置到「发给 dsh 的文本」（让 agent 天然
@@ -22,8 +24,9 @@ type Orchestrator struct {
 	Ctx *ProfileContext
 }
 
-func NewOrchestrator(rt AgentRuntime, conv *repo.AgentConversationRepo, msg *repo.AgentMessageRepo) *Orchestrator {
-	return &Orchestrator{Runtime: rt, Conversations: conv, Messages: msg}
+// NewOrchestrator 第一参收「按 userID 选运行时」的函数（生产 = pool.Get，单测 = 返回 fake 的闭包）。
+func NewOrchestrator(runtimeFor func(userID int64) AgentRuntime, conv *repo.AgentConversationRepo, msg *repo.AgentMessageRepo) *Orchestrator {
+	return &Orchestrator{RuntimeFor: runtimeFor, Conversations: conv, Messages: msg}
 }
 
 // RunTurn 处理一条用户消息（非流式，REST 用）。见 runTurn 的落库与 drain 语义。
@@ -59,15 +62,16 @@ func (o *Orchestrator) runTurn(ctx context.Context, conv *repo.AgentConversation
 	// 发给 dsh 的文本：可选前置 owner 画像上下文头（让 agent 天然「认识我」）。
 	// 关键（D2）：落库的 um 与流式 user 帧（上面两步）都用原始 userText，只有这里发 Prompt 的
 	// 文本带上下文头，历史与回显保持干净、不改持久化。head 为空（未装配 Ctx / 无 owner / 无数据）
-	// 时 sent == userText，退化为既有行为。now 传 time.Now()（服务端可用系统时间；单测经 Head 的
-	// now 参数注入固定日期）。
+	// 时 sent == userText，退化为既有行为。owner 画像 / 检索种子都按 conv.UserID 取（2B-B：多用户
+	// 隔离，绝不串用别人的画像/记忆）。now 传 time.Now()（服务端可用系统时间；单测经 Head 的 now
+	// 参数注入固定日期）。
 	sent := userText
 	if o.Ctx != nil {
 		var blocks []string
-		if h := o.Ctx.Head(ctx, time.Now()); h != "" {
+		if h := o.Ctx.Head(ctx, conv.UserID, time.Now()); h != "" {
 			blocks = append(blocks, h)
 		}
-		if s := o.Ctx.Seeds(ctx, userText); s != "" {
+		if s := o.Ctx.Seeds(ctx, conv.UserID, userText); s != "" {
 			blocks = append(blocks, s)
 		}
 		if len(blocks) > 0 {
@@ -75,7 +79,9 @@ func (o *Orchestrator) runTurn(ctx context.Context, conv *repo.AgentConversation
 		}
 	}
 
-	events, err := o.Runtime.Prompt(ctx, conv.DSHSessionID, sent)
+	// 按会话所属用户选运行时（2B-B：不同用户 → 不同 dsh 进程 + 不同 MCP token，天然隔离）。
+	rt := o.RuntimeFor(conv.UserID)
+	events, err := rt.Prompt(ctx, conv.DSHSessionID, sent)
 	if err != nil {
 		return nil, err
 	}

@@ -46,7 +46,7 @@ func TestRunTurnStreamEmitsInOrder(t *testing.T) {
 		{Type: EvAssistantMessage, Data: ans},
 	}}}
 
-	orch := NewOrchestrator(fake, convRepo, msgRepo)
+	orch := NewOrchestrator(rtFor(fake), convRepo, msgRepo)
 	var frames []StreamFrame
 	final, err := orch.RunTurnStream(ctx, conv, "有待办吗？", func(f StreamFrame) { frames = append(frames, f) })
 	if err != nil {
@@ -102,8 +102,9 @@ func TestWSEndToEnd(t *testing.T) {
 		{"type": "text", "text": "答复内容"},
 	}}})
 	fake := &FakeRuntime{Script: [][]Event{{{Type: EvAssistantMessage, Data: ans}}}}
-	h := &AgentHandler{Orch: NewOrchestrator(fake, convRepo, msgRepo), Conversations: convRepo, Messages: msgRepo}
+	h := &AgentHandler{Orch: NewOrchestrator(rtFor(fake), convRepo, msgRepo), Conversations: convRepo, Messages: msgRepo}
 	r := chi.NewRouter()
+	r.Use(injectUser(1)) // 模拟 authGate 注入 uid=1
 	RegisterAgent(r, h)
 	srv := httptest.NewServer(r)
 	defer srv.Close()

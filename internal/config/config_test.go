@@ -109,6 +109,9 @@ func TestAgentConfigDefaults(t *testing.T) {
 	if cfg.AgentRetrieveTopK != 10 {
 		t.Errorf("AgentRetrieveTopK 默认应为 10, got %d", cfg.AgentRetrieveTopK)
 	}
+	if cfg.AgentMaxUsers != 8 {
+		t.Errorf("AgentMaxUsers 默认应为 8, got %d", cfg.AgentMaxUsers)
+	}
 	if cfg.ReviewDailyCron != "0 22 * * *" {
 		t.Errorf("ReviewDailyCron 默认错误: %q", cfg.ReviewDailyCron)
 	}
@@ -119,6 +122,7 @@ func TestAgentConfigOverride(t *testing.T) {
 	t.Setenv("ZW_AGENT_ENABLED", "false")
 	t.Setenv("ZW_AGENT_MODEL", "deepseek-v3-250324")
 	t.Setenv("ZW_AGENT_RETRIEVE_TOPK", "20")
+	t.Setenv("ZW_AGENT_MAX_USERS", "32")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -131,6 +135,9 @@ func TestAgentConfigOverride(t *testing.T) {
 	}
 	if cfg.AgentRetrieveTopK != 20 {
 		t.Errorf("AgentRetrieveTopK 覆盖失败: %d", cfg.AgentRetrieveTopK)
+	}
+	if cfg.AgentMaxUsers != 32 {
+		t.Errorf("AgentMaxUsers 覆盖失败: %d", cfg.AgentMaxUsers)
 	}
 }
 

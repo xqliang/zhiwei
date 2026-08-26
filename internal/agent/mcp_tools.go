@@ -11,29 +11,32 @@ import (
 	"zhiwei/internal/repo"
 )
 
-const toolUserID = 1 // 单用户 MVP
+// toolUserID 是单用户 MVP 的用户 id。2B-A 起 MCP 工具（本文件 + mcp_write_tools.go +
+// mcp_profile_tools.go）不再直接用它，改用 NewMCPServer 注入、逐层透传的 userID；此常量仍供
+// 尚未多用户化的 HTTP/编排侧（context.go / proposals.go / handlers.go / ws.go）与测试使用（2B-B 再收敛）。
+const toolUserID = 1
 
-// registerReadTools 注册全部只读工具到 server。
-func registerReadTools(s *mcp.Server, d MCPDeps) {
+// registerReadTools 注册全部只读工具到 server。userID 由 NewMCPServer 注入，透传给各 handler 工厂。
+func registerReadTools(s *mcp.Server, d MCPDeps, userID int64) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "search_memory",
 		Description: "按语义/关键词检索我的记忆（title/content）。可选 type 过滤(event|fact|decision|idea|problem|preference)。返回记忆列表(含 id/类型/标题/内容/事件时间/重要度)。",
-	}, searchMemoryHandler(d))
+	}, searchMemoryHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_timeline",
 		Description: "查看我的录音时间线。不带 session_id 返回最近若干条录音会话(概要)；带 session_id 返回该会话的转写分段(说话人+文本+起止毫秒)。",
-	}, getTimelineHandler(d))
+	}, getTimelineHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_topics",
 		Description: "列出我的话题(项目/主题)及其记忆数与未完成待办数。可选 status 过滤(active|suggested)。",
-	}, getTopicsHandler(d))
+	}, getTopicsHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_todos",
 		Description: "列出我的待办。可选 status(suggested|confirmed|done) 与 topic_id 过滤。",
-	}, getTodosHandler(d))
+	}, getTodosHandler(d, userID))
 }
 
 type memoryOut struct {
@@ -91,7 +94,7 @@ type searchMemoryArgs struct {
 	Limit int    `json:"limit,omitempty" jsonschema:"最多返回条数, 默认 20, 上限 50"`
 }
 
-func searchMemoryHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, searchMemoryArgs) (*mcp.CallToolResult, any, error) {
+func searchMemoryHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, searchMemoryArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a searchMemoryArgs) (*mcp.CallToolResult, any, error) {
 		limit := a.Limit
 		if limit <= 0 {
@@ -100,14 +103,14 @@ func searchMemoryHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, 
 		var ms []repo.Memory
 		// 有向量检索且给了 query：优先「向量+关键词」混合；结果为空则退回关键词 LIKE。
 		if d.Retrieve != nil && a.Query != "" {
-			hit, err := d.Retrieve.Search(ctx, toolUserID, a.Query, a.Type, limit)
+			hit, err := d.Retrieve.Search(ctx, userID, a.Query, a.Type, limit)
 			if err == nil && len(hit) > 0 {
 				ms = hit
 			}
 		}
 		if ms == nil {
 			var err error
-			ms, err = d.Memory.Search(ctx, toolUserID, a.Query, a.Type, limit)
+			ms, err = d.Memory.Search(ctx, userID, a.Query, a.Type, limit)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -125,7 +128,7 @@ type getTimelineArgs struct {
 	Limit     int    `json:"limit,omitempty" jsonschema:"不带 session_id 时返回最近录音条数, 默认 20, 上限 50"`
 }
 
-func getTimelineHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, getTimelineArgs) (*mcp.CallToolResult, any, error) {
+func getTimelineHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, getTimelineArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a getTimelineArgs) (*mcp.CallToolResult, any, error) {
 		if a.SessionID != "" {
 			sid, err := ids.ParseID(a.SessionID)
@@ -157,7 +160,7 @@ func getTimelineHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, g
 		if limit > 50 {
 			limit = 50
 		}
-		ss, err := d.Session.List(ctx, toolUserID, limit, 0)
+		ss, err := d.Session.List(ctx, userID, limit, 0)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -173,9 +176,9 @@ type getTopicsArgs struct {
 	Status string `json:"status,omitempty" jsonschema:"可选状态过滤: active|suggested"`
 }
 
-func getTopicsHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, getTopicsArgs) (*mcp.CallToolResult, any, error) {
+func getTopicsHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, getTopicsArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a getTopicsArgs) (*mcp.CallToolResult, any, error) {
-		ts, err := d.Topic.ListWithCounts(ctx, toolUserID)
+		ts, err := d.Topic.ListWithCounts(ctx, userID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -195,7 +198,7 @@ type getTodosArgs struct {
 	TopicID string `json:"topic_id,omitempty" jsonschema:"可选按话题 id 过滤"`
 }
 
-func getTodosHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, getTodosArgs) (*mcp.CallToolResult, any, error) {
+func getTodosHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, getTodosArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a getTodosArgs) (*mcp.CallToolResult, any, error) {
 		var topicID *ids.ID
 		if a.TopicID != "" {
@@ -205,7 +208,7 @@ func getTodosHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, getT
 			}
 			topicID = &id
 		}
-		rows, err := d.Todo.List(ctx, toolUserID, a.Status, topicID)
+		rows, err := d.Todo.List(ctx, userID, a.Status, topicID)
 		if err != nil {
 			return nil, nil, err
 		}

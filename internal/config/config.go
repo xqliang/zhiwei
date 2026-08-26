@@ -57,6 +57,7 @@ type Config struct {
 	DSHSessionRoot    string // DSH_SESSION_ROOT：dsh 内部会话日志目录
 	DSHSystemPrompt   string // DSH_SYSTEM_PROMPT：dsh 进程级人设
 	AgentRetrieveTopK int    // ZW_AGENT_RETRIEVE_TOPK：上下文头检索种子条数
+	AgentMaxUsers     int    // ZW_AGENT_MAX_USERS：每用户 dsh 进程池上限（超出按 LRU 关最久未用，默认 8）
 	ReviewDailyCron   string // ZW_REVIEW_DAILY_CRON：日报定时
 
 	// ---- speakername stage（名字推断，main 合入）----
@@ -136,6 +137,7 @@ func Load() (*Config, error) {
 		DSHSessionRoot:    getenv("DSH_SESSION_ROOT", "./data/dsh-sessions"),
 		DSHSystemPrompt:   getenv("DSH_SYSTEM_PROMPT", "你是知微(zhiwei)个人智能体，基于用户的记忆/时间线/话题/待办用简体中文亲切、简洁地回答；需要时调用工具读取用户数据，不要编造。"),
 		AgentRetrieveTopK: getenvInt("ZW_AGENT_RETRIEVE_TOPK", 10),
+		AgentMaxUsers:     getenvInt("ZW_AGENT_MAX_USERS", 8),
 		ReviewDailyCron:   getenv("ZW_REVIEW_DAILY_CRON", "0 22 * * *"),
 
 		// ---- speakername stage ----

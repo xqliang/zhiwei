@@ -52,7 +52,7 @@ func TestSearchMemoryHybrid(t *testing.T) {
 		t.Fatal(err)
 	}
 	md.Retrieve = r
-	res, _, err := searchMemoryHandler(md)(ctx, nil, searchMemoryArgs{Query: "猫", Limit: 5})
+	res, _, err := searchMemoryHandler(md, toolUserID)(ctx, nil, searchMemoryArgs{Query: "猫", Limit: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestSearchMemoryHybrid(t *testing.T) {
 	}
 	// nil Retrieve → 关键词兜底不报错（用独占词命中）
 	md.Retrieve = nil
-	if _, _, err := searchMemoryHandler(md)(ctx, nil, searchMemoryArgs{Query: "猫SH", Limit: 5}); err != nil {
+	if _, _, err := searchMemoryHandler(md, toolUserID)(ctx, nil, searchMemoryArgs{Query: "猫SH", Limit: 5}); err != nil {
 		t.Fatalf("关键词兜底不应报错: %v", err)
 	}
 }
@@ -95,7 +95,7 @@ func TestOrchestratorSeedsInjection(t *testing.T) {
 		{"type": "text", "text": "好的"},
 	}}})
 	fake := &FakeRuntime{Script: [][]Event{{{Type: EvAssistantMessage, Data: msgData}}}}
-	orch := NewOrchestrator(fake, convRepo, msgRepo)
+	orch := NewOrchestrator(rtFor(fake), convRepo, msgRepo)
 	orch.Ctx = &ProfileContext{Retrieve: r} // 只装 Retrieve（无 Persons → Head 为空，只测种子）
 
 	const raw = "猫应该怎么养"

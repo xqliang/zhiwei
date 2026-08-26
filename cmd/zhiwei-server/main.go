@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"zhiwei/internal/agent"
 	"zhiwei/internal/api"
 	"zhiwei/internal/auth"
@@ -298,7 +300,8 @@ func main() {
 			}
 		}()
 	}
-	mcpSrv := agent.NewMCPServer(agent.MCPDeps{
+	// MCP 工具依赖（进程内运行、复用上面已开库的 repo 实例；同一个 DB 池）。
+	mcpDeps := agent.MCPDeps{
 		Memory:     memories,
 		Session:    sessions,
 		Transcript: transcripts,
@@ -312,10 +315,30 @@ func main() {
 		PersonMetrics:    personMetrics,
 		// 语义检索（可选，nil 则 search_memory 走关键词）
 		Retrieve: retriever,
+	}
+	// 2B-B：每登录用户一个 dsh 运行时 + 一个 MCP token 的进程池。baseCfg 是模板——
+	// CordisConfig/Model/SystemPrompt 全用户共享；MCPURL 留空、SessionRoot 作父目录，由 pool
+	// 按每用户 token 派生（MCPURL=mcpBaseURL+"/"+token、SessionRoot=base/u<uid>）。cap 超出按 LRU
+	// 关最久未用。pool 始终创建（MCP handler 要用它按 token 反查用户）；AgentEnabled=false 时无人
+	// 调 Get、不会 spawn 任何 dsh。
+	mcpBaseURL := "http://127.0.0.1:" + cfg.Port + "/internal/mcp"
+	agentPool := agent.NewRuntimePool(agent.RuntimeConfig{
+		CordisConfig: cfg.AgentCordisConfig,
+		Model:        agentModel, // 解析后的模型(ZW_AGENT_MODEL 空则回退 LLMStrongModel), 与报告/抽取一致
+		SessionRoot:  cfg.DSHSessionRoot,
+		SystemPrompt: cfg.DSHSystemPrompt,
+	}, mcpBaseURL, cfg.AgentMaxUsers, func(c agent.RuntimeConfig) agent.AgentRuntime {
+		return agent.NewDSHRuntime(c)
 	})
-	// 报告工具（generate_report / get_topic_status）注册进同一 MCP server，供 dsh agent 调用。
-	review.RegisterReportTools(mcpSrv, reviewer)
-	mcpHandler := agent.MCPHandler(mcpSrv)
+	defer agentPool.Close()
+
+	// MCP 端点：按请求路径末段的 token → userID 懒建/缓存该用户的 MCP server（2B-B 多用户隔离）。
+	// 报告工具经 customize 闭包注册进每个 per-user server（供 dsh agent 调用）。
+	// 注意（残留）：report 工具当前仍是单用户口径（internal/review 固定 user 1），未随 token 分用户；
+	// 收敛需改 review 包，超出本步(2B-B)范围，后续处理。
+	mcpHandler := agent.MCPHandler(mcpDeps, agentPool.TokenUserID, func(s *mcp.Server) {
+		review.RegisterReportTools(s, reviewer)
+	})
 	r.Handle("/internal/mcp", mcpHandler)
 	r.Handle("/internal/mcp/*", mcpHandler)
 
@@ -327,21 +350,14 @@ func main() {
 		Profile: profileSvc, Persons: persons,
 	})
 
-	// Agent 运行时（惰性 spawn dsh；首次对话时启动，此时 /internal/mcp 已监听）。
+	// Agent 编排（惰性 spawn dsh；首次对话时 pool.Get→首个 Prompt 启动，此时 /internal/mcp 已监听）。
 	if cfg.AgentEnabled {
-		rt := agent.NewDSHRuntime(agent.RuntimeConfig{
-			CordisConfig: cfg.AgentCordisConfig,
-			Model:        agentModel, // 解析后的模型(ZW_AGENT_MODEL 空则回退 LLMStrongModel), 与报告/抽取一致(评审 I2)
-			SessionRoot:  cfg.DSHSessionRoot,
-			SystemPrompt: cfg.DSHSystemPrompt,
-			MCPURL:       "http://127.0.0.1:" + cfg.Port + "/internal/mcp",
-		})
-		defer rt.Close()
 		agentConvs := &repo.AgentConversationRepo{DB: db}
 		agentMsgs := &repo.AgentMessageRepo{DB: db}
-		// Orchestrator 装配可选的画像上下文头（每轮把 owner 概要 + 关键属性 + 当天日期前置到
-		// 「发给 dsh 的文本」，让 agent 天然「认识我」；不改落库，见 agent/context.go）。
-		orch := agent.NewOrchestrator(rt, agentConvs, agentMsgs)
+		// Orchestrator 按 conv.UserID 经 pool.Get 选运行时（2B-B：每用户独立 dsh + MCP token）。
+		// 装配可选的画像上下文头（每轮把 owner 概要 + 关键属性 + 当天日期前置到「发给 dsh 的文本」，
+		// 让 agent 天然「认识我」；Head/Seeds 现按 conv.UserID 取，不改落库，见 agent/context.go）。
+		orch := agent.NewOrchestrator(agentPool.Get, agentConvs, agentMsgs)
 		orch.Ctx = &agent.ProfileContext{Persons: persons, Attributes: personAttrs, Retrieve: retriever}
 		agent.RegisterAgent(r, &agent.AgentHandler{
 			Orch:          orch,
