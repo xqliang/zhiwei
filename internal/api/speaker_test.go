@@ -46,7 +46,7 @@ func setupSpeakerAPI(t *testing.T) (http.Handler, *repo.SpeakerRepo, *repo.Trans
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ids.Init(1); err != nil {
+	if err := ids.InitForTest(); err != nil {
 		t.Fatal(err)
 	}
 	speakers := &repo.SpeakerRepo{DB: db}
@@ -192,7 +192,7 @@ func TestSpeakerListWithCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	speakers := &repo.SpeakerRepo{DB: db}
 	candidates := &repo.SpeakerNameCandidateRepo{DB: db}
 	r := chi.NewRouter()
@@ -258,7 +258,7 @@ func TestSpeakerRenameClearsCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	speakers := &repo.SpeakerRepo{DB: db}
 	candidates := &repo.SpeakerNameCandidateRepo{DB: db}
 	r := chi.NewRouter()
@@ -292,7 +292,7 @@ func TestSpeakerDeleteNameCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	speakers := &repo.SpeakerRepo{DB: db}
 	candidates := &repo.SpeakerNameCandidateRepo{DB: db}
 	r := chi.NewRouter()

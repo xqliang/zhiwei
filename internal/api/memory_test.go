@@ -25,7 +25,7 @@ func setupMemoryAPI(t *testing.T) (http.Handler, *repo.MemoryRepo, *repo.TopicRe
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ids.Init(1); err != nil {
+	if err := ids.InitForTest(); err != nil {
 		t.Fatal(err)
 	}
 	mr := &repo.MemoryRepo{DB: db}
@@ -166,7 +166,7 @@ func titlesOf(rows []repo.MemoryRow) []string {
 // TestMemoryAddRemoveTopic 验证手动加/删 memory↔topic 关联端点：
 // POST 幂等、GET 列表反映增删、DELETE 204、不存在 topic_id → 404。
 func TestMemoryAddRemoveTopic(t *testing.T) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +294,7 @@ func TestMemoryPatch(t *testing.T) {
 // corroborate/contradict/outdated 置信度演化）。名称用「整理」前缀避免与其他 fixture 混淆。
 func setupMemoryConsolidateFixtures(t *testing.T) (*repo.MemoryRepo, *repo.MemoryTopicRepo, *repo.TopicRepo, *repo.Memory, *repo.Memory, *repo.Memory, *repo.Memory, *repo.Memory) {
 	t.Helper()
-	if err := ids.Init(1); err != nil {
+	if err := ids.InitForTest(); err != nil {
 		t.Fatal(err)
 	}
 	db, err := repo.NewDB(repo.TestDSN(t))

@@ -16,7 +16,7 @@ import (
 // ids.New() 造 session），必须先设好 snowflake 节点，否则 node 为 nil 会 panic。
 // TestMain 必须定义在 _test.go 里才会被 test 框架调用（一个包仅一个）。
 func TestMain(m *testing.M) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	os.Exit(m.Run())
 }
 

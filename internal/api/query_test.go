@@ -23,7 +23,7 @@ import (
 func setupQueryAPI(t *testing.T, s *repo.SessionRepo, j *repo.JobRepo,
 	tr *repo.TranscriptRepo, m *repo.MemoryRepo, td *repo.TodoRepo) http.Handler {
 	t.Helper()
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	r := chi.NewRouter()
 	RegisterQuery(r, &QueryHandler{
 		Sessions: s, Jobs: j, Transcripts: tr, Memories: m, Todos: td,
@@ -32,7 +32,7 @@ func setupQueryAPI(t *testing.T, s *repo.SessionRepo, j *repo.JobRepo,
 }
 
 func TestSessionsAndDetail(t *testing.T) {
-	_ = ids.Init(1) // 幂等初始化，避免依赖其它测试先跑
+	_ = ids.InitForTest() // 幂等初始化，避免依赖其它测试先跑
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestSessionsAndDetail(t *testing.T) {
 // 段已解析到登记说话人 → segment 带 speaker_id + 登记名（非回退 "说话人 N"），
 // 顶层 speakers 列表含该说话人。
 func TestGetSessionSpeakerEnrichment(t *testing.T) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +205,7 @@ func TestGetSessionSpeakerEnrichment(t *testing.T) {
 // speakers[] 由 ListSpeakersForTranscript 按本 transcript 段归属聚合，天然作用域到本会话，
 // 不受脏库其它说话人干扰，因此无需清表。
 func TestGetSessionNameCandidates(t *testing.T) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -385,7 +385,7 @@ func TestServeAudio(t *testing.T) {
 // 供 ListSessions 富化与 DeleteSession 级联测试共用。返回 router+session id+SessionRepo
 // （含 DB 句柄供断言）。
 func buildEnrichedSession(t *testing.T) (http.Handler, ids.ID, *repo.SessionRepo) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -610,7 +610,7 @@ func TestReextract(t *testing.T) {
 // 用 speaker stage 落库的逐段向量与全库声纹（灾备 BLOB）算余弦取前三。
 // 用途：一句话可能混多个人——段级 top-1 不是归属说话人即该段可能被切错/归错。
 func TestGetSessionVoiceMatches(t *testing.T) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)

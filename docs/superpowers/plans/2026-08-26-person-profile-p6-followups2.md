@@ -71,17 +71,23 @@ Commit: `feat(profile): 归档级联 pending 反向关系边——清确认队�
 
 ### Task 4: F6 测试 snowflake nodeID 隔离
 
-**Files:** Modify 各测试文件的 `ids.Init(1)` 调用点（internal/{profile,api,pipeline,voiceprint,...}/*_test.go，grep `ids.Init` 找全）+ 可能 `internal/ids`（若需测试辅助）
+**Files:** Modify 各测试文件的 `ids.Init(1)` 调用点（internal/{profile,api,pipeline,voiceprint,repo}/*_test.go，共 **23 处**）+ 新增 `internal/ids/testinit.go`（导出测试辅助 `InitForTest`）
 
 **现状**：每个测试二进制 `ids.Init(1)`——`go test` 并行跑多包时（默认 -p=CPU 数）各进程同 nodeID=1，同毫秒同 step 生成相同 ID，撞共享 zhiwei_test 库主键（本周期两次踩坑，靠 `-p 1` 规避）。
 
 **做法**：
-- 先读 internal/ids 包：node 位数/取值范围/Init 语义（幂等？重复 Init 报错？）
-- 测试侧统一改为**进程唯一 node**：`_ = ids.Init(testNode())`，testNode 返回基于 PID 的稳定小值（如 `uint16(os.Getpid()) % nodeRange`——碰撞概率低且可重试；或 PID+time 混合）。**抽一个测试辅助函数放哪**：各包不能互相 import 测试代码——放 `internal/ids` 导出 `InitForTest()`（生产不用，注释说明）或每包内联三行（无依赖，选内联更简单——判断：调用点 ≤6 个，内联可接受；若 ids 包有合适的导出点则辅助函数更净）
-- **验收标准**：`go test ./... -count=1` **不带 -p 1** 连跑 3 次全绿（每次 init-testdb 后）
-- 注意：node 改变不影响既有断言（ID 值本身从不被断言——grep 确认没有测试硬编码 ID 前缀/数值断言）
+- 先读 internal/ids 包：node 位数/取值范围/Init 语义（幂等？重复 Init 报错？）→ **实测**：`Init` 幂等（每次 `snowflake.NewNode` 重建并覆盖全局 node，不因重复调用报错）；`New()` 仅在 `Init` 从未调用时 panic（nil node）；snowflake 默认 NodeBits=10，node 值域 [0,1023]，`NewNode` 仅在 node<0 或 >1023 时报错。
+- 测试侧统一改为**进程唯一 node**。**辅助函数落点**：实测调用点共 **23 处（跨 5 包：profile/api/pipeline/voiceprint/repo，其中 api 占 17 处）**，远超「≤6 则内联」阈值 → 选**导出 `ids.InitForTest() error`**（放 `internal/ids/testinit.go` 普通源文件——Go 不跨包导出 `_test.go` 符号，api/repo 等包的测试要 import 它必须放非 test 文件；生产不调用，注释说明）。实现 = `Init(int64(os.Getpid()) % (1<<snowflake.NodeBits))`（PID 取模 1024）；返回 error 与 `Init` 同签名，故 `ids.Init(1)` 两种写法（`_ = …` 与 `if err := …`）均原地替换、不动结构。碰撞面：并行进程数=CPU 数（个位数），PID 对 1024 同余概率极低，退化也不比旧方案差（注释已论证）。
+- 注意：node 改变不影响既有断言（ID 值本身从不被断言——grep 确认没有测试硬编码 ID 前缀/数值断言）✅
 
-Commit: `test: 测试进程 snowflake node 隔离——解锁多包并行测试（F6）`
+**实测结论（2026-08-26，采纳方案 a）**：nodeID 隔离是**必要但不充分**——原验收标准（不带 `-p 1` 连跑 3 次全绿）**无法由本任务达成**，实际达成的事实如下：
+- ✅ `go build ./...` + `go vet ./...` 绿；**每个包单独跑绿**；`internal/pipeline` **单包**连跑 3 次 3/3 绿（包内测试无 `t.Parallel`、串行执行且自带 user_id=1 同名行预清理，内部稳定）；全套 **`-p 1`** 连跑绿。
+- ❌ **不带 `-p 1`**：iter1 绿，**iter2/iter3 失败**（`TestStagesASRAndSegment`、`TestStageExtractCommit`）。失败**与 nodeID 无关**（无主键撞库错误），是另两个**独立且跨包**的根因——即 `-p 1` 暂留的真实原因：
+  1. **job 抢占**：`internal/repo/job.go` 的 `ClaimNext` = `SELECT id FROM pipeline_job WHERE status='pending' ORDER BY id LIMIT 1`——**全局领最老 pending job**，不按 session/user 限定。`TestStagesASRAndSegment` 起真实 Pool、`OnDone` 对任意完成 job 触发；并行包（如 repo 的 job 测试）造的 pending job 被抢走 → 该测试读自己 session 的 transcript 得 `sql: no rows`。（Makefile 注释早有记录：repo `TestJobLifecycle` 与 pipeline pool 测试互抢。）
+  2. **user_id=1 去重污染**：extract 按归一化标题**跨 session 对 `user_id=1`** 佐证/去重 memory；并行的 api/profile 测试造同名 active memory → `TestStageExtractCommit` 的候选被佐证并入他人行 → `memories=1`（期望 2）。
+- **后续任务需做**（完整并行解锁）：job 领取按 owner/session 限定（或测试用独立 Pool），且每包或每测试独立 `user_id`（或独立库/schema）；两者都超出「nodeID 隔离」范围，且 user_id 隔离本就是计划显式推后项。
+
+Commit: `test: 测试进程 snowflake node 隔离——消除跨进程 ID 撞库（F6 部分）`
 
 ### Task 5: 收尾核对
 
