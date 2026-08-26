@@ -8,7 +8,7 @@
 1. `ClaimNext` 是全局 `SELECT ... WHERE status='pending' ORDER BY id LIMIT 1`——pipeline 包测试起的真实 Pool 会抢走 repo 包测试造的 job（各自都在同一个 zhiwei_test 库）
 2. extract 按 user_id=1 跨 session 归一化佐证——并行包的同名 memory 被合并，计数断言失败
 
-**方案（单点改造，零调用方改动）**：全部 34 个测试文件的 DB 连接都经 `repo.TestDSN(t)` 单点取得——在该函数内把 DSN 的库名换成 `zhiwei_test_<调用方包名>`（`runtime.Caller` 取调用方包目录），首次遇到某库名时自动 `CREATE DATABASE IF NOT EXISTS` + 进程内跑迁移（golang-migrate iofs，成熟开源方案）。不同包的测试二进制从此各用各的库，并行天然安全。
+**方案（单点改造；后经 review 调整为 repotest 包——34 个调用方仅机械替换 import 与调用点，零逻辑改动）**：全部 34 个测试文件的 DB 连接都经 `repo.TestDSN(t)` 单点取得——在该函数内把 DSN 的库名换成 `zhiwei_test_<调用方包名>`（`runtime.Caller` 取调用方包目录），首次遇到某库名时自动 `CREATE DATABASE IF NOT EXISTS` + 进程内跑迁移（golang-migrate iofs，成熟开源方案）。不同包的测试二进制从此各用各的库，并行天然安全。
 
 **不做**：生产代码零改动（ClaimNext 不加 user_id 过滤——那是多用户就绪的大改，测试隔离不需要动它）；不做按测试函数级隔离（包内本就串行，包级隔离即可）。
 
@@ -45,8 +45,7 @@ var FS embed.FS
 // user_id=1 跨包去重污染）都被库级隔离消解。
 //
 // 包名取法：runtime.Caller(1) 拿调用方（测试文件）的目录名——所有调用点都是
-// 测试函数内直接调 repo.TestDSN(t)， Caller(1) 恰为该测试文件。这是有意的
-// 零调用方改动设计（34 个测试文件不动）；魔法集中在这一处并配本注释。
+// 测试函数内直接调 repo.TestDSN(t)， Caller(1) 恰为该测试文件。
 //
 // 建库权限：init-testdb 给 zhiwei 用户授予 zhiwei_test_%.* 通配符权限
 // （MySQL 通配符 GRANT 对「尚不存在」的库生效）。
