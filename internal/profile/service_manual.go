@@ -644,8 +644,26 @@ func (s *Service) ManualDeleteMetric(ctx context.Context, userID int64, id ids.I
 
 // ManualAddCycle 手动加周期/日程（active/manual conf=1.0 + create 审计）。label 空→nil；
 // next_predicted_at 经 applyCycleParams 与 LLM 路径共用同一算法（anchor+period）；period/
-// duration<=0 不落列（同 LLM 路径「未给不设」）。参数多，调用方为 API handler。
+// duration<=0 不落列（同 LLM 路径「未给不设」）。自持事务：BeginTxx → ManualAddCycleExt → Commit。
 func (s *Service) ManualAddCycle(ctx context.Context, userID int64, personID ids.ID, cycleType, label, anchorDate,
+	frequency, dosage string, periodDays, durationDays int) (*repo.PersonCycle, error) {
+
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	row, err := s.ManualAddCycleExt(ctx, tx, userID, personID, cycleType, label, anchorDate, frequency, dosage, periodDays, durationDays)
+	if err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualAddCycleExt 是 ManualAddCycle 的事务版：全部写走传入的 tx，不自开/自提事务，供调用方
+// （如 agent 周期提议确认闸门）把「周期写 + Proposals.Resolve」原子并进同一事务（apply-once，
+// 见 proposals.go 的 profile_cycle case）。校验（cycle_type 合法 + IDOR）与落库语义与 ManualAddCycle 一致。
+func (s *Service) ManualAddCycleExt(ctx context.Context, tx *sqlx.Tx, userID int64, personID ids.ID, cycleType, label, anchorDate,
 	frequency, dosage string, periodDays, durationDays int) (*repo.PersonCycle, error) {
 
 	if !ValidCycleTypes[cycleType] {
@@ -665,11 +683,6 @@ func (s *Service) ManualAddCycle(ctx context.Context, userID int64, personID ids
 		row.Label = &l
 	}
 	applyCycleParams(row, anchorDate, periodDays, durationDays, dosage, frequency)
-	tx, err := s.DB.BeginTxx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback() }()
 	if err := s.Cycles.CreateExt(ctx, tx, row); err != nil {
 		return nil, err
 	}
@@ -680,7 +693,7 @@ func (s *Service) ManualAddCycle(ctx context.Context, userID int64, personID ids
 	}); err != nil {
 		return nil, err
 	}
-	return row, tx.Commit()
+	return row, nil
 }
 
 // ManualDeleteCycle 手动删周期 → dismissed + delete 审计。
@@ -721,8 +734,26 @@ func (s *Service) ManualDeleteCycle(ctx context.Context, userID int64, id ids.ID
 // tool/location/commuteMode trim 空→nil（走 repo <=> NULL 匹配，同 LLM 路径 applyActivityFact）；
 // duration>0 才落（≤0 视为未给，不臆造 0 分钟）；startedAt 解析失败 → time.Now() 兜底：手动录入
 // 没有「对话发生时刻」可依，不知道时间就记当下（区别于 LLM 路径的 fallbackAt——那里能用
-// session.created_at）。参数多，调用方为 API handler。
+// session.created_at）。自持事务：BeginTxx → ManualAddActivityExt → Commit。
 func (s *Service) ManualAddActivity(ctx context.Context, userID int64, personID ids.ID, activity, tool, location,
+	commuteMode, startedAt string, durationMin int) (*repo.PersonActivity, error) {
+
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	row, err := s.ManualAddActivityExt(ctx, tx, userID, personID, activity, tool, location, commuteMode, startedAt, durationMin)
+	if err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualAddActivityExt 是 ManualAddActivity 的事务版：全部写走传入的 tx，供调用方（如 agent 活动
+// 提议确认闸门）把「活动写 + Proposals.Resolve」原子并进同一事务（apply-once，见 proposals.go 的
+// profile_activity case）。校验（activity 非空 + IDOR）与落库语义与 ManualAddActivity 一致。
+func (s *Service) ManualAddActivityExt(ctx context.Context, tx *sqlx.Tx, userID int64, personID ids.ID, activity, tool, location,
 	commuteMode, startedAt string, durationMin int) (*repo.PersonActivity, error) {
 
 	act := strings.TrimSpace(activity)
@@ -750,11 +781,6 @@ func (s *Service) ManualAddActivity(ctx context.Context, userID int64, personID 
 		dm := durationMin
 		row.DurationMin = &dm
 	}
-	tx, err := s.DB.BeginTxx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback() }()
 	if err := s.Activities.CreateExt(ctx, tx, row); err != nil {
 		return nil, err
 	}
@@ -765,7 +791,7 @@ func (s *Service) ManualAddActivity(ctx context.Context, userID int64, personID 
 	}); err != nil {
 		return nil, err
 	}
-	return row, tx.Commit()
+	return row, nil
 }
 
 // ManualDeleteActivity 手动删活动 → dismissed + delete 审计。

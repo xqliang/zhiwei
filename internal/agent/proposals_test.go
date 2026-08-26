@@ -46,9 +46,13 @@ func p2dDeps(t *testing.T) (MCPDeps, ProposalDeps) {
 	pattrs := &repo.PersonAttributeRepo{DB: db}
 	pevents := &repo.PersonEventRepo{DB: db}
 	pmetrics := &repo.PersonMetricRepo{DB: db} // 第 5 平面：时序个人指标（get_metrics 读 + confirm 落库）
+	pcycles := &repo.PersonCycleRepo{DB: db}   // 第 6 平面：周期/日程（confirm profile_cycle 落库）
+	pactivities := &repo.PersonActivityRepo{DB: db}
 	profileSvc := &profile.Service{
 		DB: db, Persons: persons, Attributes: pattrs, Events: pevents,
 		Metrics:       pmetrics, // confirm profile_metric 时经 ManualAddMetricExt 落库需此 repo
+		Cycles:        pcycles,  // confirm profile_cycle 经 ManualAddCycleExt 落库
+		Activities:    pactivities,
 		Relationships: &repo.PersonRelationshipRepo{DB: db},
 		ChangeLogs:    &repo.PersonChangeLogRepo{DB: db},
 	}
@@ -1068,5 +1072,94 @@ func TestConfirmProfileMetricApplyOnce(t *testing.T) {
 	}
 	if after := countActiveMetrics(t, pd, owner.ID, "weight"); after != before+1 {
 		t.Errorf("重复 confirm 不应再追加测点, 期望 %d 得 %d", before+1, after)
+	}
+}
+
+// TestConfirmProfileCycleApplyOnce 锁定 §8 apply-once：propose_profile_cycle → confirm → owner
+// 新增一条 active 周期(medication/降压药)、proposal=applied、applied_ref 指向它；重复 confirm 幂等
+// （合并对账补：cycle 平面 agent 提议端到端）。
+func TestConfirmProfileCycleApplyOnce(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	res, _, err := proposeProfileCycleHandler(md, toolUserID)(ctx, nil, proposeProfileCycleArgs{
+		CycleType: "medication", Label: "降压药", Dosage: "1片", Frequency: "每日一次", PeriodDays: 30, Rationale: "长期服药",
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	_ = json.Unmarshal([]byte(mcpText(t, res)), &p)
+	cleanupProposal(t, pd, p.ID)
+	if p.Kind != "profile_cycle" || p.TargetID == nil || *p.TargetID != owner.ID || p.Status != "pending" {
+		t.Fatalf("周期提议异常: %+v", p)
+	}
+
+	code, p1 := postProposal(t, pd, p.ID, "confirm")
+	if code != http.StatusOK || p1.Status != "applied" || p1.AppliedRef == nil {
+		t.Fatalf("confirm code=%d status=%s ref=%v", code, p1.Status, p1.AppliedRef)
+	}
+	t.Cleanup(func() {
+		_, _ = pd.DB.Exec("DELETE FROM person_cycle WHERE id = ?", p1.AppliedRef.Int64())
+		_, _ = pd.DB.Exec("DELETE FROM person_change_log WHERE entity_kind = 'cycle' AND entity_id = ?", p1.AppliedRef.Int64())
+	})
+
+	c, err := (&repo.PersonCycleRepo{DB: pd.DB}).Get(ctx, *p1.AppliedRef)
+	if err != nil || c == nil {
+		t.Fatalf("新周期应存在: %v %+v", err, c)
+	}
+	if c.PersonID != owner.ID || c.CycleType != "medication" || c.Status != "active" || c.Source != "manual" {
+		t.Fatalf("新周期字段异常: %+v", c)
+	}
+	if c.Label == nil || *c.Label != "降压药" || c.Dosage == nil || *c.Dosage != "1片" {
+		t.Errorf("周期 label/dosage 异常: %+v", c)
+	}
+
+	// 重复 confirm：apply-once 幂等（Resolve CAS：status!=pending 早返回）
+	code2, p2 := postProposal(t, pd, p.ID, "confirm")
+	if code2 != http.StatusOK || p2.Status != "applied" {
+		t.Fatalf("2nd confirm code=%d status=%s", code2, p2.Status)
+	}
+}
+
+// TestConfirmProfileActivityApplyOnce 锁定 §8 apply-once：propose_profile_activity → confirm → owner
+// 新增一条 active 活动、applied_ref 指向它（合并对账补：activity 平面 agent 提议端到端）。
+func TestConfirmProfileActivityApplyOnce(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	res, _, err := proposeProfileActivityHandler(md, toolUserID)(ctx, nil, proposeProfileActivityArgs{
+		Activity: "晨跑", Tool: "跑鞋", Location: "公园", StartedAt: "2026-06-15", DurationMin: 40, Rationale: "锻炼",
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	_ = json.Unmarshal([]byte(mcpText(t, res)), &p)
+	cleanupProposal(t, pd, p.ID)
+	if p.Kind != "profile_activity" || p.TargetID == nil || *p.TargetID != owner.ID || p.Status != "pending" {
+		t.Fatalf("活动提议异常: %+v", p)
+	}
+
+	code, p1 := postProposal(t, pd, p.ID, "confirm")
+	if code != http.StatusOK || p1.Status != "applied" || p1.AppliedRef == nil {
+		t.Fatalf("confirm code=%d status=%s ref=%v", code, p1.Status, p1.AppliedRef)
+	}
+	t.Cleanup(func() {
+		_, _ = pd.DB.Exec("DELETE FROM person_activity WHERE id = ?", p1.AppliedRef.Int64())
+		_, _ = pd.DB.Exec("DELETE FROM person_change_log WHERE entity_kind = 'activity' AND entity_id = ?", p1.AppliedRef.Int64())
+	})
+
+	a, err := (&repo.PersonActivityRepo{DB: pd.DB}).Get(ctx, *p1.AppliedRef)
+	if err != nil || a == nil {
+		t.Fatalf("新活动应存在: %v %+v", err, a)
+	}
+	if a.PersonID != owner.ID || a.Activity != "晨跑" || a.Status != "active" || a.Source != "manual" {
+		t.Fatalf("新活动字段异常: %+v", a)
+	}
+	if a.Tool == nil || *a.Tool != "跑鞋" || a.DurationMin == nil || *a.DurationMin != 40 {
+		t.Errorf("活动 tool/duration 异常: %+v", a)
 	}
 }

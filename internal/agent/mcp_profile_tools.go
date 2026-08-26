@@ -60,6 +60,16 @@ func registerProfileTools(s *mcp.Server, d MCPDeps, userID int64) {
 		Name:        "propose_profile_metric",
 		Description: "提议给我记录一个时序指标测点(不立即生效，返回待确认提议；用户确认后才落库)。metric_key 必须合法(emotion|weight|sleep|mood_energy|diet|health)。数值型指标(体重/睡眠/情绪/精力)必须给 value_num；类别型指标(饮食/健康)必须给 value_text。unit 可选(留空取目录默认，如 kg/h)；measured_at 可选(如 2026-07-20 / '2026-07-20 15:04' / RFC3339，解析失败或留空取当前时间)。",
 	}, proposeProfileMetricHandler(d, userID))
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "propose_profile_cycle",
+		Description: "提议给我记录一条健康周期/日程(敏感，不立即生效，返回待确认提议；用户确认后才落库)。cycle_type 必须合法(menstrual|medication|injection|followup)。label(名称，如药名；生理期可空)、anchor_date(上次开始日 YYYY-MM-DD)、period_days(周期天数)、duration_days(持续天数)、dosage(剂量)、frequency(频次) 均可选。下次预测由 anchor+period 估算，仅供参考、非医疗建议。",
+	}, proposeProfileCycleHandler(d, userID))
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "propose_profile_activity",
+		Description: "提议给我记录一条生活轨迹活动(不立即生效，返回待确认提议)。activity(做什么，必填)；tool(工具/载体)、location(地点)、commute_mode(通勤方式)、started_at(开始时间 YYYY-MM-DD/RFC3339，留空取当前)、duration_min(时长分钟) 均可选。",
+	}, proposeProfileActivityHandler(d, userID))
 }
 
 // ---- 读工具输出结构（JSON tag 直接暴露给模型；status 只含 active/pending）----
@@ -472,6 +482,111 @@ func proposeProfileMetricHandler(d MCPDeps, userID int64) func(context.Context, 
 		oid := owner.ID // target_id = owner person id（confirm 时作 personID）
 		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: "profile_metric", TargetKind: "profile", TargetID: &oid,
+			Payload: json.RawMessage(payload), Rationale: a.Rationale,
+		})
+	}
+}
+
+// ---- propose_profile_cycle（profile_cycle）：只建 pending 提议，落库在 confirm 单事务里经
+// profile.Service.ManualAddCycleExt 完成（apply-once，见 proposals.go 的 profile_cycle case）。
+type proposeProfileCycleArgs struct {
+	CycleType    string `json:"cycle_type" jsonschema:"周期类型(必填): menstrual|medication|injection|followup"`
+	Label        string `json:"label,omitempty" jsonschema:"名称，如药名/针名；生理期可留空"`
+	AnchorDate   string `json:"anchor_date,omitempty" jsonschema:"上次开始日 YYYY-MM-DD"`
+	PeriodDays   int    `json:"period_days,omitempty" jsonschema:"周期天数(如生理期 28)"`
+	DurationDays int    `json:"duration_days,omitempty" jsonschema:"单次持续天数"`
+	Dosage       string `json:"dosage,omitempty" jsonschema:"剂量，如 1片"`
+	Frequency    string `json:"frequency,omitempty" jsonschema:"频次，如 每日一次"`
+	Rationale    string `json:"rationale,omitempty" jsonschema:"给用户看的记录理由"`
+}
+
+func proposeProfileCycleHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeProfileCycleArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeProfileCycleArgs) (*mcp.CallToolResult, any, error) {
+		cycleType := strings.TrimSpace(a.CycleType)
+		if !profile.ValidCycleTypes[cycleType] { // 非法 → tool-error 供模型读
+			return nil, nil, fmt.Errorf("非法周期类型: %q（合法: menstrual|medication|injection|followup）", a.CycleType)
+		}
+		owner, err := d.Persons.GetOwner(ctx, userID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if owner == nil {
+			return nil, nil, fmt.Errorf("尚未建立画像 owner「我」，无法提议记录周期")
+		}
+		// new 字段：确认时据此经 ManualAddCycleExt 落库。period/duration 仅 >0 才放（<=0 视为未给）。
+		newFields := map[string]any{"cycle_type": cycleType}
+		if v := strings.TrimSpace(a.Label); v != "" {
+			newFields["label"] = v
+		}
+		if v := strings.TrimSpace(a.AnchorDate); v != "" {
+			newFields["anchor_date"] = v
+		}
+		if a.PeriodDays > 0 {
+			newFields["period_days"] = a.PeriodDays
+		}
+		if a.DurationDays > 0 {
+			newFields["duration_days"] = a.DurationDays
+		}
+		if v := strings.TrimSpace(a.Dosage); v != "" {
+			newFields["dosage"] = v
+		}
+		if v := strings.TrimSpace(a.Frequency); v != "" {
+			newFields["frequency"] = v
+		}
+		payload, _ := json.Marshal(map[string]any{"new": newFields})
+		oid := owner.ID
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
+			Kind: "profile_cycle", TargetKind: "profile", TargetID: &oid,
+			Payload: json.RawMessage(payload), Rationale: a.Rationale,
+		})
+	}
+}
+
+// ---- propose_profile_activity（profile_activity）：只建 pending 提议，落库在 confirm 单事务里经
+// profile.Service.ManualAddActivityExt 完成（apply-once，见 proposals.go 的 profile_activity case）。
+type proposeProfileActivityArgs struct {
+	Activity    string `json:"activity" jsonschema:"做什么(必填)，如 写代码/打球/通勤"`
+	Tool        string `json:"tool,omitempty" jsonschema:"工具/载体，如 电脑/手机/健身房"`
+	Location    string `json:"location,omitempty" jsonschema:"地点"`
+	CommuteMode string `json:"commute_mode,omitempty" jsonschema:"通勤方式，如 地铁/开车/步行"`
+	StartedAt   string `json:"started_at,omitempty" jsonschema:"开始时间 YYYY-MM-DD/RFC3339，留空取当前"`
+	DurationMin int    `json:"duration_min,omitempty" jsonschema:"时长分钟"`
+	Rationale   string `json:"rationale,omitempty" jsonschema:"给用户看的记录理由"`
+}
+
+func proposeProfileActivityHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeProfileActivityArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeProfileActivityArgs) (*mcp.CallToolResult, any, error) {
+		activity := strings.TrimSpace(a.Activity)
+		if activity == "" {
+			return nil, nil, fmt.Errorf("activity 不能为空")
+		}
+		owner, err := d.Persons.GetOwner(ctx, userID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if owner == nil {
+			return nil, nil, fmt.Errorf("尚未建立画像 owner「我」，无法提议记录活动")
+		}
+		newFields := map[string]any{"activity": activity}
+		if v := strings.TrimSpace(a.Tool); v != "" {
+			newFields["tool"] = v
+		}
+		if v := strings.TrimSpace(a.Location); v != "" {
+			newFields["location"] = v
+		}
+		if v := strings.TrimSpace(a.CommuteMode); v != "" {
+			newFields["commute_mode"] = v
+		}
+		if v := strings.TrimSpace(a.StartedAt); v != "" {
+			newFields["started_at"] = v
+		}
+		if a.DurationMin > 0 {
+			newFields["duration_min"] = a.DurationMin
+		}
+		payload, _ := json.Marshal(map[string]any{"new": newFields})
+		oid := owner.ID
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
+			Kind: "profile_activity", TargetKind: "profile", TargetID: &oid,
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})
 	}

@@ -191,6 +191,18 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		}
 		return nil
 	}
+	// newInt 从 pl.New 取 int：JSON 数字进 map 是 float64，截断取整；缺键/非数字返回 0。
+	// 供 profile_cycle 的 period_days/duration_days、profile_activity 的 duration_min 用
+	// （<=0 由 Service 层视为「未给」不落列，与 LLM/手动路径一致）。
+	newInt := func(k string) int {
+		if pl.New == nil {
+			return 0
+		}
+		if v, ok := pl.New[k].(float64); ok {
+			return int(v)
+		}
+		return 0
+	}
 	switch p.Kind {
 	case "memory_update":
 		if p.TargetID == nil {
@@ -407,6 +419,42 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		}
 		row, err := d.Profile.ManualAddMetricExt(ctx, tx, p.UserID, *p.TargetID, metricKey,
 			newFloatPtr("value_num"), newStr("value_text"), newStr("unit"), measuredAt)
+		if err != nil {
+			return nil, err
+		}
+		return &row.ID, nil
+	case "profile_cycle":
+		// 画像周期（第 6 平面 person_cycle，敏感）：target_id=owner person id。走事务版
+		// ManualAddCycleExt（内部再校验 cycle_type 合法 + IDOR，与 propose 端双保险），把
+		// 「周期写(active/manual/审计 + next_predicted 估算) + Resolve」并进本 confirm 事务，apply-once。
+		// period_days/duration_days <=0 由 Service 视为「未给」不落列（同手动/LLM 路径）。
+		if p.TargetID == nil {
+			return nil, fmt.Errorf("profile_cycle 缺 target_id")
+		}
+		cycleType := newStr("cycle_type")
+		if !profile.ValidCycleTypes[cycleType] { // 双保险：防未来别的提议源不 gate 就写入非法类型
+			return nil, fmt.Errorf("profile_cycle 非法周期类型: %s", cycleType)
+		}
+		row, err := d.Profile.ManualAddCycleExt(ctx, tx, p.UserID, *p.TargetID, cycleType,
+			newStr("label"), newStr("anchor_date"), newStr("frequency"), newStr("dosage"),
+			newInt("period_days"), newInt("duration_days"))
+		if err != nil {
+			return nil, err
+		}
+		return &row.ID, nil
+	case "profile_activity":
+		// 画像活动（生活轨迹 person_activity）：target_id=owner person id。走事务版 ManualAddActivityExt
+		// （内部再校验 activity 非空 + IDOR），把「活动写(active/manual/审计) + Resolve」并进本 confirm
+		// 事务，apply-once。started_at 空/解析失败取 now；duration_min <=0 视为未给不落列。
+		if p.TargetID == nil {
+			return nil, fmt.Errorf("profile_activity 缺 target_id")
+		}
+		activity := newStr("activity")
+		if activity == "" {
+			return nil, fmt.Errorf("profile_activity 缺 new.activity")
+		}
+		row, err := d.Profile.ManualAddActivityExt(ctx, tx, p.UserID, *p.TargetID, activity,
+			newStr("tool"), newStr("location"), newStr("commute_mode"), newStr("started_at"), newInt("duration_min"))
 		if err != nil {
 			return nil, err
 		}
