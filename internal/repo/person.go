@@ -89,7 +89,8 @@ SELECT p.*,
 + (SELECT COUNT(*) FROM person_relationship rel WHERE rel.person_id = p.id AND rel.status = 'pending')
 + (SELECT COUNT(*) FROM person_event e WHERE e.person_id = p.id AND e.status = 'pending')
 + (SELECT COUNT(*) FROM person_metric m WHERE m.person_id = p.id AND m.status = 'pending')
-+ (SELECT COUNT(*) FROM person_cycle c WHERE c.person_id = p.id AND c.status = 'pending') AS pending_count
++ (SELECT COUNT(*) FROM person_cycle c WHERE c.person_id = p.id AND c.status = 'pending')
++ (SELECT COUNT(*) FROM person_activity act WHERE act.person_id = p.id AND act.status = 'pending') AS pending_count
 FROM person p
 WHERE p.user_id = ? AND p.status != 'dismissed'
 ORDER BY p.is_owner DESC, p.updated_at DESC`, userID)

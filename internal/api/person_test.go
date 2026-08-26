@@ -47,7 +47,8 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 		Relationships: &repo.PersonRelationshipRepo{DB: db}, ChangeLogs: &repo.PersonChangeLogRepo{DB: db},
 		Events:  &repo.PersonEventRepo{DB: db},
 		Metrics: &repo.PersonMetricRepo{DB: db}, Cycles: &repo.PersonCycleRepo{DB: db},
-		LLM: &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
+		Activities: &repo.PersonActivityRepo{DB: db},
+		LLM:        &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
 		Gate: profile.GateConfig{AutoConf: 0.75},
 	}
 	if err := repo.EnsurePersonBootstrap(context.Background(), svc.Persons, svc.Speakers); err != nil {
@@ -57,7 +58,8 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 	RegisterPerson(r, &PersonHandler{
 		Persons: svc.Persons, Attributes: svc.Attributes,
 		Relationships: svc.Relationships, ChangeLogs: svc.ChangeLogs,
-		Events: svc.Events, Metrics: svc.Metrics, Cycles: svc.Cycles, Service: svc,
+		Events: svc.Events, Metrics: svc.Metrics, Cycles: svc.Cycles,
+		Activities: svc.Activities, Service: svc,
 	})
 	return r, svc
 }
@@ -723,5 +725,178 @@ func TestPersonCycleAPI(t *testing.T) {
 	}
 	if !foundDismissed {
 		t.Fatalf("?status=dismissed 应含刚删除的周期 c(id=%s): %+v", c.ID, dismissedR.Cycles)
+	}
+}
+
+// TestPersonActivityAPI 覆盖生活轨迹 API 全链路：手动加活动（含可空 tool/location/commute_mode/
+// duration_min）、activity 空值校验、时间线升序（乱序录入→GET 断言升序）、时间窗半开区间、确认
+// 队列含 activity 条目（带 occurred_at）+ 详情 pending 计数 + HTTP 确认、删除转 dismissed（软删，
+// 全状态 GET 仍返回该行——前端靠 status!==dismissed 客户端过滤）。跨包非自隔离：t.Cleanup 删掉
+// owner 的 person_activity 行 + entity_kind='activity' 审计行，防污染 profile 包同库断言。
+func TestPersonActivityAPI(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+	t.Cleanup(func() {
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_activity WHERE person_id = ?", owner.ID.Int64())
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'activity'", owner.ID.Int64())
+	})
+
+	base := "/api/persons/" + owner.ID.String() + "/activities"
+
+	// 手动加活动（通勤·地铁·40分钟）——含可空 commute_mode/duration_min。POST 返回 {activity: row}。
+	rec := doReq(t, h, "POST", base,
+		map[string]any{"activity": "通勤", "commute_mode": "地铁", "started_at": "2026-08-20", "duration_min": 40})
+	if rec.Code != 200 {
+		t.Fatalf("加活动失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var addR struct {
+		Activity repo.PersonActivity `json:"activity"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &addR)
+	a1 := addR.Activity
+	if a1.Status != "active" || a1.Source != "manual" {
+		t.Fatalf("手动活动错误: %+v", a1)
+	}
+	if a1.CommuteMode == nil || *a1.CommuteMode != "地铁" {
+		t.Fatalf("commute_mode 应为 地铁: %v", a1.CommuteMode)
+	}
+	if a1.DurationMin == nil || *a1.DurationMin != 40 {
+		t.Fatalf("duration_min 应为 40: %v", a1.DurationMin)
+	}
+
+	// activity 空 → 400（handler 层校验，非 Service 500）
+	if rec := doReq(t, h, "POST", base, map[string]any{"activity": "  "}); rec.Code != 400 {
+		t.Fatalf("空 activity 应 400: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 乱序再加两条不同日期活动（08-25、08-18）→ 后续 GET 断言按 started_at 升序
+	if rec := doReq(t, h, "POST", base, map[string]any{"activity": "打球", "started_at": "2026-08-25"}); rec.Code != 200 {
+		t.Fatalf("加活动2失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(t, h, "POST", base,
+		map[string]any{"activity": "写代码", "tool": "电脑", "location": "公司", "started_at": "2026-08-18"}); rec.Code != 200 {
+		t.Fatalf("加活动3失败: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// GET 全部 → 3 条且按 started_at 升序（08-18 写代码 / 08-20 通勤 / 08-25 打球）
+	rec = doReq(t, h, "GET", base, nil)
+	if rec.Code != 200 {
+		t.Fatalf("列表失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var listR struct {
+		Activities []repo.PersonActivity `json:"activities"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if len(listR.Activities) != 3 {
+		t.Fatalf("应 3 条: %d", len(listR.Activities))
+	}
+	for i := 1; i < len(listR.Activities); i++ {
+		if listR.Activities[i].StartedAt.Before(listR.Activities[i-1].StartedAt) {
+			t.Fatalf("活动应按 started_at 升序: %+v", listR.Activities)
+		}
+	}
+	if listR.Activities[0].Activity != "写代码" || listR.Activities[2].Activity != "打球" {
+		t.Fatalf("升序首尾错误: %s ... %s", listR.Activities[0].Activity, listR.Activities[2].Activity)
+	}
+
+	// 时间窗查询：半开区间 [2026-08-20, 2026-08-21) 命中 08-20 通勤 → 1 条
+	rec = doReq(t, h, "GET", base+"?from=2026-08-20&to=2026-08-21", nil)
+	if rec.Code != 200 {
+		t.Fatalf("时间窗查询失败: %d %s", rec.Code, rec.Body.String())
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if len(listR.Activities) != 1 || listR.Activities[0].Activity != "通勤" {
+		t.Fatalf("时间窗应命中 1 条通勤: %+v", listR.Activities)
+	}
+	// from 烂串 → 400
+	if rec := doReq(t, h, "GET", base+"?from=abc", nil); rec.Code != 400 {
+		t.Fatalf("from 烂串应 400: %d", rec.Code)
+	}
+
+	// 造一条 pending（低置信 0.5<0.75）→ 队列含 activity 条目（带 occurred_at）→ 详情计数 → HTTP 确认 → active
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []profile.Fact{
+		{Plane: "activity", Subject: profile.Subject{Kind: "self"}, ActivityText: "游泳",
+			StartedAt: "2026-08-22", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = doReq(t, h, "GET", "/api/profile/pending", nil)
+	var pend struct {
+		Items []map[string]any `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pend)
+	var aItemID, aOccurredAt string
+	for _, it := range pend.Items {
+		if it["kind"] == "activity" && it["value"] == "游泳" {
+			aItemID, _ = it["id"].(string)
+			aOccurredAt, _ = it["occurred_at"].(string)
+		}
+	}
+	if aItemID == "" {
+		t.Fatalf("队列缺 activity 条目: %+v", pend.Items)
+	}
+	// 队列条目补 started_at（occurred_at 字段）——前端时间线依赖（对齐 metric 队列条目）
+	if aOccurredAt == "" {
+		t.Fatalf("activity 队列条目应含 occurred_at: %+v", pend.Items)
+	}
+	// 详情 PendingCount 应含该 pending activity（此刻 owner 仅此一条 pending）
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String(), nil)
+	var detail struct {
+		PendingCount int `json:"pending_count"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail)
+	if detail.PendingCount < 1 {
+		t.Fatalf("详情 PendingCount 应含 pending activity: %d", detail.PendingCount)
+	}
+	// 名册角标（ListWithPending SQL 求和）应同样含该 pending activity——roster/详情角标须一致
+	// （person.go 注释不变量）。直接覆盖 ListWithPending 的 person_activity 子查询。
+	rec = doReq(t, h, "GET", "/api/persons", nil)
+	var roster struct {
+		Persons []repo.PersonWithPending `json:"persons"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &roster)
+	ownerBadge := -1
+	for _, p := range roster.Persons {
+		if p.ID == owner.ID {
+			ownerBadge = p.PendingCount
+		}
+	}
+	if ownerBadge < 1 {
+		t.Fatalf("名册角标应含 pending activity: %d", ownerBadge)
+	}
+	if rec := doReq(t, h, "POST", "/api/profile/pending/activity/"+aItemID+"/confirm", nil); rec.Code != 200 {
+		t.Fatalf("活动确认失败: %d %s", rec.Code, rec.Body.String())
+	}
+	aid2, _ := ids.ParseID(aItemID)
+	if got, _ := svc.Activities.Get(ctx, aid2); got == nil || got.Status != "active" {
+		t.Fatalf("确认后应 active: %+v", got)
+	}
+
+	// 删除不存在的活动（合法 id 但库中无此行）→ 404
+	if rec := doReq(t, h, "DELETE", base+"/"+ids.New().String(), nil); rec.Code != 404 {
+		t.Fatalf("删除不存在活动应 404: %d %s", rec.Code, rec.Body.String())
+	}
+	// 删除活动 → dismissed（软删）
+	if rec := doReq(t, h, "DELETE", base+"/"+a1.ID.String(), nil); rec.Code != 200 {
+		t.Fatalf("删除失败: %d", rec.Code)
+	}
+	if d, _ := svc.Activities.Get(ctx, a1.ID); d == nil || d.Status != "dismissed" {
+		t.Fatalf("删除后应 dismissed: %+v", d)
+	}
+	// 软删后「全状态」GET 仍返回该行（前端靠 status!==dismissed 客户端过滤，非后端剔除）
+	rec = doReq(t, h, "GET", base, nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	foundDismissed := false
+	for _, a := range listR.Activities {
+		if a.ID == a1.ID {
+			if a.Status != "dismissed" {
+				t.Fatalf("软删行状态应 dismissed: %+v", a)
+			}
+			foundDismissed = true
+		}
+	}
+	if !foundDismissed {
+		t.Fatalf("全状态 GET 应仍含软删行(id=%s): %+v", a1.ID, listR.Activities)
 	}
 }

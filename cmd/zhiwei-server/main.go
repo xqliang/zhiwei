@@ -70,6 +70,7 @@ func main() {
 	personEvents := &repo.PersonEventRepo{DB: db}
 	personMetrics := &repo.PersonMetricRepo{DB: db}
 	personCycles := &repo.PersonCycleRepo{DB: db}
+	personActivities := &repo.PersonActivityRepo{DB: db}
 	personLogs := &repo.PersonChangeLogRepo{DB: db}
 	// 画像回填：owner「我」+ speaker→person（幂等，见 repo.EnsurePersonBootstrap）
 	if err := repo.EnsurePersonBootstrap(context.Background(), persons, speakers); err != nil {
@@ -138,7 +139,7 @@ func main() {
 		DB: db, Sessions: sessions, Transcripts: transcripts, Memories: memories,
 		Speakers: speakers, Persons: persons, Attributes: personAttrs,
 		Relationships: personRels, Events: personEvents, ChangeLogs: personLogs,
-		Metrics: personMetrics, Cycles: personCycles,
+		Metrics: personMetrics, Cycles: personCycles, Activities: personActivities,
 		LLM: llm, Model: cfg.LLMFastModel, Prompt: string(profilePromptBytes),
 		PromptVersion: profilePromptVersion,
 		Window:        cfg.ProfileExtractWindow, Gate: profile.GateConfig{AutoConf: cfg.ProfileAutoConfidence},
@@ -203,7 +204,7 @@ func main() {
 	api.RegisterPerson(r, &api.PersonHandler{
 		Persons: persons, Attributes: personAttrs, Relationships: personRels,
 		Events: personEvents, Metrics: personMetrics, Cycles: personCycles,
-		ChangeLogs: personLogs, Service: profileSvc,
+		Activities: personActivities, ChangeLogs: personLogs, Service: profileSvc,
 	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
