@@ -1,7 +1,8 @@
-// match.go：1:N 声纹匹配的两级命中判定（纯函数，供 speaker stage 与 match 预览共用）。
+// match.go：1:N 声纹匹配的两级命中判定（纯函数，供 speaker stage、match 预览与
+// timeline 列表「整段声纹」判定共用）。
 package voiceprint
 
-// 两级命中规则的参数（2026-08-25 需求）：
+// 两级命中规则的参数（2026-08-25 需求，2026-08-26 复核修订）：
 //
 // ① 强命中：top1 ≥ threshold（ZW_VOICEPRINT_THRESHOLD，默认 0.8）；
 // ② 区分性弱命中：top1 ≥ SoftMin 且 top1−top2 ≥ GapMin——分数略低于阈值但
@@ -12,7 +13,9 @@ const (
 	// SoftMin 弱命中的最低相似度下限。
 	SoftMin = 0.72
 	// GapMin top1 相对第二名（top2）的最小领先幅度。
-	GapMin = 0.6
+	// 2026-08-26 修正：初值 0.6 在余弦域（[-1,1]）几乎不可达——top1≥0.72 且领先 0.6 意味着
+	// top2≤0.12，等于弱命中分支实际永不触发。按需求方明确的规则改为 0.06。
+	GapMin = 0.06
 )
 
 // Matched 判定一次 1:N 检索是否命中既有声纹。

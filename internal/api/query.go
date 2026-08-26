@@ -1,16 +1,20 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/voiceprint"
 )
 
 // QueryHandler 会话/任务查询。
@@ -23,6 +27,9 @@ type QueryHandler struct {
 	Speakers    *repo.SpeakerRepo // speaker stage：详情附带段说话人 + speakers 列表
 
 	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // speakername stage：详情 speakers 附候选名
+
+	// VoiceprintThreshold 1:N 强命中阈值（timeline 列表「整段声纹」判定用；0→兜底 0.8）。
+	VoiceprintThreshold float64
 }
 
 // RegisterQuery 挂载查询路由。
@@ -39,6 +46,11 @@ func RegisterQuery(r chi.Router, h *QueryHandler) {
 
 // ListSessions 列出会话，每行富化 asr_preview（转写前 120 字）+ memory_count +
 // todo_count（单 SQL 相关子查询，避免 N+1），并附最新 job 状态（处理进度）。
+// 另富化 voice_top（「整段声纹」top-3 + 两级规则判定，2026-08-26 需求）：
+//   - 整段只有 1 个 ASR 说话人标签 → 用全部段向量均值（≈整段代表声纹）与全库比对；
+//   - 多人 → 用时长最长的一段（有向量的）比对——该段最能代表主要说话人；
+//   - 判定与 speaker stage 同一套两级规则（voiceprint.Matched：≥阈值 或 ≥0.72 且领先 0.06）。
+// 只读展示、不改实际归属；段向量缺失（存量会话）或声纹库为空时无此字段。
 // asr_full 不外泄（json:"-"），仅截断后以 asr_preview 输出。
 func (h *QueryHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 	limit := intQuery(r, "limit", 50)
@@ -50,6 +62,7 @@ func (h *QueryHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 		TodoCount   int    `db:"todo_count" json:"todo_count"`
 		AsrFull     string `db:"asr_full" json:"-"` // GROUP_CONCAT 全文，截断后给 AsrPreview
 		AsrPreview  string `db:"-" json:"asr_preview"`
+		VoiceTop    *voiceTopView `db:"-" json:"voice_top,omitempty"`
 	}
 	var rows []row
 	err := h.Sessions.DB.SelectContext(r.Context(), &rows, `
@@ -79,7 +92,254 @@ FROM audio_session s ORDER BY s.id DESC LIMIT ?`, limit)
 			}
 		}
 	}
+	// 「整段声纹」富化（声纹库未装配/读取失败则整列跳过，不阻断列表）
+	if h.Speakers != nil {
+		sids := make([]ids.ID, len(out))
+		for i := range out {
+			sids[i] = out[i].ID
+		}
+		tops := h.enrichVoiceTops(r.Context(), sids)
+		for i := range out {
+			out[i].VoiceTop = tops[out[i].ID]
+		}
+	}
 	writeJSON(w, map[string]any{"sessions": out})
+}
+
+// voiceTopView timeline 卡片的「整段声纹」信息。
+type voiceTopView struct {
+	Basis string       `json:"basis"`           // whole=整段（单人）/ longest=最长段（多人）
+	// Matches 与全库声纹的 top-3 余弦相似（降序；声纹库不足 3 人则更少）
+	Matches []voiceMatch `json:"matches"`
+	// Matched 两级规则（voiceprint.Matched）是否判定命中；Rule 给出命中依据
+	// （strong=强命中过阈值 / gap=区分性弱命中），未命中为空
+	Matched bool   `json:"matched"`
+	Rule    string `json:"rule,omitempty"`
+	// SpeakerID/SpeakerName 命中时的说话人（=Matches[0]）
+	SpeakerID   string `json:"speaker_id,omitempty"`
+	SpeakerName string `json:"speaker_name,omitempty"`
+}
+
+// voiceTopSegMeta 列表声纹判定所需的段元信息（不含 embedding——向量按需另取，控制列表开销）。
+type voiceTopSegMeta struct {
+	SessionID    ids.ID `db:"session_id"`
+	ID           ids.ID `db:"id"`
+	SpeakerLabel string `db:"speaker_label"`
+	StartMS      int64  `db:"start_ms"`
+	EndMS        int64  `db:"end_ms"`
+	HasEmb       bool   `db:"has_emb"` // embedding 是否非空（决定单人聚合/最长段回退能否取到向量）
+}
+
+// enrichVoiceTops 整页计算各会话的「整段声纹」top-3 + 判定（session→voiceTopView，
+// 无值（库空/段无向量）的会话不在返回 map 里）。
+// 开销控制（列表接口，避免 N+1）：段元信息一次查全页、声纹库一次解码全页复用；
+// 段向量按判定基准按需取——单人会话取其全部段、多人会话只取最长一段。
+func (h *QueryHandler) enrichVoiceTops(ctx context.Context, sids []ids.ID) map[ids.ID]*voiceTopView {
+	out := map[ids.ID]*voiceTopView{}
+	if len(sids) == 0 {
+		return out
+	}
+	// 声纹库：一次取全页复用（空库直接整体跳过）
+	all, err := h.Speakers.List(ctx)
+	if err != nil {
+		log.Printf("[speaker] 列表声纹库读取失败: %v", err)
+		return out
+	}
+	lib := decodeLibrary(all)
+	if len(lib) == 0 {
+		return out
+	}
+	// 段元信息：一次查全页（不含向量，见 listSegMetas 注释）
+	metas, err := h.listSegMetas(ctx, sids)
+	if err != nil {
+		log.Printf("[speaker] 列表声纹段元信息读取失败: %v", err)
+		return out
+	}
+	threshold := h.VoiceprintThreshold
+	if threshold == 0 {
+		threshold = 0.8
+	}
+
+	// 第一遍：逐会话定基准（whole/longest），收集需要取向量的段 id
+	type plan struct {
+		basis   string   // whole=整段（单人）/ longest=最长段（多人）
+		segIDs  []ids.ID // 需要向量的段（whole=全部有向量的段；longest=选出的那一段）
+	}
+	plans := map[ids.ID]*plan{}
+	var wantIDs []ids.ID
+	for sid, segs := range metas {
+		if len(segs) == 0 {
+			continue
+		}
+		labels := map[string]bool{}
+		for _, m := range segs {
+			labels[m.SpeakerLabel] = true
+		}
+		p := &plan{}
+		if len(labels) <= 1 {
+			// 单人：整段代表声纹 = 全部段向量均值（只取向量非空的段）
+			p.basis = "whole"
+			for _, m := range segs {
+				if m.HasEmb {
+					p.segIDs = append(p.segIDs, m.ID)
+				}
+			}
+			if len(p.segIDs) == 0 {
+				continue // 存量会话（逐段向量落库前处理），无值
+			}
+		} else {
+			// 多人：按时长降序取第一个有向量的段（最长段向量缺失时顺延次长）
+			p.basis = "longest"
+			ordered := append([]voiceTopSegMeta(nil), segs...)
+			for i := 1; i < len(ordered); i++ { // 插入排序（段数少，无需 sort 包）
+				for j := i; j > 0 && ordered[j].EndMS-ordered[j].StartMS > ordered[j-1].EndMS-ordered[j-1].StartMS; j-- {
+					ordered[j], ordered[j-1] = ordered[j-1], ordered[j]
+				}
+			}
+			for _, m := range ordered {
+				if m.HasEmb {
+					p.segIDs = append(p.segIDs, m.ID)
+					break
+				}
+			}
+			if len(p.segIDs) == 0 {
+				continue
+			}
+		}
+		plans[sid] = p
+		wantIDs = append(wantIDs, p.segIDs...)
+	}
+	// 第二遍：段向量一次批量取，再逐会话算 top-3 + 判定
+	embs, err := h.loadSegEmbeddings(ctx, wantIDs)
+	if err != nil {
+		log.Printf("[speaker] 列表声纹段向量读取失败: %v", err)
+		return out
+	}
+	for sid, p := range plans {
+		var vec []float32
+		if p.basis == "whole" {
+			vecs := make([][]float32, 0, len(p.segIDs))
+			for _, id := range p.segIDs {
+				if b, ok := embs[id]; ok {
+					if v, ok2 := decodeEmbedding(b); ok2 && len(v) == 256 {
+						vecs = append(vecs, v)
+					}
+				}
+			}
+			if len(vecs) == 0 {
+				continue
+			}
+			vec = aggregateVecsAPI(vecs)
+		} else {
+			if b, ok := embs[p.segIDs[0]]; ok {
+				if v, ok2 := decodeEmbedding(b); ok2 && len(v) == 256 {
+					vec = v
+				}
+			}
+			if vec == nil {
+				continue
+			}
+		}
+		ms := topVoiceMatchesVec(lib, vec, 3)
+		if len(ms) == 0 {
+			continue
+		}
+		second := 0.0
+		if len(ms) > 1 {
+			second = ms[1].Similarity
+		}
+		vt := &voiceTopView{Basis: p.basis, Matches: ms}
+		if voiceprint.Matched(ms[0].Similarity, second, threshold) {
+			vt.Matched = true
+			vt.SpeakerID, vt.SpeakerName = ms[0].SpeakerID, ms[0].Name
+			if ms[0].Similarity >= threshold {
+				vt.Rule = "strong" // 强命中：过阈值
+			} else {
+				vt.Rule = "gap" // 区分性弱命中：≥0.72 且领先第二名 ≥0.06
+			}
+		}
+		out[sid] = vt
+	}
+	return out
+}
+
+// listSegMetas 取一批会话的段元信息（id/标签/起止/有无向量），按 session 分组。
+// 只取元信息不取向量——embedding 每段 1KB，整页全取会把列表接口拖重；向量按
+// sessionVoiceTop 的判定基准再按需取（单人取全部段、多人只取最长一段）。
+func (h *QueryHandler) listSegMetas(ctx context.Context, sids []ids.ID) (map[ids.ID][]voiceTopSegMeta, error) {
+	out := map[ids.ID][]voiceTopSegMeta{}
+	if len(sids) == 0 {
+		return out, nil
+	}
+	ph := make([]string, len(sids))
+	args := make([]any, len(sids))
+	for i, sid := range sids {
+		ph[i] = "?"
+		args[i] = sid.Int64()
+	}
+	var rows []voiceTopSegMeta
+	q := `SELECT tr.session_id, seg.id, seg.speaker_label, seg.start_ms, seg.end_ms,
+	             (seg.embedding IS NOT NULL) AS has_emb
+	      FROM transcript_segment seg JOIN transcript tr ON tr.id = seg.transcript_id
+	      WHERE tr.session_id IN (` + strings.Join(ph, ",") + `)`
+	if err := h.Transcripts.DB.SelectContext(ctx, &rows, q, args...); err != nil {
+		return nil, err
+	}
+	for _, m := range rows {
+		out[m.SessionID] = append(out[m.SessionID], m)
+	}
+	return out, nil
+}
+
+// loadSegEmbeddings 按段 id 批量取向量 BLOB（id→blob；缺向量的段不在结果里）。
+func (h *QueryHandler) loadSegEmbeddings(ctx context.Context, segIDs []ids.ID) (map[ids.ID][]byte, error) {
+	out := map[ids.ID][]byte{}
+	if len(segIDs) == 0 {
+		return out, nil
+	}
+	ph := make([]string, len(segIDs))
+	args := make([]any, len(segIDs))
+	for i, sid := range segIDs {
+		ph[i] = "?"
+		args[i] = sid.Int64()
+	}
+	var rows []struct {
+		ID        ids.ID `db:"id"`
+		Embedding []byte `db:"embedding"`
+	}
+	q := `SELECT id, embedding FROM transcript_segment WHERE id IN (` + strings.Join(ph, ",") + `)`
+	if err := h.Transcripts.DB.SelectContext(ctx, &rows, q, args...); err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r.Embedding
+	}
+	return out, nil
+}
+
+// aggregateVecsAPI 多段向量取均值再 L2 归一（整段代表声纹）。
+// 内联而非 import pipeline（避免 api→pipeline 反向依赖；同 float32BlobAPI 模式），
+// 算法与 pipeline.aggregateEmbeddings 完全一致（组代表声纹同一套路）。
+func aggregateVecsAPI(vecs [][]float32) []float32 {
+	rep := make([]float32, 256)
+	for _, v := range vecs {
+		for i := 0; i < 256 && i < len(v); i++ {
+			rep[i] += v[i]
+		}
+	}
+	n := float32(len(vecs))
+	var sumSq float64
+	for i := 0; i < 256; i++ {
+		rep[i] /= n
+		sumSq += float64(rep[i]) * float64(rep[i])
+	}
+	if sumSq > 0 {
+		inv := float32(1.0 / math.Sqrt(sumSq))
+		for i := 0; i < 256; i++ {
+			rep[i] *= inv
+		}
+	}
+	return rep
 }
 
 type segmentView struct {

@@ -1072,7 +1072,7 @@ const app = createApp({
     function closePersonDetail() {
       personDetail.value = null;
       renamingPerson.value = null;
-      archivingPersonId.value = null; // 切换详情/收起时一并清归档确认态（对齐 toggleSession 折叠清 deletingSessionId）
+      deletingPersonId.value = null; // 切换详情/收起时一并清删除确认态（对齐 toggleSession 折叠清 deletingSessionId）
       // 属性手动管理临时态（Task 3）：加属性表单(含草稿) / 就地改值 / 删除确认 / 历史抽屉一并清空
       editingAttr.value = null; deletingAttrId.value = null; attrHistory.value = null;
       showAddAttr.value = false; addAttrForm.attr_key = ''; addAttrForm.value = '';
@@ -1109,16 +1109,37 @@ const app = createApp({
         showError(e);
       }
     }
-    // 人物归档（2 步确认；DELETE = status=dismissed 软删）
-    const archivingPersonId = ref(null);
-    function askArchivePerson(p) { archivingPersonId.value = p.id; }
-    function cancelArchivePerson() { archivingPersonId.value = null; }
-    async function confirmArchivePerson(p) {
+    // 人物删除（原「归档」，2 步确认；DELETE = status=dismissed 软删，六平面级联 dismiss——
+    // 行 dismiss 前状态记 pre_dismiss_status，恢复时可级联回滚，手动删过的行不受影响）
+    const deletingPersonId = ref(null);
+    function askDeletePerson(p) { deletingPersonId.value = p.id; }
+    function cancelDeletePerson() { deletingPersonId.value = null; }
+    async function confirmDeletePerson(p) {
       try {
         await api('DELETE', '/api/persons/' + p.id);
-        archivingPersonId.value = null;
+        deletingPersonId.value = null;
         if (personDetail.value && personDetail.value.person.id === p.id) closePersonDetail();
         await loadPersons();
+        await loadDeletedPersons(); // 已删除列表同步（该人物移入折叠区）
+      } catch (e) { showError(e); }
+    }
+    // 已删除人物（status=dismissed 软删行）：底部折叠区查看 + 恢复入口（对齐已忽略主题的交互）。
+    const deletedPersons = ref([]);
+    const deletedCollapsed = ref(true); // 默认收起
+    async function loadDeletedPersons() {
+      try {
+        const d = await api('GET', '/api/persons?dismissed=1');
+        deletedPersons.value = d.persons || [];
+      } catch (e) { showError(e); }
+    }
+    // 恢复已删除人物（PATCH status=active）：后端在同一事务级联恢复删除时被连带清掉的
+    // 六平面行（手动删过的行保持 dismissed，不会误恢复）
+    async function restorePerson(p) {
+      try {
+        await api('PATCH', '/api/persons/' + p.id, { status: 'active' });
+        await loadPersons();
+        await loadDeletedPersons();
+        toast.value = '人物已恢复'; setTimeout(() => { toast.value = ''; }, 2000);
       } catch (e) { showError(e); }
     }
     // epistemic_type（认知来源）→ 中文标签，属性徽标用。
@@ -1916,8 +1937,8 @@ const app = createApp({
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; loadTopics(); loadTodos(); loadDismissedTodos(); }
       // 声纹 tab：进入时复位本 tab 的临时态（收起录入表单/展开项/改名/播放）并拉全量名册。
       if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; loadAllSpeakers(); }
-      // 人物 tab：进入时复位详情/归档确认态，拉名册 + 确认队列（跨平面 pending 并集，独立刷新）。
-      if (name === 'persons') { closePersonDetail(); archivingPersonId.value = null; loadPersons(); loadPending(); }
+      // 人物 tab：进入时复位详情/删除确认态，拉名册 + 已删除列表 + 确认队列（跨平面 pending 并集，独立刷新）。
+      if (name === 'persons') { closePersonDetail(); deletingPersonId.value = null; loadPersons(); loadDeletedPersons(); loadPending(); }
     }
     loadSessions();
     // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
@@ -1959,7 +1980,7 @@ const app = createApp({
       loadTodos, setTodoStatus, jumpToSession,
       editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
-      persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
+      persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, deletingPersonId, askDeletePerson, cancelDeletePerson, confirmDeletePerson, deletedPersons, deletedCollapsed, loadDeletedPersons, restorePerson,
       epiText, personNameOf,
       ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,

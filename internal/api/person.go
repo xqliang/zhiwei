@@ -74,7 +74,19 @@ var validPendingKinds = map[string]bool{
 
 // ---- 名册 ----
 
+// List 名册（active+pending）+ 每人 pending 角标计数。
+// ?dismissed=1 返回已删除人物（软删行，折叠区查看/恢复）；默认返回非 dismissed（活跃名册）。
+// 对齐 topics 的 ?dismissed=1 约定：两个视图分离，避免活跃名册混入已删数据。
 func (h *PersonHandler) List(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("dismissed") == "1" {
+		list, err := h.Persons.ListDismissed(r.Context(), 1)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"persons": list})
+		return
+	}
 	list, err := h.Persons.ListWithPending(r.Context(), 1)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
