@@ -1317,10 +1317,13 @@ const app = createApp({
 
     async function loadMetrics() {
       if (!personDetail.value) return;
+      // 记下请求时的人物/指标，await 回来后校验——快速切人或快速切指标 tab 时，
+      // 晚到的旧响应直接丢弃，防止过期数据渲染且粘住（镜像 fetchCyclesInto 的 guard）。
+      const pid = personDetail.value.person.id, mk = metricKey.value;
       metricLoading.value = true;
       try {
-        const d = await api('GET', '/api/persons/' + personDetail.value.person.id +
-          '/metrics?metric_key=' + metricKey.value);
+        const d = await api('GET', '/api/persons/' + pid + '/metrics?metric_key=' + mk);
+        if (personDetail.value?.person?.id !== pid || metricKey.value !== mk) return;
         metricRows.value = d.metrics || [];
         metricHover.value = null;
       } catch (e) { showError(e); }
@@ -1527,7 +1530,12 @@ const app = createApp({
       if (it.kind === 'relationship') return (it.relation_type || '') + (it.label ? '（' + it.label + '）' : '');
       if (it.kind === 'event') return (it.event_type || '') + '：' + (it.value || ''); // event：event_type + title（value 后端映射为 title）
       if (it.kind === 'metric') return (metricDef(it.metric_key).label || it.metric_key) + '：' + (it.value || '');
-      if (it.kind === 'cycle') return it.value || ''; // 后端 value 已是 type·label
+      if (it.kind === 'cycle') {
+        // 后端 value = type 或 type·label；type 是英文枚举，换成中文（cycleTypeLabel
+        // 找不到时回退原 key），label 部分原样保留
+        const v = it.value || '';
+        return it.cycle_type ? v.replace(it.cycle_type, cycleTypeLabel(it.cycle_type)) : v;
+      }
       return it.value || it.person_name; // person：名字
     }
     function pendingKindText(k) {
