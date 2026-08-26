@@ -313,7 +313,9 @@ func TestGetProfileAndPerson(t *testing.T) {
 	if err := md.PersonAttributes.Create(ctx, attr); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_attribute WHERE id = ?", attr.ID.Int64()) })
+	t.Cleanup(func() {
+		_, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_attribute WHERE id = ?", attr.ID.Int64())
+	})
 	ev := &repo.PersonEvent{PersonID: owner.ID, EventType: "里程碑", Title: "读工具事件GP",
 		Status: "active", Source: "manual", Confidence: 1, Importance: 1}
 	if err := md.PersonEvents.Create(ctx, ev); err != nil {
@@ -351,7 +353,9 @@ func TestGetProfileAndPerson(t *testing.T) {
 	if err := md.PersonAttributes.Create(ctx, pattr); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_attribute WHERE id = ?", pattr.ID.Int64()) })
+	t.Cleanup(func() {
+		_, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_attribute WHERE id = ?", pattr.ID.Int64())
+	})
 
 	res2, _, err := getPersonHandler(md)(ctx, nil, getPersonArgs{Name: "画像测试人物GP"})
 	if err != nil {
@@ -526,5 +530,247 @@ func TestConfirmProfileEvent(t *testing.T) {
 	}
 	if ev.Title != title || ev.EventType != "旅行" || ev.Status != "active" || ev.Source != "manual" || ev.OccurredAt == nil {
 		t.Errorf("新事件字段异常: %+v", ev)
+	}
+}
+
+// ---- P2 画像关系提议（propose_profile_relationship + confirm 解析或新建关联人）----
+
+// countActiveRelsByLabel 统计带指定 label 的 active 关系条数（用独占 label 精确圈定本用例产生的行，
+// 免受共享库里 owner 既有关系串扰）。
+func countActiveRelsByLabel(t *testing.T, pd ProposalDeps, label string) int {
+	t.Helper()
+	var n int
+	if err := pd.DB.GetContext(t.Context(), &n,
+		`SELECT COUNT(*) FROM person_relationship WHERE label = ? AND status = 'active'`, label); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// countPersonsByName 统计指定显示名的人物条数（验证 confirm 复用已有人物 / 只新建一个）。
+func countPersonsByName(t *testing.T, pd ProposalDeps, name string) int {
+	t.Helper()
+	var n int
+	if err := pd.DB.GetContext(t.Context(), &n,
+		`SELECT COUNT(*) FROM person WHERE display_name = ?`, name); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// cleanupRel 登记关系 + 人物的精确清理：按独占 label 删关系（含其 relationship 审计），
+// 按显示名删本用例新建的人物（含其 person 审计）。用 JOIN 定位审计行，只清自己插入的数据。
+func cleanupRel(t *testing.T, pd ProposalDeps, label, personName string) {
+	t.Cleanup(func() {
+		_, _ = pd.DB.Exec(
+			`DELETE l FROM person_change_log l JOIN person_relationship r ON l.entity_id = r.id
+			 WHERE l.entity_kind = 'relationship' AND r.label = ?`, label)
+		_, _ = pd.DB.Exec(`DELETE FROM person_relationship WHERE label = ?`, label)
+		if personName != "" {
+			_, _ = pd.DB.Exec(
+				`DELETE l FROM person_change_log l JOIN person p ON l.person_id = p.id WHERE p.display_name = ?`, personName)
+			_, _ = pd.DB.Exec(`DELETE FROM person WHERE display_name = ?`, personName)
+		}
+	})
+}
+
+// TestProposeProfileRelationshipNoMutation 锁定 §8 根防线：propose_profile_relationship 只建
+// pending 提议，绝不写 person/relationship 表；非法 relation_type、两名皆空 → tool-error。
+func TestProposeProfileRelationshipNoMutation(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	const relatedName = "关系无变更关联人RNM"     // 独占名：propose 绝不应新建它
+	const label = "关系无变更标签RNM"            // 独占 label：propose 绝不应产生带此 label 的关系
+	cleanupRel(t, pd, label, relatedName) // 兜底清理（即便断言失败提前退出）
+
+	// 前置：该关联人此刻不存在
+	if before, _ := md.Persons.FindByName(ctx, toolUserID, relatedName); before != nil {
+		t.Fatalf("前置：关联人不应已存在: %+v", before)
+	}
+
+	res, _, err := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+		RelationType: "朋友", RelatedPersonName: relatedName, Label: label, Rationale: "老朋友",
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	if err := json.Unmarshal([]byte(mcpText(t, res)), &p); err != nil {
+		t.Fatalf("解析提议: %v", err)
+	}
+	cleanupProposal(t, pd, p.ID)
+	if p.Status != "pending" || p.Kind != "profile_relationship" || p.TargetKind != "profile" || p.TargetID == nil || *p.TargetID != owner.ID {
+		t.Fatalf("关系提议异常: %+v", p)
+	}
+	// 关键：propose 未新建关联人、未写任何关系
+	if after, _ := md.Persons.FindByName(ctx, toolUserID, relatedName); after != nil {
+		t.Errorf("propose 不应新建关联人, got %+v", after)
+	}
+	if n := countActiveRelsByLabel(t, pd, label); n != 0 {
+		t.Errorf("propose 不应写关系, 带此 label 的 active 关系应为 0 得 %d", n)
+	}
+
+	// 非法 relation_type → tool-error
+	if _, _, e := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+		RelationType: "不存在的关系", RelatedPersonName: relatedName,
+	}); e == nil {
+		t.Error("非法 relation_type 应报 tool-error")
+	}
+	// related_person_name 与 org_name 皆空 → tool-error
+	if _, _, e := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+		RelationType: "朋友",
+	}); e == nil {
+		t.Error("两名皆空应报 tool-error")
+	}
+	// 非法 direction → tool-error
+	if _, _, e := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+		RelationType: "同事", RelatedPersonName: relatedName, Direction: "sideways",
+	}); e == nil {
+		t.Error("非法 direction 应报 tool-error")
+	}
+}
+
+// TestConfirmProfileRelationshipResolveExisting 锁定 D1：related_person_name 命中已有人物 →
+// confirm 后 owner 多一条 active 关系指向该人物、proposal=applied、不新建重名人物。
+func TestConfirmProfileRelationshipResolveExisting(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	const relatedName = "关系已有关联人RE"
+	const label = "关系已有标签RE"
+	cleanupRel(t, pd, label, relatedName)
+	// 预置已有人物（active）；confirm 应复用它、不新建
+	related := &repo.Person{DisplayName: relatedName, IsOwner: false}
+	if err := md.Persons.Create(ctx, related); err != nil {
+		t.Fatal(err)
+	}
+
+	res, _, err := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+		RelationType: "同事", RelatedPersonName: relatedName, Direction: "peer", Label: label,
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	_ = json.Unmarshal([]byte(mcpText(t, res)), &p)
+	cleanupProposal(t, pd, p.ID)
+
+	code, p1 := postProposal(t, pd, p.ID, "confirm")
+	if code != http.StatusOK || p1.Status != "applied" || p1.AppliedRef == nil {
+		t.Fatalf("confirm code=%d status=%s ref=%v", code, p1.Status, p1.AppliedRef)
+	}
+	// applied_ref 指向的关系：owner→related、active/manual、指向既有人物、方向 peer
+	rel, err := pd.Profile.Relationships.Get(ctx, *p1.AppliedRef)
+	if err != nil || rel == nil {
+		t.Fatalf("关系应存在: %v %+v", err, rel)
+	}
+	if rel.PersonID != owner.ID || rel.RelationType != "同事" || rel.Status != "active" || rel.Source != "manual" {
+		t.Fatalf("关系字段异常: %+v", rel)
+	}
+	if rel.RelatedPersonID == nil || *rel.RelatedPersonID != related.ID {
+		t.Fatalf("关系应指向既有人物 %d, got %+v", related.ID, rel.RelatedPersonID)
+	}
+	// 不应新建重名人物（仍只有预置的那 1 个）
+	if n := countPersonsByName(t, pd, relatedName); n != 1 {
+		t.Errorf("不应新建重名人物, 期望 1 得 %d", n)
+	}
+}
+
+// TestConfirmProfileRelationshipResolveCreate 锁定 D1：related_person_name 未命中 → confirm 在
+// 同事务内新建该人物（active/manual）+ 关系；重复 confirm apply-once（不重复建人/建关系）。
+func TestConfirmProfileRelationshipResolveCreate(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	const relatedName = "关系新建关联人RC"
+	const label = "关系新建标签RC"
+	cleanupRel(t, pd, label, relatedName)
+	// 前置：该人此刻不存在
+	if before, _ := md.Persons.FindByName(ctx, toolUserID, relatedName); before != nil {
+		t.Fatalf("前置：关联人不应已存在: %+v", before)
+	}
+
+	res, _, err := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+		RelationType: "朋友", RelatedPersonName: relatedName, Label: label, Rationale: "新朋友",
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	_ = json.Unmarshal([]byte(mcpText(t, res)), &p)
+	cleanupProposal(t, pd, p.ID)
+
+	code, p1 := postProposal(t, pd, p.ID, "confirm")
+	if code != http.StatusOK || p1.Status != "applied" || p1.AppliedRef == nil {
+		t.Fatalf("confirm code=%d status=%s ref=%v", code, p1.Status, p1.AppliedRef)
+	}
+	// 新建了关联人（active/manual）
+	created, err := md.Persons.FindByName(ctx, toolUserID, relatedName)
+	if err != nil || created == nil {
+		t.Fatalf("confirm 应新建关联人: %v %+v", err, created)
+	}
+	if created.Status != "active" || created.Source != "manual" {
+		t.Errorf("新建关联人应 active/manual: %+v", created)
+	}
+	// 关系指向新建的人物
+	rel, err := pd.Profile.Relationships.Get(ctx, *p1.AppliedRef)
+	if err != nil || rel == nil || rel.PersonID != owner.ID || rel.RelatedPersonID == nil || *rel.RelatedPersonID != created.ID {
+		t.Fatalf("关系应指向新建关联人: rel=%+v created=%d", rel, created.ID)
+	}
+
+	// 重复 confirm：apply-once → 幂等，不重复建人 / 建关系
+	code2, p2 := postProposal(t, pd, p.ID, "confirm")
+	if code2 != http.StatusOK || p2.Status != "applied" {
+		t.Fatalf("2nd confirm code=%d status=%s", code2, p2.Status)
+	}
+	if n := countPersonsByName(t, pd, relatedName); n != 1 {
+		t.Errorf("重复 confirm 不应重复建人, 期望 1 得 %d", n)
+	}
+	if n := countActiveRelsByLabel(t, pd, label); n != 1 {
+		t.Errorf("重复 confirm 不应重复建关系, 期望 1 得 %d", n)
+	}
+}
+
+// TestConfirmProfileRelationshipOrgOnly 锁定 D1：仅 org_name（无 related_person_name）→ 组织关系，
+// related_person_id 为 NULL、org_name 落库；不新建任何人物。
+func TestConfirmProfileRelationshipOrgOnly(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	const orgName = "关系测试组织RO"
+	const label = "关系组织标签RO"
+	cleanupRel(t, pd, label, "") // 组织关系不涉及新建人物
+
+	res, _, err := proposeProfileRelationshipHandler(md)(ctx, nil, proposeProfileRelationshipArgs{
+		RelationType: "组织", OrgName: orgName, Direction: "upstream", Label: label,
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	_ = json.Unmarshal([]byte(mcpText(t, res)), &p)
+	cleanupProposal(t, pd, p.ID)
+
+	code, p1 := postProposal(t, pd, p.ID, "confirm")
+	if code != http.StatusOK || p1.Status != "applied" || p1.AppliedRef == nil {
+		t.Fatalf("confirm code=%d status=%s ref=%v", code, p1.Status, p1.AppliedRef)
+	}
+	rel, err := pd.Profile.Relationships.Get(ctx, *p1.AppliedRef)
+	if err != nil || rel == nil {
+		t.Fatalf("组织关系应存在: %v %+v", err, rel)
+	}
+	if rel.PersonID != owner.ID || rel.RelationType != "组织" || rel.Status != "active" {
+		t.Fatalf("组织关系字段异常: %+v", rel)
+	}
+	if rel.RelatedPersonID != nil {
+		t.Errorf("组织关系 related_person_id 应为 NULL, got %v", rel.RelatedPersonID)
+	}
+	if rel.OrgName == nil || *rel.OrgName != orgName {
+		t.Errorf("组织关系 org_name 未落库: %+v", rel.OrgName)
 	}
 }

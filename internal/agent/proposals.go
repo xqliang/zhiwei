@@ -24,9 +24,10 @@ type ProposalDeps struct {
 	Todos      *repo.TodoRepo
 	TodoTopics *repo.TodoTopicRepo
 	// ---- 画像确认落库（P2）----
-	// Profile 提供 ManualAddAttributeExt/ManualAddEventExt（事务版），在 confirm 单事务里
-	// 把画像写并进来（apply-once）。Persons 供 owner 相关校验（当前 applyInTx 直接用
-	// p.TargetID=owner.ID，Persons 预留给后续关系提议 / owner 兜底校验）。
+	// Profile 提供 ManualAddAttributeExt/ManualAddEventExt/ManualAddRelationshipExt/
+	// ManualCreatePersonExt（事务版），在 confirm 单事务里把画像写并进来（apply-once）。
+	// Persons 供 profile_relationship 确认时按名解析关联人（FindByNameExt，未命中则经
+	// ManualCreatePersonExt 新建），以及 owner 相关校验。
 	Profile *profile.Service
 	Persons *repo.PersonRepo
 }
@@ -284,6 +285,44 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		title := newStr("title")
 		occurredAt := newStr("occurred_at")
 		row, err := d.Profile.ManualAddEventExt(ctx, tx, *p.TargetID, eventType, title, "", occurredAt, "", "", nil)
+		if err != nil {
+			return nil, err
+		}
+		return &row.ID, nil
+	case "profile_relationship":
+		// 画像关系：target_id=owner person id（propose 时定）。在本 confirm 单事务内完成
+		// 「解析或新建关联人 + 写关系 + Resolve」（apply-once，设计 D1）：
+		//   ① related_person_name 命中已有人物 → 用其 id；
+		//   ② 未命中 → ManualCreatePersonExt 新建人物（active/manual）再用其 id；
+		//   ③ 仅 org_name（无 related_person_name）→ 组织关系，relatedPersonID=nil。
+		// 全部走 tx，与 Proposals.Resolve 同事务，任一步失败整体回滚；重复 confirm 因
+		// status!=pending 在 confirmProposal 早返回、不进本函数，故天然幂等（apply-once 靠 Resolve CAS）。
+		if p.TargetID == nil {
+			return nil, fmt.Errorf("profile_relationship 缺 target_id")
+		}
+		relationType := newStr("relation_type")
+		if !profile.ValidRelations[relationType] { // 双保险：与 propose 端一致，防未来别的提议源不 gate 就写入非法关系类型
+			return nil, fmt.Errorf("profile_relationship 非法关系类型: %s", relationType)
+		}
+		var relID *ids.ID
+		if name := newStr("related_person_name"); name != "" {
+			ex, err := d.Persons.FindByNameExt(ctx, tx, toolUserID, name)
+			if err != nil {
+				return nil, err
+			}
+			if ex != nil { // 命中已有 active/pending 人物
+				id := ex.ID
+				relID = &id
+			} else { // 未命中 → 在同事务内新建人物（active/manual），再用其 id 建关系
+				np, err := d.Profile.ManualCreatePersonExt(ctx, tx, name, nil, nil)
+				if err != nil {
+					return nil, err
+				}
+				relID = &np.ID
+			}
+		}
+		row, err := d.Profile.ManualAddRelationshipExt(ctx, tx, *p.TargetID, relationType, relID,
+			newStr("direction"), newStr("org_name"), newStr("label"))
 		if err != nil {
 			return nil, err
 		}

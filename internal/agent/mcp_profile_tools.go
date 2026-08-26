@@ -15,12 +15,13 @@ import (
 
 // registerProfileTools 注册画像（人物系统）相关的 MCP 工具（P2）：
 //   - 读：get_profile（读我）、get_person（按名读某人）——只读，返回 JSON 画像。
-//   - 写-提议：propose_profile_attr（改属性）、propose_profile_event（记大事记）——
-//     绝不直接写画像，只 Create 一条 pending agent_proposal（{old?,new}），用户经确认端点
-//     确认后才在单事务内经 profile.Service 的 Ext 变体落库（apply-once，见 proposals.go）。
+//   - 写-提议：propose_profile_attr（改属性）、propose_profile_event（记大事记）、
+//     propose_profile_relationship（加人物/组织关系）——绝不直接写画像，只 Create 一条 pending
+//     agent_proposal（{old?,new}），用户经确认端点确认后才在单事务内经 profile.Service 的
+//     Ext 变体落库（apply-once，见 proposals.go）。
 //
-// 全部限 user_id=1（toolUserID），写目标恒为 owner「我」。关系提议（propose_profile_relationship）
-// 与「owner 概要注入对话头」本期不做（spec §16 P2 后续），留待后续。
+// 全部限 user_id=1（toolUserID），写目标恒为 owner「我」。「owner 概要注入对话头」由
+// ProfileContext.Head 承担（见 context.go / orchestrator.go），不在此工具层。
 func registerProfileTools(s *mcp.Server, d MCPDeps) {
 	// ---- 读工具 ----
 	mcp.AddTool(s, &mcp.Tool{
@@ -43,6 +44,11 @@ func registerProfileTools(s *mcp.Server, d MCPDeps) {
 		Name:        "propose_profile_event",
 		Description: "提议给我记录一条大事记(不立即生效，返回待确认提议)。event_type 必须是合法事件类型(里程碑|聚会|会议|旅行|健康|成就|挫折|负面|其他)，title 非空。",
 	}, proposeProfileEventHandler(d))
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "propose_profile_relationship",
+		Description: "提议给我(画像 owner「我」)新增一条人物关系或组织关系(不立即生效，返回待确认提议；用户确认后才落库)。relation_type 必须合法(配偶|子女|父母|兄弟姐妹|亲戚|朋友|同事|领导|下属|客户|供应商|合作方|组织|其他)；related_person_name(关联到某人，如「我朋友李四」) 与 org_name(关联到某组织) 至少给一个。确认时若 related_person_name 对应人物不存在会自动新建。",
+	}, proposeProfileRelationshipHandler(d))
 }
 
 // ---- 读工具输出结构（JSON tag 直接暴露给模型；status 只含 active/pending）----
@@ -241,6 +247,90 @@ func proposeProfileEventHandler(d MCPDeps) func(context.Context, *mcp.CallToolRe
 		return proposeAndReturn(ctx, d, &repo.AgentProposal{
 			Kind: "profile_event", TargetKind: "profile", TargetID: &oid,
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
+		})
+	}
+}
+
+// ---- propose_profile_relationship（profile_relationship）：只建 pending 提议，绝不写画像 ----
+// 入参用 related_person_name（自然：agent 说「我朋友李四」）而非 id。绝不写 person/relationship 表——
+// 只校验 + 读现值（GetOwner + 可选 FindByName 供确认卡展示提示）+ Create 一条 pending 提议。
+// 确认时才在单事务内「解析或新建关联人 + 写关系 + Resolve」（apply-once，见 proposals.go）。
+type proposeProfileRelationshipArgs struct {
+	RelationType      string `json:"relation_type" jsonschema:"关系类型(必填): 配偶|子女|父母|兄弟姐妹|亲戚|朋友|同事|领导|下属|客户|供应商|合作方|组织|其他"`
+	RelatedPersonName string `json:"related_person_name,omitempty" jsonschema:"关联到的人物姓名(如「李四」)。与 org_name 至少给一个；确认时若该人不存在会自动新建"`
+	OrgName           string `json:"org_name,omitempty" jsonschema:"关联到的组织名(如「某某公司」)。与 related_person_name 至少给一个"`
+	Direction         string `json:"direction,omitempty" jsonschema:"关系方向(可选): upstream|downstream|peer"`
+	Label             string `json:"label,omitempty" jsonschema:"自由称呼(可选)，如「大儿子」「张总」"`
+	Rationale         string `json:"rationale,omitempty" jsonschema:"给用户看的修改理由"`
+}
+
+func proposeProfileRelationshipHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeProfileRelationshipArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeProfileRelationshipArgs) (*mcp.CallToolResult, any, error) {
+		relationType := strings.TrimSpace(a.RelationType)
+		relatedName := strings.TrimSpace(a.RelatedPersonName)
+		orgName := strings.TrimSpace(a.OrgName)
+		direction := strings.TrimSpace(a.Direction)
+		label := strings.TrimSpace(a.Label)
+		// 校验（非法 → tool-error 供模型读）：
+		// ① relation_type 必须在合法关系枚举内；
+		if !profile.ValidRelations[relationType] {
+			return nil, nil, fmt.Errorf("非法关系类型: %q（合法: 配偶|子女|父母|兄弟姐妹|亲戚|朋友|同事|领导|下属|客户|供应商|合作方|组织|其他）", a.RelationType)
+		}
+		// ② related_person_name 与 org_name 至少给一个（都空则无从建立关系对端）；
+		if relatedName == "" && orgName == "" {
+			return nil, nil, fmt.Errorf("propose_profile_relationship 需给出 related_person_name 或 org_name 至少一个")
+		}
+		// ③ direction 若给出需 ∈ upstream|downstream|peer。
+		if direction != "" && direction != "upstream" && direction != "downstream" && direction != "peer" {
+			return nil, nil, fmt.Errorf("非法 direction: %q（合法: upstream|downstream|peer）", a.Direction)
+		}
+		owner, err := d.Persons.GetOwner(ctx, toolUserID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if owner == nil {
+			return nil, nil, fmt.Errorf("尚未建立画像 owner「我」，无法提议新增关系")
+		}
+		// new 字段：确认时据此「解析或新建关联人 + 写关系」。related_person_name 是自然名，
+		// 确认时经 FindByNameExt 命中已有人物 / 未命中 ManualCreatePersonExt 新建（见 proposals.go）。
+		newFields := map[string]any{"relation_type": relationType}
+		if relatedName != "" {
+			newFields["related_person_name"] = relatedName
+		}
+		if orgName != "" {
+			newFields["org_name"] = orgName
+		}
+		if direction != "" {
+			newFields["direction"] = direction
+		}
+		if label != "" {
+			newFields["label"] = label
+		}
+		// 为确认卡展示：若给 related_person_name，只读地看该人是否已存在（绝不写库），
+		// 据此在 rationale 里追加「关联到已有人物X / 将新建人物X」提示，帮用户判断确认后果。
+		rationale := strings.TrimSpace(a.Rationale)
+		if relatedName != "" {
+			ex, err := d.Persons.FindByName(ctx, toolUserID, relatedName)
+			if err != nil {
+				return nil, nil, err
+			}
+			var hint string
+			if ex != nil {
+				hint = fmt.Sprintf("将关联到已有人物「%s」", relatedName)
+			} else {
+				hint = fmt.Sprintf("将新建人物「%s」并建立关系", relatedName)
+			}
+			if rationale == "" {
+				rationale = hint
+			} else {
+				rationale = rationale + "（" + hint + "）"
+			}
+		}
+		payload, _ := json.Marshal(map[string]any{"new": newFields})
+		oid := owner.ID // target_id = owner person id（confirm 时作 personID）
+		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+			Kind: "profile_relationship", TargetKind: "profile", TargetID: &oid,
+			Payload: json.RawMessage(payload), Rationale: rationale,
 		})
 	}
 }

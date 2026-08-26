@@ -283,8 +283,12 @@ func main() {
 		defer rt.Close()
 		agentConvs := &repo.AgentConversationRepo{DB: db}
 		agentMsgs := &repo.AgentMessageRepo{DB: db}
+		// Orchestrator 装配可选的画像上下文头（每轮把 owner 概要 + 关键属性 + 当天日期前置到
+		// 「发给 dsh 的文本」，让 agent 天然「认识我」；不改落库，见 agent/context.go）。
+		orch := agent.NewOrchestrator(rt, agentConvs, agentMsgs)
+		orch.Ctx = &agent.ProfileContext{Persons: persons, Attributes: personAttrs}
 		agent.RegisterAgent(r, &agent.AgentHandler{
-			Orch:          agent.NewOrchestrator(rt, agentConvs, agentMsgs),
+			Orch:          orch,
 			Conversations: agentConvs,
 			Messages:      agentMsgs,
 		})

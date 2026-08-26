@@ -3,7 +3,9 @@ package agent
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"zhiwei/internal/repo"
 )
@@ -167,5 +169,111 @@ func TestOrchestratorInterleavedOrder(t *testing.T) {
 	}
 	if msgs[1].Content != "我查一下你的待办。" {
 		t.Errorf("前言文本错位/丢失: %q", msgs[1].Content)
+	}
+}
+
+// TestProfileContextHead 锁定上下文头组装（D2）：有 owner + 关键属性时，头含当天日期 + owner
+// 前缀 + 关键属性值；无 Persons / nil 接收者返回 ""（调用方据此不注入）。
+func TestProfileContextHead(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	persons := &repo.PersonRepo{DB: db}
+	attrs := &repo.PersonAttributeRepo{DB: db}
+	ctx := t.Context()
+	owner := ensureOwner(t, persons)
+
+	// seed 一条独占 active 属性（occupation 是优先键，必进头）
+	a := &repo.PersonAttribute{PersonID: owner.ID, AttrKey: "occupation", ValueText: "上下文头职业CH",
+		ValueType: "text", Status: "active", Source: "manual", Confidence: 1}
+	if err := attrs.Create(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec("DELETE FROM person_attribute WHERE id = ?", a.ID.Int64()) })
+
+	pc := &ProfileContext{Persons: persons, Attributes: attrs}
+	now := time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)
+	head := pc.Head(ctx, now)
+	if !strings.Contains(head, "今天是 2026-03-15") {
+		t.Errorf("头应含当天日期: %q", head)
+	}
+	if !strings.Contains(head, "关于用户本人") {
+		t.Errorf("头应含 owner 前缀: %q", head)
+	}
+	if !strings.Contains(head, "上下文头职业CH") {
+		t.Errorf("头应含关键属性值: %q", head)
+	}
+
+	// 无 Persons / nil 接收者 → 空头（不注入）
+	if (&ProfileContext{}).Head(ctx, now) != "" {
+		t.Error("无 Persons 应返回空头")
+	}
+	var np *ProfileContext
+	if np.Head(ctx, now) != "" {
+		t.Error("nil 接收者应返回空头")
+	}
+}
+
+// TestOrchestratorContextInjection 锁定 D2：装配 Ctx 后，发给 dsh 的文本被前置 owner 上下文头
+// （含关键属性值 + 原始问题），但落库的 user 消息仍是「原始 userText」（不含头）。
+func TestOrchestratorContextInjection(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convRepo := &repo.AgentConversationRepo{DB: db}
+	msgRepo := &repo.AgentMessageRepo{DB: db}
+	persons := &repo.PersonRepo{DB: db}
+	attrs := &repo.PersonAttributeRepo{DB: db}
+	ctx := t.Context()
+	owner := ensureOwner(t, persons)
+
+	a := &repo.PersonAttribute{PersonID: owner.ID, AttrKey: "city", ValueText: "注入城市CI",
+		ValueType: "text", Status: "active", Source: "manual", Confidence: 1}
+	if err := attrs.Create(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec("DELETE FROM person_attribute WHERE id = ?", a.ID.Int64()) })
+
+	conv := &repo.AgentConversation{Title: "上下文注入"}
+	if err := convRepo.Create(ctx, conv); err != nil {
+		t.Fatal(err)
+	}
+
+	msgData, _ := json.Marshal(map[string]any{"message": map[string]any{"content": []map[string]any{
+		{"type": "text", "text": "好的"},
+	}}})
+	fake := &FakeRuntime{Script: [][]Event{{{Type: EvAssistantMessage, Data: msgData}}}}
+
+	orch := NewOrchestrator(fake, convRepo, msgRepo)
+	orch.Ctx = &ProfileContext{Persons: persons, Attributes: attrs} // 装配上下文头
+
+	const raw = "帮我看看今天的安排"
+	if _, err := orch.RunTurn(ctx, conv, raw); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+
+	// 发给 dsh 的文本：带上下文头（含关键属性值）+ 原始问题；且确实被前置（!= 原始）
+	if !strings.Contains(fake.LastText, "关于用户本人") || !strings.Contains(fake.LastText, "注入城市CI") {
+		t.Errorf("发给 dsh 的文本应含上下文头: %q", fake.LastText)
+	}
+	if !strings.Contains(fake.LastText, raw) {
+		t.Errorf("发给 dsh 的文本应含原始问题: %q", fake.LastText)
+	}
+	if fake.LastText == raw {
+		t.Errorf("发给 dsh 的文本应被前置上下文头(应 != 原始): %q", fake.LastText)
+	}
+
+	// 关键：落库的 user 消息 = 原始 userText（不含头），历史保持干净
+	msgs, err := msgRepo.ListByConversation(ctx, conv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) == 0 || msgs[0].Role != "user" {
+		t.Fatalf("首条应为 user 消息: %+v", msgs)
+	}
+	if msgs[0].Content != raw {
+		t.Errorf("落库 user 消息应为原始文本(不含头), got %q", msgs[0].Content)
 	}
 }

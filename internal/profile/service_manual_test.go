@@ -146,3 +146,104 @@ func TestManualAddEventExt(t *testing.T) {
 	}
 	_ = txBad.Rollback()
 }
+
+// TestManualCreatePersonExt：外部事务里建人物 → Commit 后为 active/manual + create 审计；
+// 效果与自持事务的 ManualCreatePerson 一致（供关系确认时「未命中则新建关联人」并进 confirm 事务）。
+func TestManualCreatePersonExt(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	const name = "Ext建人测试CPX" // 独占显示名，避免与其它用例串扰
+	t.Cleanup(func() {
+		cctx := context.Background()
+		// change_log 按 person_id 关联，先查出该人 id 再删（用 display_name 定位）
+		_, _ = svc.DB.ExecContext(cctx,
+			`DELETE l FROM person_change_log l JOIN person p ON l.person_id = p.id WHERE p.display_name = ?`, name)
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person WHERE display_name = ?`, name)
+	})
+
+	tx, err := svc.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := svc.ManualCreatePersonExt(ctx, tx, name, nil, nil)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("ManualCreatePersonExt: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if p.Status != "active" || p.Source != "manual" || p.DisplayName != name {
+		t.Fatalf("新建人物行异常: %+v", p)
+	}
+	// Commit 后确实落库、可按名查到
+	got, err := svc.Persons.FindByName(ctx, 1, name)
+	if err != nil || got == nil || got.ID != p.ID {
+		t.Fatalf("Commit 后应能按名查到新建人物: %v %+v", err, got)
+	}
+	// 审计：至少一条 person create 条目
+	logs, _ := svc.ChangeLogs.ListByPerson(ctx, p.ID, "person", "")
+	if len(logs) == 0 {
+		t.Fatalf("应有 person 审计条目")
+	}
+}
+
+// TestManualAddRelationshipExt：外部事务里加关系边 → Commit 后为 active/manual conf=1.0 + create
+// 审计；效果与自持事务的 ManualAddRelationship 一致；非法 relation_type 校验先行报错（不写库）。
+func TestManualAddRelationshipExt(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+
+	const label = "Ext关系测试标签ARX" // 独占 label，便于精确清理本用例产生的关系行
+	t.Cleanup(func() {
+		cctx := context.Background()
+		// 先删这些关系产生的审计（按关系 id 关联），再删关系行
+		_, _ = svc.DB.ExecContext(cctx,
+			`DELETE l FROM person_change_log l JOIN person_relationship r ON l.entity_id = r.id
+			 WHERE l.entity_kind = 'relationship' AND r.label = ?`, label)
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_relationship WHERE label = ?`, label)
+	})
+
+	// ① 合法组织关系（relatedPersonID=nil、给 org_name）→ Commit 后 active/manual conf=1.0
+	tx, err := svc.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1, err := svc.ManualAddRelationshipExt(ctx, tx, oid, "组织", nil, "upstream", "Ext测试公司ARX", label)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("ManualAddRelationshipExt: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if r1.Status != "active" || r1.Source != "manual" || r1.Confidence != 1.0 || r1.RelatedPersonID != nil {
+		t.Fatalf("组织关系行异常: %+v", r1)
+	}
+	if r1.OrgName == nil || *r1.OrgName != "Ext测试公司ARX" || r1.Direction == nil || *r1.Direction != "upstream" {
+		t.Fatalf("组织关系 org/direction 未落库: %+v", r1)
+	}
+	// Commit 后确实落库
+	got, err := svc.Relationships.Get(ctx, r1.ID)
+	if err != nil || got == nil || got.Status != "active" {
+		t.Fatalf("Commit 后应能查到 active 关系: %v %+v", err, got)
+	}
+	// 审计：至少一条 relationship create 条目
+	logs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "relationship", "")
+	if len(logs) == 0 {
+		t.Fatalf("应有 relationship 审计条目")
+	}
+
+	// ② 非法 relation_type：校验先行报错、不写库。用独立 tx，出错回滚。
+	txBad, err := svc.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ManualAddRelationshipExt(ctx, txBad, oid, "不存在的关系", nil, "", "X", label); err == nil {
+		_ = txBad.Rollback()
+		t.Fatalf("非法 relation_type 应报错")
+	}
+	_ = txBad.Rollback()
+}

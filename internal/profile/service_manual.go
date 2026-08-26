@@ -15,13 +15,28 @@ import (
 // （changed_by=user）。手动改值 = 旧行 superseded + 新行（supersedes_id 指向旧行）。
 
 // ManualCreatePerson 手动新建人物（active/manual + create 审计）。
+// 自持事务：BeginTxx → ManualCreatePersonExt → Commit（行为/签名与历史一致，
+// 现有 api/person.go 调用面零改）。真正的写逻辑在 Ext 变体里，便于并入他人的事务
+// （如 agent 关系提议确认时「未命中则新建关联人」，与关系写并进同一 confirm 事务）。
 func (s *Service) ManualCreatePerson(ctx context.Context, name string, speakerID *ids.ID, summary *string) (*repo.Person, error) {
-	p := &repo.Person{DisplayName: name, SpeakerID: speakerID, Summary: summary, Source: "manual", Status: "active"}
 	tx, err := s.DB.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _ = tx.Rollback() }() // Commit 后为 no-op
+	p, err := s.ManualCreatePersonExt(ctx, tx, name, speakerID, summary)
+	if err != nil {
+		return nil, err
+	}
+	return p, tx.Commit()
+}
+
+// ManualCreatePersonExt 是 ManualCreatePerson 的事务版：全部写走传入的 tx，不自开/自提事务，
+// 供调用方（如 agent 关系提议确认闸门）把「建人 + 关系写 + Proposals.Resolve」原子并进同一
+// 事务（apply-once）。落库语义与 ManualCreatePerson 完全一致（active/manual + create 审计）。
+// 注意：不 tx.Rollback()/Commit()——事务生命周期归调用方。
+func (s *Service) ManualCreatePersonExt(ctx context.Context, tx *sqlx.Tx, name string, speakerID *ids.ID, summary *string) (*repo.Person, error) {
+	p := &repo.Person{DisplayName: name, SpeakerID: speakerID, Summary: summary, Source: "manual", Status: "active"}
 	if err := s.Persons.CreateExt(ctx, tx, p); err != nil {
 		return nil, err
 	}
@@ -31,7 +46,7 @@ func (s *Service) ManualCreatePerson(ctx context.Context, name string, speakerID
 	}); err != nil {
 		return nil, err
 	}
-	return p, tx.Commit()
+	return p, nil
 }
 
 // ManualUpdatePerson 手动编辑人物（改名/换绑声纹/改备注）。
@@ -192,7 +207,31 @@ func (s *Service) ManualDeleteAttribute(ctx context.Context, id ids.ID) error {
 
 // ManualAddRelationship 手动加关系边（active/manual + create 审计）。
 // relatedPersonID 可空（组织关系）；direction/orgName/label 可选。
+// 自持事务：BeginTxx → ManualAddRelationshipExt → Commit（行为/签名与历史一致，
+// 现有 api/person.go 调用面零改）。真正的写逻辑在 Ext 变体里，便于并入他人的事务
+// （如 agent 关系提议确认闸门的单事务 apply-once，见 internal/agent/proposals.go）。
 func (s *Service) ManualAddRelationship(ctx context.Context, personID ids.ID, relationType string,
+	relatedPersonID *ids.ID, direction, orgName, label string) (*repo.PersonRelationship, error) {
+
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }() // Commit 后为 no-op
+	row, err := s.ManualAddRelationshipExt(ctx, tx, personID, relationType, relatedPersonID, direction, orgName, label)
+	if err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualAddRelationshipExt 是 ManualAddRelationship 的事务版：全部写走传入的 tx，不自开/自提
+// 事务，供调用方（如 agent 关系提议确认闸门）把「关系写 +（可能的）建关联人 + Proposals.Resolve」
+// 原子并进同一事务（apply-once，见 internal/agent/proposals.go）。校验与落库语义与
+// ManualAddRelationship 完全一致（ValidRelations 校验 + active/manual conf=1.0 + create 审计）。
+// 注意：不 tx.Rollback()/Commit()——事务生命周期归调用方；非法 relation_type 校验先行、
+// 直接返回错误（未写任何行，调用方回滚即可）。
+func (s *Service) ManualAddRelationshipExt(ctx context.Context, tx *sqlx.Tx, personID ids.ID, relationType string,
 	relatedPersonID *ids.ID, direction, orgName, label string) (*repo.PersonRelationship, error) {
 
 	if !ValidRelations[relationType] {
@@ -211,11 +250,6 @@ func (s *Service) ManualAddRelationship(ctx context.Context, personID ids.ID, re
 	if label != "" {
 		row.Label = strPtr(label)
 	}
-	tx, err := s.DB.BeginTxx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback() }()
 	if err := s.Relationships.CreateExt(ctx, tx, row); err != nil {
 		return nil, err
 	}
@@ -226,7 +260,7 @@ func (s *Service) ManualAddRelationship(ctx context.Context, personID ids.ID, re
 	}); err != nil {
 		return nil, err
 	}
-	return row, tx.Commit()
+	return row, nil
 }
 
 // ManualDeleteRelationship 手动删关系 → dismissed + delete 审计。
