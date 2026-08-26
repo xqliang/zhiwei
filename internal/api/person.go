@@ -865,7 +865,7 @@ func (h *PersonHandler) AddActivity(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"activity": a})
+	writeJSON(w, a) // 返回裸行，对齐 AddMetric/AddCycle/AddEvent（列表端点才有 {activities:[...]} 包络）
 }
 
 // DeleteActivity 手动删活动 → dismissed + delete 审计（软删；全状态 GET 仍返回该行）。

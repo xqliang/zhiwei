@@ -744,17 +744,14 @@ func TestPersonActivityAPI(t *testing.T) {
 
 	base := "/api/persons/" + owner.ID.String() + "/activities"
 
-	// 手动加活动（通勤·地铁·40分钟）——含可空 commute_mode/duration_min。POST 返回 {activity: row}。
+	// 手动加活动（通勤·地铁·40分钟）——含可空 commute_mode/duration_min。POST 返回裸行（对齐 AddMetric/AddCycle）。
 	rec := doReq(t, h, "POST", base,
 		map[string]any{"activity": "通勤", "commute_mode": "地铁", "started_at": "2026-08-20", "duration_min": 40})
 	if rec.Code != 200 {
 		t.Fatalf("加活动失败: %d %s", rec.Code, rec.Body.String())
 	}
-	var addR struct {
-		Activity repo.PersonActivity `json:"activity"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &addR)
-	a1 := addR.Activity
+	var a1 repo.PersonActivity
+	_ = json.Unmarshal(rec.Body.Bytes(), &a1)
 	if a1.Status != "active" || a1.Source != "manual" {
 		t.Fatalf("手动活动错误: %+v", a1)
 	}
