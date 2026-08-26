@@ -72,7 +72,7 @@
   - tool：工具/载体（手机/电脑/健身房/汽车…，可空）
   - location：地点（可空）
   - commute_mode：通勤方式（地铁/开车/步行…，仅通勤类活动，可空）
-  - started_at：开始时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM（可空=对话当天）
+  - started_at：开始日期 YYYY-MM-DD（可空=对话当天；仅到日期精度——解析层不支持时刻，别输出 HH:MM）
   - duration_min：持续分钟数（整数，可空）
 
 ## 属性目录（attr_key | 中文说明 | 类型）
