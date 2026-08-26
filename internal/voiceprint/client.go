@@ -15,13 +15,13 @@ import (
 	"zhiwei/internal/ids"
 )
 
-// SearchResult 一次 1:N 检索的结果（top-2）。
+// SearchResult 一次 1:N 检索的结果（多向量模型下的按说话人去重 top-2，2026-08-26）。
 // Matched 表示 sidecar 是否找到 top-1（库非空），不代表阈值通过——
 // 命中判定统一在 Go 侧用 Matched()（两级规则）做。
 type SearchResult struct {
 	SpeakerID      ids.ID
-	Distance       float64 // top-1 相似度（L2 归一向量的内积 = 余弦）
-	SecondDistance float64 // top-2 相似度（库中向量 <2 个时为 0），区分性弱命中规则用
+	Distance       float64 // top-1：与该说话人**任意一条**样本向量的最高余弦（多向量取 max）
+	SecondDistance float64 // 次高：**另一个人**的最高分（按说话人去重——同一人的第二条不算，否则 gap 规则被自己误杀）；库中不足 2 人时为 0
 	Matched        bool    // 是否找到 top-1（false = 空库）
 }
 

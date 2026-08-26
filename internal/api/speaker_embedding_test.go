@@ -243,3 +243,119 @@ func mustDecodeEmb(t *testing.T, blob []byte) []float32 {
 	}
 	return v
 }
+
+// TestMultiVectorMaxMatching 多向量匹配核心语义（2026-08-26）：一个人两条变体样本
+// （e0「正常」/ e2「感冒」，互相正交），查询「感冒」向量 → 与该人的相似度应为 1.0
+// （max over 两条），而不是聚合均值的 0.707——变体命中任一即命中，不被另一条稀释。
+// 走 timeline 详情的段级 voice_matches（与列表 voice_top / 试匹配同一套库构建逻辑）。
+func TestMultiVectorMaxMatching(t *testing.T) {
+	_ = ids.InitForTest()
+	db, err := repo.NewDB(repo.TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	speakers := &repo.SpeakerRepo{DB: db}
+	embs := &repo.SpeakerEmbeddingRepo{DB: db}
+	sessions := &repo.SessionRepo{DB: db}
+	jobs := &repo.JobRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	memories := &repo.MemoryRepo{DB: db}
+	todos := &repo.TodoRepo{DB: db}
+
+	// 隔离：清历史说话人（one-hot 残留会干扰精确断言，同 TestGetSessionVoiceMatches）
+	for _, q := range []string{`DELETE FROM speaker_name_candidate`, `DELETE FROM speaker`} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 甲：两条样本 e0（正常）/ e2（感冒）；乙：一条 e1
+	jia := &repo.Speaker{Name: "甲", Source: "enrolled"}
+	yi := &repo.Speaker{Name: "乙", Source: "enrolled"}
+	for _, sp := range []*repo.Speaker{jia, yi} {
+		if err := speakers.Create(ctx, sp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, sp := range []*repo.Speaker{jia, yi} {
+			_ = speakers.Delete(context.Background(), sp.ID)
+		}
+	})
+	for _, e := range []*repo.SpeakerEmbedding{
+		{SpeakerID: jia.ID, Embedding: float32BlobAPI(oneHot(0)), SampleCount: 1, Source: "manual"},
+		{SpeakerID: jia.ID, Embedding: float32BlobAPI(oneHot(2)), SampleCount: 1, Source: "manual"},
+		{SpeakerID: yi.ID, Embedding: float32BlobAPI(oneHot(1)), SampleCount: 1, Source: "manual"},
+	} {
+		if err := embs.Create(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = embs.DeleteBySpeaker(context.Background(), jia.ID)
+		_ = embs.DeleteBySpeaker(context.Background(), yi.ID)
+	})
+
+	// 会话 + 一段（向量 = e2「感冒」）
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "mv.wav",
+		StoragePath: "/tmp/mv.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	segs := []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "感冒声音", StartMS: 0, EndMS: 2000},
+	}
+	if err := transcripts.InsertSegments(ctx, segs); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.SaveSegmentEmbeddings(ctx, tr.ID,
+		map[ids.ID][]byte{segs[0].ID: float32BlobAPI(oneHot(2))}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = db.ExecContext(cctx, `DELETE FROM transcript_segment WHERE transcript_id = ?`, tr.ID.Int64())
+		_, _ = db.ExecContext(cctx, `DELETE FROM transcript WHERE id = ?`, tr.ID.Int64())
+		_, _ = db.ExecContext(cctx, `DELETE FROM audio_session WHERE id = ?`, sid.Int64())
+	})
+
+	r := chi.NewRouter()
+	RegisterQuery(r, &QueryHandler{
+		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
+		Memories: memories, Todos: todos, Speakers: speakers,
+		SpeakerEmbeddings: embs, // 多向量装配（nil 时回退聚合代表）
+	})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		Segments []struct {
+			VoiceMatches []struct {
+				Name       string  `json:"name"`
+				Similarity float64 `json:"similarity"`
+			} `json:"voice_matches"`
+		} `json:"segments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("json: %v %s", err, rec.Body.String())
+	}
+	if len(detail.Segments) != 1 || len(detail.Segments[0].VoiceMatches) != 2 {
+		t.Fatalf("应 1 段 2 人匹配: %s", rec.Body.String())
+	}
+	top := detail.Segments[0].VoiceMatches[0]
+	// 核心断言：感冒段与甲的相似度 = 1.0（命中感冒样本），而非聚合均值 0.707
+	if top.Name != "甲" || math.Abs(top.Similarity-1) > 1e-6 {
+		t.Fatalf("top1 应为 甲/1.0（多向量取最高），实际 %s/%.4f", top.Name, top.Similarity)
+	}
+	if detail.Segments[0].VoiceMatches[1].Name != "乙" || math.Abs(detail.Segments[0].VoiceMatches[1].Similarity) > 1e-6 {
+		t.Fatalf("top2 应为 乙/0（正交），实际 %+v", detail.Segments[0].VoiceMatches[1])
+	}
+}

@@ -30,6 +30,10 @@ type QueryHandler struct {
 
 	// VoiceprintThreshold 1:N 强命中阈值（timeline 列表「整段声纹」判定用；0→兜底 0.8）。
 	VoiceprintThreshold float64
+
+	// SpeakerEmbeddings 多条声纹样本 repo（多向量匹配：每人任意一条样本命中即命中；
+	// nil = 未装配，回退聚合代表单向量，兼容旧装配/测试）
+	SpeakerEmbeddings *repo.SpeakerEmbeddingRepo
 }
 
 // RegisterQuery 挂载查询路由。
@@ -145,7 +149,7 @@ func (h *QueryHandler) enrichVoiceTops(ctx context.Context, sids []ids.ID) map[i
 		log.Printf("[speaker] 列表声纹库读取失败: %v", err)
 		return out
 	}
-	lib := decodeLibrary(all)
+	lib := libraryWithEntries(all, loadSpeakerEntries(ctx, h.SpeakerEmbeddings, all))
 	if len(lib) == 0 {
 		return out
 	}
@@ -383,7 +387,7 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 			if all, err := h.Speakers.List(r.Context()); err != nil {
 				log.Printf("[speaker] 段级声纹相似度富化失败: %v", err)
 			} else {
-				lib = decodeLibrary(all)
+				lib = libraryWithEntries(all, loadSpeakerEntries(r.Context(), h.SpeakerEmbeddings, all))
 			}
 		}
 		views := make([]segmentView, len(segs))

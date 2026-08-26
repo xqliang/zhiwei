@@ -194,6 +194,7 @@ func main() {
 		Memories: memories, Todos: todos, Speakers: speakers,
 		SpeakerNameCandidates: nameCandidates,
 		VoiceprintThreshold:   cfg.VoiceprintThreshold, // timeline 列表「整段声纹」两级判定用
+		SpeakerEmbeddings:     speakerEmbeddings,       // 多向量匹配（每人任意样本命中即命中）
 	})
 	api.RegisterSpeaker(r, &api.SpeakerHandler{
 		Speakers: speakers, Transcripts: transcripts,
