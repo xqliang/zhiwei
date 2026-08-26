@@ -339,6 +339,11 @@ func (h *QueryHandler) Reidentify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *QueryHandler) RetryJob(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	jid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
@@ -346,6 +351,11 @@ func (h *QueryHandler) RetryJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := h.Jobs.Get(r.Context(), jid)
 	if err != nil {
+		http.Error(w, "job 不存在", http.StatusNotFound)
+		return
+	}
+	// 归属校验：job 无 user_id 列，经其 session 判归属——非本用户的 session 一律 404（不泄漏存在性）。
+	if _, err := h.Sessions.Get(r.Context(), uid.Int64(), j.SessionID); err != nil {
 		http.Error(w, "job 不存在", http.StatusNotFound)
 		return
 	}
