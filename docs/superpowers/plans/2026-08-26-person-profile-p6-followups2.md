@@ -77,7 +77,7 @@ Commit: `feat(profile): 归档级联 pending 反向关系边——清确认队�
 
 **做法**：
 - 先读 internal/ids 包：node 位数/取值范围/Init 语义（幂等？重复 Init 报错？）→ **实测**：`Init` 幂等（每次 `snowflake.NewNode` 重建并覆盖全局 node，不因重复调用报错）；`New()` 仅在 `Init` 从未调用时 panic（nil node）；snowflake 默认 NodeBits=10，node 值域 [0,1023]，`NewNode` 仅在 node<0 或 >1023 时报错。
-- 测试侧统一改为**进程唯一 node**。**辅助函数落点**：实测调用点共 **23 处（跨 5 包：profile/api/pipeline/voiceprint/repo，其中 api 占 17 处）**，远超「≤6 则内联」阈值 → 选**导出 `ids.InitForTest() error`**（放 `internal/ids/testinit.go` 普通源文件——Go 不跨包导出 `_test.go` 符号，api/repo 等包的测试要 import 它必须放非 test 文件；生产不调用，注释说明）。实现 = `Init(int64(os.Getpid()) % (1<<snowflake.NodeBits))`（PID 取模 1024）；返回 error 与 `Init` 同签名，故 `ids.Init(1)` 两种写法（`_ = …` 与 `if err := …`）均原地替换、不动结构。碰撞面：并行进程数=CPU 数（个位数），PID 对 1024 同余概率极低，退化也不比旧方案差（注释已论证）。
+- 测试侧统一改为**进程唯一 node**。**辅助函数落点**：实测调用点共 **23 处（跨 5 包：profile/api/pipeline/voiceprint/repo，其中 api 占 19 处）**，远超「≤6 则内联」阈值 → 选**导出 `ids.InitForTest() error`**（放 `internal/ids/testinit.go` 普通源文件——Go 不跨包导出 `_test.go` 符号，api/repo 等包的测试要 import 它必须放非 test 文件；生产不调用，注释说明）。实现 = `Init(int64(os.Getpid()) % (1<<snowflake.NodeBits))`（PID 取模 1024）；返回 error 与 `Init` 同签名，故 `ids.Init(1)` 两种写法（`_ = …` 与 `if err := …`）均原地替换、不动结构。碰撞面：并行进程数=CPU 数（个位数），PID 对 1024 同余概率极低，退化也不比旧方案差（注释已论证）。
 - 注意：node 改变不影响既有断言（ID 值本身从不被断言——grep 确认没有测试硬编码 ID 前缀/数值断言）✅
 
 **实测结论（2026-08-26，采纳方案 a）**：nodeID 隔离是**必要但不充分**——原验收标准（不带 `-p 1` 连跑 3 次全绿）**无法由本任务达成**，实际达成的事实如下：
