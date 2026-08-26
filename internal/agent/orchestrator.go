@@ -108,12 +108,12 @@ func (o *Orchestrator) runTurn(ctx context.Context, conv *repo.AgentConversation
 				StreamFrame{Type: "tool_call", CallID: callID, Name: name, Args: args},
 			)
 		case EvToolResult:
-			text, isErr := ev.ToolResultText()
-			payload, _ := json.Marshal(map[string]any{"text": text, "is_error": isErr})
+			callID, text, isErr := ev.ToolResult()
+			payload, _ := json.Marshal(map[string]any{"call_id": callID, "text": text, "is_error": isErr})
 			raw := json.RawMessage(payload)
 			appendMsg(
 				&repo.AgentMessage{ConversationID: &conv.ID, Role: "assistant", Kind: "tool_result", Content: text, ToolPayload: &raw},
-				StreamFrame{Type: "tool_result", Content: text, IsError: isErr},
+				StreamFrame{Type: "tool_result", CallID: callID, Content: text, IsError: isErr},
 			)
 		case EvTurnEnd:
 			if msg := ev.TurnEndErr(); msg != "" {

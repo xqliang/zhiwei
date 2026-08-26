@@ -73,6 +73,10 @@ func TestRunTurnStreamEmitsInOrder(t *testing.T) {
 	if frames[2].Name != "mcp__zhiwei__get_todos" || frames[2].CallID != "c1" || frames[2].MsgID == "" {
 		t.Errorf("tool_call 帧异常: %+v", frames[2])
 	}
+	// tool_result 帧须回携同一 call_id（供前端按 id 精确配对工具卡，而非 FIFO）。
+	if frames[3].CallID != "c1" || frames[3].Content != "[]" {
+		t.Errorf("tool_result 帧异常（应带 call_id=c1）: %+v", frames[3])
+	}
 	if frames[4].Content != "你没有待办。" {
 		t.Errorf("答复帧异常: %+v", frames[4])
 	}

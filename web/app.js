@@ -1603,8 +1603,9 @@ const app = createApp({
     //   流式会话  WS   /api/agent/conversations/{cid}/ws     上行 {"text":"…"}；下行 StreamFrame
     // StreamFrame.type ∈ user|assistant|tool_call|tool_result|turn_end：
     //   一条用户消息 → user → (assistant | tool_call | tool_result)* → turn_end（turn_end.error 非空=失败）。
-    // 关键：tool_result 帧/历史都【不带 call_id】（见 orchestrator.go / event.go），
-    //   故工具结果按【出现顺序】配对到最早一个未填充的 tool_call 卡（FIFO），而非按 call_id。
+    // 工具结果配对：tool_result 帧/历史都【带 call_id】（见 orchestrator.go / event.go），
+    //   故优先按 call_id 精确配对到对应 tool_call 卡；仅当无 call_id 或未命中（旧数据/异常）时
+    //   才退回 FIFO（填最早一个未填充的卡）。
     const agentConversations = ref([]);   // 左侧会话列表
     const agentConvId = ref(null);        // 当前选中的会话 id（string）
     const agentMessages = ref([]);        // 当前会话的展示项流（见下 makeToolItem / 文本项结构）
@@ -1832,7 +1833,17 @@ const app = createApp({
       for (const it of arr) { if (it.kind === 'tool' && it.result === null) { fillTool(it, text, isErr); return true; } }
       return false;
     }
-    // 历史消息（GET）→ 展示项：tool_payload 已是对象（Go 内联 JSON）。tool_result 无 call_id，按序配对。
+    // 把 tool_result 填到对应工具卡：优先按 call_id 精确命中未填充的卡；无 call_id 或未命中
+    // （旧数据/异常）则退回 FIFO（fillNextToolIn）。无任何匹配返回 false。
+    function fillToolResult(arr, callId, text, isErr) {
+      if (callId) {
+        for (const it of arr) {
+          if (it.kind === 'tool' && it.call_id === callId && it.result === null) { fillTool(it, text, isErr); return true; }
+        }
+      }
+      return fillNextToolIn(arr, text, isErr);
+    }
+    // 历史消息（GET）→ 展示项：tool_payload 已是对象（Go 内联 JSON）。tool_result 带 call_id，按 id 配对（未命中退回 FIFO）。
     function mapAgentHistory(messages) {
       const items = [];
       for (const m of (messages || [])) {
@@ -1841,7 +1852,7 @@ const app = createApp({
           items.push(makeToolItem(tp.call_id, tp.name, tp.arguments));
         } else if (m.kind === 'tool_result') {
           const tp = m.tool_payload || {};
-          if (!fillNextToolIn(items, tp.text, tp.is_error)) {
+          if (!fillToolResult(items, tp.call_id, tp.text, tp.is_error)) {
             // 落单的结果（历史异常）：作独立错误/结果卡兜底显示
             const it = makeToolItem('', '', ''); fillTool(it, tp.text, tp.is_error); items.push(it);
           }
@@ -1878,7 +1889,7 @@ const app = createApp({
         case 'user': agentMessages.value.push({ kind: 'text', role: 'user', content: f.content }); break;
         case 'assistant': agentMessages.value.push({ kind: 'text', role: 'assistant', content: f.content }); break;
         case 'tool_call': agentMessages.value.push(makeToolItem(f.call_id, f.name, f.args)); break;
-        case 'tool_result': fillNextToolIn(agentMessages.value, f.content, f.is_error); break;
+        case 'tool_result': fillToolResult(agentMessages.value, f.call_id, f.content, f.is_error); break;
         case 'turn_end': agentTyping.value = false; if (f.error) agentTurnError.value = f.error; break;
       }
       scrollAgentBottom();

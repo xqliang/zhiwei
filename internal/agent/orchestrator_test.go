@@ -170,6 +170,16 @@ func TestOrchestratorInterleavedOrder(t *testing.T) {
 	if msgs[1].Content != "我查一下你的待办。" {
 		t.Errorf("前言文本错位/丢失: %q", msgs[1].Content)
 	}
+	// tool_result 落库 payload 须含 call_id（与 tool_call 的 call_id 一致），供历史重载时按 id 配对。
+	var trp struct {
+		CallID string `json:"call_id"`
+	}
+	if msgs[3].ToolPayload != nil {
+		_ = json.Unmarshal(*msgs[3].ToolPayload, &trp)
+	}
+	if trp.CallID != "c1" {
+		t.Errorf("tool_result 落库 payload 应含 call_id=c1, got %q", trp.CallID)
+	}
 }
 
 // TestProfileContextHead 锁定上下文头组装（D2）：有 owner + 关键属性时，头含当天日期 + owner

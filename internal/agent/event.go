@@ -51,14 +51,17 @@ func (e Event) ToolCall() (callID, name, arguments string) {
 	return d.CallID, d.Name, d.Arguments
 }
 
-// ToolResultText 从 tool/result 事件提取首个 tool-result 的文本与 isError。
-func (e Event) ToolResultText() (text string, isError bool) {
+// ToolResult 从 tool/result 事件提取首个 tool-result 的 {toolCallId, 文本, isError}。
+// callID 用于把结果精确配对回对应的 tool/call（前端据此定位工具卡，避免 FIFO 顺序在
+// 批量/乱序返回时错配）；dsh 的 tool-result 块自带 toolCallId（与 tool/call 的 callId 同值）。
+func (e Event) ToolResult() (callID, text string, isError bool) {
 	var d struct {
 		Message struct {
 			Content []struct {
-				Type    string `json:"type"`
-				IsError bool   `json:"isError"`
-				Content []struct {
+				Type       string `json:"type"`
+				ToolCallID string `json:"toolCallId"`
+				IsError    bool   `json:"isError"`
+				Content    []struct {
 					Type string `json:"type"`
 					Text string `json:"text"`
 				} `json:"content"`
@@ -66,7 +69,7 @@ func (e Event) ToolResultText() (text string, isError bool) {
 		} `json:"message"`
 	}
 	if json.Unmarshal(e.Data, &d) != nil {
-		return "", false
+		return "", "", false
 	}
 	for _, c := range d.Message.Content {
 		if c.Type == "tool-result" {
@@ -75,10 +78,10 @@ func (e Event) ToolResultText() (text string, isError bool) {
 					text += t.Text
 				}
 			}
-			return text, c.IsError
+			return c.ToolCallID, text, c.IsError
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // TurnEndErr 若 turn/end.reason.kind=="error" 返回错误信息，否则空串。
