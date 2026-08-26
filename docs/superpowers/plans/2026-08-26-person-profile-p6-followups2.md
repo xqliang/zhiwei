@@ -98,3 +98,17 @@ Commit: `test: 测试进程 snowflake node 隔离——解锁多包并行测试�
 1. **覆盖**：F4/P2a③/F5反向边(pending)/F6(nodeID) 四项全落位；不做项（F7、active 反向边、N+1、属性自然键 SQL、user_id 隔离除非顺手）在头部明确记录。
 2. **模式一致**：F4 校验失败 LLM skip 对齐「宁少勿错」；P2a③ 完全镜像 attribute 的 NormalizeTitle reaffirm 模式；F5 补充沿用 P5 级联事务结构。
 3. **风险点已核**：NormalizeTitle 保留汉字（unicode.IsLetter 含 Han，实测文件在案）；factKey 归一化与 DB 自然键同步（P3a 教训）；手动路径校验错误的状态码映射对齐既有「非法指标类型」处理；存量测试可能依赖脏值——先跑存量再改。
+
+### Task 1b: F4 前端配套——属性值受控输入（Task 1 双审发现的 UX 回归，必做）
+
+**背景**：Task 1 写入端上闸后，存量自由文本属性值输入会硬失败——bool 八键（是否吸烟等）用户自然输「是/否」全 400、enum 须精确命中、birthday 自由文本无日期选择器。
+
+**Files:** Modify `internal/api/person.go`（或 router 合适处）+ `web/app.js` + `web/index.html`
+
+**做法**：
+- 后端：`GET /api/profile/catalog` → `{catalog: [{key, label, group, value_type, enum_options, cardinality}]}`（profile.Catalog 导出遍历，静态数据无 DB）。注册进 RegisterPerson
+- 前端：`attrCatalog = ref([])`，人物 tab 挂载/懒加载一次；`attrDefOf(key)` 查 def（找不到回退 text 自由文本——目录外 key 兼容）
+- 加属性表单 + 就地编辑值输入：`value_type==='enum'` → `<select>`（空 option + enum_options）；`'bool'` → `<select>` 是/否（提交映射 true/false）；`'date'` → `type="date"`；其余保持自由文本。attr_key 的 datalist 可顺带用 catalog 的 key+label 增强（可选）
+- 受控输入提交的值天然合法，自由文本路径（text/目录外）不经过闸门变化
+- 验证：node --check；起本 worktree 临时服务（ZW_PORT=8099 对 zhiwei_test）冒烟 GET catalog；hash 同步留 Task 5 收尾一并
+- Commit: `feat(web): 属性值按类型受控输入——enum/bool/date 控件化（F4 配套）`
