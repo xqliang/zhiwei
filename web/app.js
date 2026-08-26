@@ -47,7 +47,9 @@ const app = createApp({
         //   两种都拿不到内容时，才回落到「请求失败 + 状态码」这一最后兜底。
         let msg = '';
         try { msg = (text ? JSON.parse(text).error : '') || ''; } catch (e) {}
-        if (!msg && text) { msg = text.trim().slice(0, 200); }
+        // 纯文本兜底：疑似 HTML（反代 502/504 错误页等，以 '<' 开头）不透传原始标签，
+        // 直接走最后兜底——本栈后端错误全是纯文本中文，命中 '<' 开头必非业务错误。
+        if (!msg && text && text.trim()[0] !== '<') { msg = text.trim().slice(0, 200); }
         throw new Error(msg || '请求失败 ' + r.status);
       }
       // 部分写操作（关联/删除 topic）返回 200/204 空体，r.json() 会抛
