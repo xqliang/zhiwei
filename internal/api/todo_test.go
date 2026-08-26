@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
@@ -41,7 +39,7 @@ func setupTodoAPI(t *testing.T) (http.Handler, *repo.TodoRepo, *repo.Todo) {
 		t.Fatal(err)
 	}
 
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterTodo(r, &TodoHandler{Todos: tr, TodoTopics: todoTopics, Topics: topics})
 	return r, tr, td
 }
@@ -138,7 +136,7 @@ func TestTodoAddRemoveTopic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterTodo(r, &TodoHandler{Todos: tr, TodoTopics: todoTopics, Topics: topics})
 
 	post := func(body string) int {
@@ -204,7 +202,7 @@ func TestTodoEditTitle(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("edit title: %d %s", rec.Code, rec.Body.String())
 	}
-	got, _ := tr.Get(ctx, td.ID)
+	got, _ := tr.Get(ctx, 1, td.ID)
 	if got.Title != newTitle {
 		t.Fatalf("title=%s, want %s", got.Title, newTitle)
 	}
@@ -222,14 +220,15 @@ func TestTodoDelete(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("delete: %d", rec.Code)
 	}
-	if _, err := tr.Get(ctx, td.ID); err == nil {
+	if _, err := tr.Get(ctx, 1, td.ID); err == nil {
 		t.Fatal("todo 仍存在")
 	}
-	// 重复删除幂等（204）
+	// 归属校验后：删已不存在的 todo → 404（评审 I2：先 Get 校验归属/存在性，
+	// 拿不到即 404，不再是幂等 204）
 	rec2 := httptest.NewRecorder()
 	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodDelete, "/api/todos/"+td.ID.String(), nil))
-	if rec2.Code != http.StatusNoContent {
-		t.Fatalf("idempotent delete: %d", rec2.Code)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("删已不存在应 404, got %d", rec2.Code)
 	}
 }
 
@@ -248,7 +247,7 @@ func TestTodoPatchTitleStatusBadTransition(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("want 409, got %d %s", rec.Code, rec.Body.String())
 	}
-	got, _ := tr.Get(ctx, td.ID)
+	got, _ := tr.Get(ctx, 1, td.ID)
 	if got.Title != origTitle {
 		t.Fatalf("title 被半成功持久化: %s, want %s", got.Title, origTitle)
 	}

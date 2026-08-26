@@ -36,7 +36,7 @@ type ExtractResult struct {
 //     session 时可安全跳过这类 session，不因个别缺转写而整批失败）。
 func (s *Service) ExtractSession(ctx context.Context, sessionID ids.ID) (ExtractResult, error) {
 	var res ExtractResult
-	ss, err := s.Sessions.Get(ctx, sessionID)
+	ss, err := s.Sessions.Get(ctx, 1, sessionID) // 阶段1：后台抽取暂 user-1，阶段2 随登录用户
 	if err != nil {
 		// SessionRepo.Get 用 sqlx GetContext，行不存在返回 sql.ErrNoRows。
 		if errors.Is(err, sql.ErrNoRows) {

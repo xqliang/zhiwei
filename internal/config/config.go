@@ -67,6 +67,11 @@ type Config struct {
 	ProfileAutoConfidence float64 // ZW_PROFILE_AUTO_CONFIDENCE：LLM 抽取自动写入 active 的置信阈值（默认 0.75）
 	ProfileExtractEnabled bool    // ZW_PROFILE_EXTRACT_ENABLED：是否启用 profile 流水线阶段（默认 true）
 	ProfileExtractWindow  int     // ZW_PROFILE_EXTRACT_WINDOW：抽取窗口大小（对话块数，默认 10）
+
+	// ---- 多用户鉴权（阶段1：cookie+session）----
+	OwnerPassword  string // ZW_OWNER_PASSWORD：首启引导 owner(id=1) 口令（其 password_hash 空时用它设置）
+	CookieSecure   bool   // ZW_COOKIE_SECURE：session cookie 是否 Secure（默认 true；本地 http 调试可设 false）
+	SessionTTLDays int    // ZW_SESSION_TTL_DAYS：会话有效期天数（默认 30）
 }
 
 func getenv(k, def string) string {
@@ -141,6 +146,11 @@ func Load() (*Config, error) {
 		ProfileAutoConfidence: getenvFloat("ZW_PROFILE_AUTO_CONFIDENCE", 0.75),
 		ProfileExtractEnabled: getenvBool("ZW_PROFILE_EXTRACT_ENABLED", true),
 		ProfileExtractWindow:  getenvInt("ZW_PROFILE_EXTRACT_WINDOW", 10),
+
+		// ---- 多用户鉴权（阶段1）----
+		OwnerPassword:  os.Getenv("ZW_OWNER_PASSWORD"),
+		CookieSecure:   getenvBool("ZW_COOKIE_SECURE", true),
+		SessionTTLDays: getenvInt("ZW_SESSION_TTL_DAYS", 30),
 	}, nil
 }
 

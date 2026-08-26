@@ -38,9 +38,11 @@ VALUES (:id, :user_id, :title, :dsh_session_id)`, c)
 	return err
 }
 
-func (r *AgentConversationRepo) Get(ctx context.Context, id ids.ID) (*AgentConversation, error) {
+// Get 按 id 查会话，并强制 user_id 隔离（多租户越权防护）：SQL 追加 AND user_id = ?，
+// 用 userID 读他人会话时命中 0 行，沿用 GetContext 既有语义返回 sql.ErrNoRows（handler 转 404）。
+func (r *AgentConversationRepo) Get(ctx context.Context, userID int64, id ids.ID) (*AgentConversation, error) {
 	var c AgentConversation
-	err := r.DB.GetContext(ctx, &c, `SELECT * FROM agent_conversation WHERE id = ?`, id.Int64())
+	err := r.DB.GetContext(ctx, &c, `SELECT * FROM agent_conversation WHERE id = ? AND user_id = ?`, id.Int64(), userID)
 	return &c, err
 }
 

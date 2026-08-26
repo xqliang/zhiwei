@@ -61,7 +61,7 @@ func TestOrchestratorRunTurn(t *testing.T) {
 		t.Errorf("Prompt 入参异常: text=%q sid=%q", fake.LastText, fake.LastSessionID)
 	}
 
-	msgs, err := msgRepo.ListByConversation(ctx, conv.ID)
+	msgs, err := msgRepo.ListByConversation(ctx, 1, conv.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestOrchestratorInterleavedOrder(t *testing.T) {
 		t.Fatalf("最终答复应为最后一条文本, got %+v", final)
 	}
 
-	msgs, err := msgRepo.ListByConversation(ctx, conv.ID)
+	msgs, err := msgRepo.ListByConversation(ctx, 1, conv.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestOrchestratorContextInjection(t *testing.T) {
 	}
 
 	// 关键：落库的 user 消息 = 原始 userText（不含头），历史保持干净
-	msgs, err := msgRepo.ListByConversation(ctx, conv.ID)
+	msgs, err := msgRepo.ListByConversation(ctx, 1, conv.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

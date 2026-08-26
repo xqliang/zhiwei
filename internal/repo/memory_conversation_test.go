@@ -37,7 +37,7 @@ func TestInsertConversationRoundTrip(t *testing.T) {
 	}
 
 	// Get 走 SELECT *（safe 模式）：能取回即证明 conversation_id 列有对应结构体字段
-	got, err := mr.Get(ctx, ms[0].ID)
+	got, err := mr.Get(ctx, 1, ms[0].ID)
 	if err != nil {
 		t.Fatalf("Get(safe-mode SELECT *): %v", err)
 	}
@@ -65,7 +65,7 @@ func TestInsertConversationRoundTrip(t *testing.T) {
 	if _, err := mr.ListActive(ctx, 1, 50); err != nil {
 		t.Fatalf("ListActive(safe-mode): %v", err)
 	}
-	if _, err := mr.List(ctx, MemoryFilter{Type: "fact", Limit: 50}); err != nil {
+	if _, err := mr.List(ctx, MemoryFilter{UserID: 1, Type: "fact", Limit: 50}); err != nil {
 		t.Fatalf("List(safe-mode): %v", err)
 	}
 }
@@ -120,7 +120,7 @@ func TestDeleteByConversationIdempotent(t *testing.T) {
 		t.Fatalf("删除后仍有关联: %v", links)
 	}
 	// 主表应清空（按 conversation_id 查不到——用 Get 探测第一条应 ErrNoRows）
-	if _, err := mr.Get(ctx, ms[0].ID); err == nil {
+	if _, err := mr.Get(ctx, 1, ms[0].ID); err == nil {
 		t.Fatalf("删除后仍能 Get 到 memory")
 	}
 
@@ -154,7 +154,7 @@ func TestSessionPathRegression(t *testing.T) {
 	if err := mr.InsertExt(ctx, db, ms); err != nil {
 		t.Fatalf("InsertExt: %v", err)
 	}
-	got, err := mr.Get(ctx, ms[0].ID)
+	got, err := mr.Get(ctx, 1, ms[0].ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

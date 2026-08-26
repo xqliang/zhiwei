@@ -14,9 +14,24 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
+
+// newAuthedRouter 返回预装「登录态注入」中间件的测试路由（api 包测试共用）。
+// 阶段1 起，A 类 handler（memory/todo/topic/query）会 auth.UserID(ctx) 取登录用户，
+// 无登录态直接 401。测试 fixture 默认以 user_id=1 落库，故这里统一把请求上下文注入
+// owner=1，使经此路由的请求带上登录用户 1，行为与多租户接线前保持一致。
+func newAuthedRouter() *chi.Mux {
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(w, req.WithContext(auth.WithUserID(req.Context(), 1)))
+		})
+	})
+	return r
+}
 
 // setupQueryAPI 构造挂载了查询路由的测试 handler。
 // Sprint 2：详情需附带 memories/todos，因此注入两个新 repo。
@@ -24,7 +39,7 @@ func setupQueryAPI(t *testing.T, s *repo.SessionRepo, j *repo.JobRepo,
 	tr *repo.TranscriptRepo, m *repo.MemoryRepo, td *repo.TodoRepo) http.Handler {
 	t.Helper()
 	_ = ids.Init(1)
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterQuery(r, &QueryHandler{
 		Sessions: s, Jobs: j, Transcripts: tr, Memories: m, Todos: td,
 	})
@@ -157,7 +172,7 @@ func TestGetSessionSpeakerEnrichment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterQuery(r, &QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,
@@ -263,7 +278,7 @@ func TestGetSessionNameCandidates(t *testing.T) {
 	_ = candidates.Upsert(ctx, randSp.ID, "张总", 0.82, "对方称呼张总", sid)
 	_ = candidates.Upsert(ctx, randSp.ID, "张明", 0.4, "", sid)
 
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterQuery(r, &QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,
@@ -426,7 +441,7 @@ func buildEnrichedSession(t *testing.T) (http.Handler, ids.ID, *repo.SessionRepo
 		Title: "富化用例给 Tom 发邮件", SourceMemoryID: &memRows[0].ID, Status: "confirmed", Confidence: 0.9,
 	}})
 
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterQuery(r, &QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts, Memories: memories, Todos: todos,
 	})
@@ -677,7 +692,7 @@ func TestGetSessionVoiceMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterQuery(r, &QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,

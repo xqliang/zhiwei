@@ -48,9 +48,11 @@ func (r *TopicRepo) Create(ctx context.Context, tp *Topic) error {
 	return r.CreateExt(ctx, r.DB, tp)
 }
 
-func (r *TopicRepo) Get(ctx context.Context, id ids.ID) (*Topic, error) {
+// Get 按 id 查主题，并强制 user_id 隔离（多租户越权防护）：SQL 追加 AND user_id = ?，
+// 用 userID 读他人主题时命中 0 行，沿用 GetContext 既有语义返回 sql.ErrNoRows（handler 转 404）。
+func (r *TopicRepo) Get(ctx context.Context, userID int64, id ids.ID) (*Topic, error) {
 	var tp Topic
-	err := r.DB.GetContext(ctx, &tp, `SELECT * FROM topic WHERE id = ?`, id.Int64())
+	err := r.DB.GetContext(ctx, &tp, `SELECT * FROM topic WHERE id = ? AND user_id = ?`, id.Int64(), userID)
 	return &tp, err
 }
 

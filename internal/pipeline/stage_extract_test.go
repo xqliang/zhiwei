@@ -654,7 +654,7 @@ func TestStageExtractMemoryCorroboration(t *testing.T) {
 		t.Fatalf("session B memories = %d, want 0（候选佐证并入 old memory，不增行）", len(mems))
 	}
 	// 断言 2：old memory confidence 0.80 → 0.85（佐证 +0.05）
-	got, _ := d.Memories.Get(ctx, oldMem.ID)
+	got, _ := d.Memories.Get(ctx, 1, oldMem.ID)
 	if math.Abs(got.Confidence-0.85) > 0.001 {
 		t.Fatalf("old memory confidence = %v, want 0.85", got.Confidence)
 	}

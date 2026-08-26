@@ -17,6 +17,15 @@ const app = createApp({
     const tab = ref('timeline');
     const toast = ref('');
 
+    // ---------- 登录门（cookie + session 鉴权）状态 ----------
+    // authed 三态：null=校验登录态中（初始，显示加载占位）/ false=显示登录页 / true=显示主界面。
+    // 由启动时 checkAuth()（GET /api/auth/me）与 api() 的 401 拦截共同驱动。
+    const authed = ref(null);
+    const currentUser = ref(null);                  // 当前登录用户 {id, username, display_name}
+    const loginForm = reactive({ username: '', password: '' });
+    const loginError = ref('');                     // 登录失败提示（凭据错等，行内展示）
+    const loggingIn = ref(false);                   // 登录请求中（按钮 loading + 禁用防重复提交）
+
     // ---------- 通用 ----------
     function fmtTime(iso) { return iso ? new Date(iso).toLocaleString('zh-CN') : ''; }
     function fmtDue(iso) {
@@ -26,7 +35,9 @@ const app = createApp({
       return d < new Date() ? s + ' · 已过期' : s;
     }
     async function api(method, url, body) {
-      const opt = { method };
+      // credentials:'same-origin' —— 同源请求自动携带会话 cookie（zw_session）做鉴权。
+      // 现代浏览器 fetch 同源默认即 same-origin，这里显式声明，语义清晰且防默认值变动。
+      const opt = { method, credentials: 'same-origin' };
       if (body instanceof FormData) {
         // FormData（录入说话人上传语音样本）：不手动设 Content-Type，
         // 交给浏览器自动带上含 boundary 的 multipart/form-data 头，否则后端解析不到文件。
@@ -36,6 +47,12 @@ const app = createApp({
         opt.body = JSON.stringify(body);
       }
       const r = await fetch(url, opt);
+      // 401 拦截：未登录或会话过期 → 踢回登录页（authed=false），并抛错中断调用链，
+      // 避免调用方拿空数据继续渲染。这样任何 /api/* 在 session 失效后都会自动回到登录门。
+      if (r.status === 401) {
+        authed.value = false;
+        throw new Error('未登录或会话已过期');
+      }
       const text = await r.text();
       if (!r.ok) {
         let msg = '请求失败';
@@ -50,6 +67,52 @@ const app = createApp({
       toast.value = (e && e.message) || String(e);
       setTimeout(() => { toast.value = ''; }, 3000);
     }
+
+    // ---------- 登录门（cookie + session 鉴权）逻辑 ----------
+    // 首屏加载主界面数据（与原 mount 时的一次性加载对齐）：sessions + topics（「+关联」下拉）+ speakers（换人下拉）。
+    function bootMainData() {
+      loadSessions();
+      loadTopics();       // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value（评审 M1）
+      loadAllSpeakers();  // 换人下拉（转写段 <select>）数据源，首屏 timeline 即可用
+    }
+    // 启动/登录成功后调用：GET /api/auth/me 判断登录态。
+    // 200 → 记住当前用户、authed=true、加载主界面首屏数据；401 → api() 已置 authed=false（登录页）。
+    async function checkAuth() {
+      try {
+        const d = await api('GET', '/api/auth/me');
+        currentUser.value = (d && d.user) || null;
+        authed.value = true;
+        bootMainData();
+      } catch (e) {
+        authed.value = false; // 401（api 已置）或网络错误：统一停在登录页，用户可重试登录
+      }
+    }
+    // 登录表单提交：POST /api/auth/login → 成功则重新走「me→主界面」加载流程；失败提示凭据错误。
+    async function submitLogin() {
+      if (loggingIn.value) return; // 防重复提交
+      const username = loginForm.username.trim();
+      const password = loginForm.password;
+      if (!username || !password) { loginError.value = '请输入用户名和密码'; return; }
+      loggingIn.value = true; loginError.value = '';
+      try {
+        await api('POST', '/api/auth/login', { username, password });
+        loginForm.password = '';  // 不在内存里留存明文密码
+        await checkAuth();        // 成功 → 重新走 me→主界面 流程（Set-Cookie 已由浏览器保存）
+      } catch (e) {
+        loginError.value = '用户名或密码错误';
+      } finally {
+        loggingIn.value = false;
+      }
+    }
+    // 登出：POST /api/auth/logout（清 cookie）→ 无论成败都回登录页；顺带断开可能存在的问知微 WS。
+    async function logout() {
+      try { await api('POST', '/api/auth/logout'); }
+      catch (e) { /* 登出失败也回登录页：本地态清掉即可，后端 cookie 到期自然失效 */ }
+      closeAgentWS();           // 断开后台常驻的问知微 WS（函数声明，已提升）
+      currentUser.value = null;
+      authed.value = false;
+    }
+
     function typeMeta(t) { return TYPE_META[t] || { label: t, color: '#6b7280' }; }
     function statusText(status, stage) {
       if (status === 'done' || status === 'completed') return '已完成';
@@ -197,13 +260,13 @@ const app = createApp({
       fd.append('file', file); fd.append('source', source);
       uploadInfo.value = { filename: file.name, status: 'pending', text: '上传中…' };
       try {
-        const r = await fetch('/api/audio', { method: 'POST', body: fd });
+        const r = await fetch('/api/audio', { method: 'POST', body: fd, credentials: 'same-origin' });
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || '上传失败');
         uploadInfo.value = { filename: file.name, status: 'running', text: '已上传，处理中…' };
         pollTimer = setInterval(async () => {
           try {
-            const rr = await fetch('/api/sessions/' + d.session_id);
+            const rr = await fetch('/api/sessions/' + d.session_id, { credentials: 'same-origin' });
             const dd = await rr.json();
             const st = dd.job ? dd.job.status : dd.session.status;
             if (st === 'done' || st === 'completed') {
@@ -2216,18 +2279,16 @@ const app = createApp({
       // 人物 tab：进入时复位详情/归档确认态，拉名册 + 确认队列（跨平面 pending 并集，独立刷新）。
       if (name === 'persons') { closePersonDetail(); archivingPersonId.value = null; loadPersons(); loadPending(); }
     }
-    loadSessions();
-    // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
-    // 原先只在 switchTab('topics'/'todos') 触发——首屏 timeline 下拉为空。
-    // mount 时一并拉一次，保证首屏就有可选项（评审 M1）。
-    loadTopics();
-    // 换人下拉（转写段 <select>）的数据源，首屏 timeline 即可用。
-    loadAllSpeakers();
+    // 启动先校验登录态（登录门）：GET /api/auth/me → 200 进主界面并加载首屏数据（bootMainData）；
+    // 401 → api() 已置 authed=false，显示登录页。未登录时不再盲发 sessions/topics/speakers 等请求。
+    checkAuth();
 
     onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); clearTimeout(reextractPollTimer); closeAgentWS(); });
 
     return {
       tab, toast, switchTab,
+      // 登录门（cookie + session 鉴权）
+      authed, currentUser, loginForm, loginError, loggingIn, submitLogin, logout,
       fmtTime, fmtDue, typeMeta, statusText, todoStatusText, spClass,
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissingMemId, askDismissMem, cancelDismissMem, confirmDismissMem, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
       tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay, detailInsights,

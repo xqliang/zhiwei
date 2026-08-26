@@ -48,6 +48,10 @@ type MemoryRow struct {
 
 // MemoryFilter 是列表查询条件，零值字段不参与过滤。
 type MemoryFilter struct {
+	// UserID 多租户隔离（必填）：List 强制按 m.user_id = ? 过滤，防越权读到他人记忆。
+	// 为 0 时视为「未指定用户」，List 直接返回空结果（安全默认）——刻意不做
+	// 「0 = 不过滤」的危险回退，避免调用方忘传 userID 时全表泄漏。
+	UserID  int64
 	Type    string
 	TopicID *ids.ID
 	Since   *time.Time // 事件时间下界（含等于），spec §4 的 since 过滤
@@ -150,9 +154,11 @@ func (r *MemoryRepo) BumpConfidenceExt(ctx context.Context, ext ExecerContext, i
 	return err
 }
 
-func (r *MemoryRepo) Get(ctx context.Context, id ids.ID) (*Memory, error) {
+// Get 按 id 查记忆，并强制 user_id 隔离（多租户越权防护）：SQL 追加 AND user_id = ?，
+// 用 userID 读他人记忆时命中 0 行，沿用 GetContext 既有语义返回 sql.ErrNoRows（handler 转 404）。
+func (r *MemoryRepo) Get(ctx context.Context, userID int64, id ids.ID) (*Memory, error) {
 	var m Memory
-	err := r.DB.GetContext(ctx, &m, `SELECT * FROM memory WHERE id = ?`, id.Int64())
+	err := r.DB.GetContext(ctx, &m, `SELECT * FROM memory WHERE id = ? AND user_id = ?`, id.Int64(), userID)
 	return &m, err
 }
 
@@ -186,7 +192,14 @@ func (r *MemoryRepo) Save(ctx context.Context, m *Memory) error {
 }
 
 func (r *MemoryRepo) List(ctx context.Context, f MemoryFilter) ([]MemoryRow, error) {
-	where := map[string]any{}
+	// 多租户隔离：UserID 必填。为 0 视为「未指定用户」，直接返回空而非全表扫描，
+	// 避免调用方漏传 userID 时越权读到他人记忆（安全默认，见 MemoryFilter.UserID 注释）。
+	if f.UserID == 0 {
+		return nil, nil
+	}
+	// 把 user_id 作为普通等值条件塞进 where map，交由 listWhere 生成 "m.user_id = ?"。
+	// 不改 listWhere 签名，从而不影响同样复用它的 ListBySession/ListByTopic（靠父键隔离）。
+	where := map[string]any{"m.user_id": f.UserID}
 	if f.Type != "" {
 		where["m.type"] = f.Type
 	}
@@ -231,8 +244,16 @@ func (r *MemoryRepo) listWhere(ctx context.Context, where map[string]any, topicI
 	if offset < 0 {
 		offset = 0
 	}
+	// 占位符顺序必须与 args 追加顺序严格一致。SQL 里 topic 子查询的 ? 排在 where 条件之前，
+	// 故 args 也必须先追加 topicID、再追加 where 值（否则多租户 user_id 条件加入后，
+	// topic 的 ? 会错绑到 user_id 值——修 TestMemoryListAndFilter 的 topic 过滤 bug）。
 	var conds []string
 	var args []any
+	cond := "m.status != 'dismissed'"
+	if topicID != nil {
+		cond += " AND m.id IN (SELECT memory_id FROM memory_topic WHERE topic_id = ?)"
+		args = append(args, topicID.Int64())
+	}
 	for col, val := range where {
 		if strings.Contains(col, " ") {
 			conds = append(conds, col+" ?") // 键自带操作符（如 >=）
@@ -240,11 +261,6 @@ func (r *MemoryRepo) listWhere(ctx context.Context, where map[string]any, topicI
 			conds = append(conds, col+" = ?")
 		}
 		args = append(args, val)
-	}
-	cond := "m.status != 'dismissed'"
-	if topicID != nil {
-		cond += " AND m.id IN (SELECT memory_id FROM memory_topic WHERE topic_id = ?)"
-		args = append(args, topicID.Int64())
 	}
 	if len(conds) > 0 {
 		cond += " AND " + strings.Join(conds, " AND ")

@@ -342,6 +342,38 @@
 </head>
 <body>
 <div id="app">
+  <!-- toast 置于登录门之外：登录页/主界面均可显示（登录错误另用行内 loginError） -->
+  <div v-if="toast" class="toast">{{ toast }}</div>
+
+  <!-- ============ 登录门（cookie + session 鉴权） ============ -->
+  <!-- authed 三态：null=校验登录态中 / false=登录页 / true=主界面。见 app.js checkAuth + api() 401 拦截。 -->
+  <!-- 校验中占位 -->
+  <div class="wrap" v-if="authed===null" style="text-align:center; padding-top:64px">
+    <span class="spinner"></span> <span class="muted">加载中…</span>
+  </div>
+
+  <!-- 登录页（未登录 / 会话过期）：用户名 + 密码，全部 {{ }} 自动转义渲染，密码框 type=password，无富文本注入 -->
+  <div class="wrap" v-if="authed===false" style="max-width:380px; padding-top:56px">
+    <div class="brand" style="display:block; text-align:center; padding:0 0 20px; font-size:var(--fs-xl)">知微</div>
+    <div class="card">
+      <form @submit.prevent="submitLogin">
+        <label class="field-label" for="login-user">用户名</label>
+        <input id="login-user" class="txt" v-model="loginForm.username" autocomplete="username"
+               placeholder="用户名" :disabled="loggingIn" style="margin-bottom:12px">
+        <label class="field-label" for="login-pass">密码</label>
+        <input id="login-pass" class="txt" type="password" v-model="loginForm.password" autocomplete="current-password"
+               placeholder="密码" :disabled="loggingIn" style="margin-bottom:14px">
+        <div v-if="loginError" class="muted" style="color:var(--danger); margin-bottom:12px">{{ loginError }}</div>
+        <button class="btn primary" type="submit" style="width:100%; justify-content:center"
+                :disabled="loggingIn || !loginForm.username.trim() || !loginForm.password">
+          <span v-if="loggingIn" class="spinner"></span>{{ loggingIn ? '登录中…' : '登录' }}
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============ 主界面（已登录） ============ -->
+  <template v-if="authed===true">
   <div class="tabs">
     <span class="brand">知微</span>
     <button :class="{active: tab==='timeline'}" @click="switchTab('timeline')">时间线</button>
@@ -353,8 +385,11 @@
     <button :class="{active: tab==='topics'}" @click="switchTab('topics')">主题</button>
     <button :class="{active: tab==='memories'}" @click="switchTab('memories')">记忆</button>
     <button :class="{active: tab==='todos'}" @click="switchTab('todos')">待办</button>
+    <!-- 右侧：当前用户 + 登出（spacer 撑开） -->
+    <span style="flex:1"></span>
+    <span v-if="currentUser" class="muted" style="padding:0 8px; white-space:nowrap">{{ currentUser.display_name || currentUser.username }}</span>
+    <button class="btn ghost" @click="logout" title="退出登录">登出</button>
   </div>
-  <div v-if="toast" class="toast">{{ toast }}</div>
 
   <!-- ============ 时间线 ============ -->
   <div class="wrap wrap-lg" v-if="tab==='timeline'">
@@ -1818,8 +1853,9 @@
       </div>
     </template>
   </div>
+  </template>
 </div>
 
-<script src="/app/app.c4144b47.js"></script>
+<script src="/app/app.f3ed50eb.js"></script>
 </body>
 </html>

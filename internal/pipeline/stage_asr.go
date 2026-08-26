@@ -71,7 +71,7 @@ func BuildStages(d StageDeps) map[string]Handler {
 // stageASR：ffmpeg 统一转 wav16k → ASR → transcript + segments 落库。
 func stageASR(d StageDeps) Handler {
 	return func(ctx context.Context, _ *repo.Job, sessionID ids.ID) error {
-		s, err := d.Sessions.Get(ctx, sessionID)
+		s, err := d.Sessions.Get(ctx, 1, sessionID) // 阶段1：后台流水线无请求上下文，暂 user-1
 		if err != nil {
 			return fmt.Errorf("读取 session: %w", err)
 		}

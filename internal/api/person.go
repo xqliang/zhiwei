@@ -157,7 +157,7 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id 非法", http.StatusBadRequest)
 		return
 	}
-	p, err := h.Persons.Get(r.Context(), id)
+	p, err := h.Persons.Get(r.Context(), 1, id) // 阶段1：画像暂 user-1，阶段2 随登录用户
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -258,7 +258,7 @@ func (h *PersonHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请求体非法", http.StatusBadRequest)
 		return
 	}
-	p, err := h.Persons.Get(r.Context(), id)
+	p, err := h.Persons.Get(r.Context(), 1, id) // 阶段1：画像暂 user-1，阶段2 随登录用户
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -331,7 +331,7 @@ func (h *PersonHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id 非法", http.StatusBadRequest)
 		return
 	}
-	if p, err := h.Persons.Get(r.Context(), id); err != nil {
+	if p, err := h.Persons.Get(r.Context(), 1, id); err != nil { // 阶段1：画像暂 user-1，阶段2 随登录用户
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	} else if p == nil {

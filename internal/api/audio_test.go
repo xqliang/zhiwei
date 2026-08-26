@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-chi/chi/v5"
-
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
@@ -25,7 +23,9 @@ func setupAPI(t *testing.T) http.Handler {
 	}
 	sessions := &repo.SessionRepo{DB: db}
 	jobs := &repo.JobRepo{DB: db}
-	r := chi.NewRouter()
+	// 上传 handler 现要求登录态（评审 I3）：用注入 uid=1 的测试路由，
+	// 使 Upload 能取到登录用户并写 user_id。
+	r := newAuthedRouter()
 	RegisterAudio(r, sessions, jobs, dir)
 	return r
 }

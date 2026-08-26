@@ -72,7 +72,7 @@ func proposeMemoryEditHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequ
 		if err != nil {
 			return nil, nil, err
 		}
-		m, err := d.Memory.Get(ctx, id)
+		m, err := d.Memory.Get(ctx, toolUserID, id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -110,7 +110,7 @@ func proposeMemoryDismissHandler(d MCPDeps) func(context.Context, *mcp.CallToolR
 		if err != nil {
 			return nil, nil, err
 		}
-		m, err := d.Memory.Get(ctx, id)
+		m, err := d.Memory.Get(ctx, toolUserID, id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -141,7 +141,7 @@ func proposeTopicRenameHandler(d MCPDeps) func(context.Context, *mcp.CallToolReq
 		if err != nil {
 			return nil, nil, err
 		}
-		t, err := d.Topic.Get(ctx, id)
+		t, err := d.Topic.Get(ctx, toolUserID, id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -168,7 +168,7 @@ func proposeTopicStatusHandler(d MCPDeps, kind, newStatus string) func(context.C
 		if err != nil {
 			return nil, nil, err
 		}
-		t, err := d.Topic.Get(ctx, id)
+		t, err := d.Topic.Get(ctx, toolUserID, id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -235,7 +235,7 @@ func proposeTodoStatusHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequ
 		if err != nil {
 			return nil, nil, err
 		}
-		td, err := d.Todo.Get(ctx, id)
+		td, err := d.Todo.Get(ctx, toolUserID, id)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
@@ -49,7 +47,7 @@ func setupMemoryAPI(t *testing.T) (http.Handler, *repo.MemoryRepo, *repo.TopicRe
 		t.Fatal(err)
 	}
 
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterMemory(r, &MemoryHandler{Memories: mr, Topics: tr, MemoryTopics: mtr})
 	return r, mr, tr, mem
 }
@@ -186,7 +184,7 @@ func TestMemoryAddRemoveTopic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterMemory(r, &MemoryHandler{Memories: mr, Topics: topics, MemoryTopics: mtr})
 
 	post := func(body string) int {
@@ -252,7 +250,7 @@ func TestMemoryPatch(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("patch: %d %s", rec.Code, rec.Body.String())
 	}
-	got, _ := mr.Get(ctx, mem.ID)
+	got, _ := mr.Get(ctx, 1, mem.ID)
 	if got.Content != "修正后的内容描述" || got.Version != 2 {
 		t.Fatalf("after patch: %+v", got)
 	}
@@ -345,7 +343,7 @@ func TestMemoryConsolidate(t *testing.T) {
 	mr, mtr, tr, a, b, _, _, _ := setupMemoryConsolidateFixtures(t)
 	canned := fmt.Sprintf(`{"merges":[{"canonical_id":"%s","member_ids":["%s","%s"]}],"adjustments":[{"memory_id":"%s","kind":"corroborate","reason":"B 佐证 A","evidence_ids":["%s"]}]}`,
 		a.ID.String(), a.ID.String(), b.ID.String(), b.ID.String(), a.ID.String())
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterMemory(r, &MemoryHandler{
 		Memories: mr, Topics: tr, MemoryTopics: mtr,
 		LLM: &fakeConsolidateLLM{resp: canned}, LLMModel: "test", ConsolidatePrompt: "sys",
@@ -395,7 +393,7 @@ func TestMemoryConsolidate(t *testing.T) {
 // merges 优先：adjustments 跳过已被 merge supersede 的 member。不调 LLM（纯 DB 事务）。
 func TestMemoryMerge(t *testing.T) {
 	mr, mtr, tr, a, b, c, d, e := setupMemoryConsolidateFixtures(t)
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterMemory(r, &MemoryHandler{Memories: mr, Topics: tr, MemoryTopics: mtr}) // Merge 不调 LLM
 
 	body := fmt.Sprintf(`{"merges":[{"canonical_id":"%s","member_ids":["%s","%s"]}],"adjustments":[{"memory_id":"%s","kind":"corroborate","reason":"","evidence_ids":[]},{"memory_id":"%s","kind":"contradict","reason":"","evidence_ids":[]},{"memory_id":"%s","kind":"outdated","reason":"","evidence_ids":[]}]}`,
@@ -429,7 +427,7 @@ func TestMemoryMerge(t *testing.T) {
 		t.Fatalf("A topics = %+v, want 含整理靶主题+整理源主题", gotTopics)
 	}
 	// B superseded，B 的 memory_topic 已删
-	bGot, _ := mr.Get(ctx, b.ID)
+	bGot, _ := mr.Get(ctx, 1, b.ID)
 	if bGot.Status != "superseded" {
 		t.Fatalf("B status=%s, want superseded", bGot.Status)
 	}
@@ -438,15 +436,15 @@ func TestMemoryMerge(t *testing.T) {
 		t.Fatalf("B topic 关联=%d, want 0（已迁删）", len(bLinks[b.ID]))
 	}
 	// corroborate C 0.80→0.85；contradict D 0.80→0.70；outdated E 0.80→0.40 且 superseded
-	cGot, _ := mr.Get(ctx, c.ID)
+	cGot, _ := mr.Get(ctx, 1, c.ID)
 	if math.Abs(cGot.Confidence-0.85) > 0.001 {
 		t.Fatalf("C conf=%v, want 0.85", cGot.Confidence)
 	}
-	dGot, _ := mr.Get(ctx, d.ID)
+	dGot, _ := mr.Get(ctx, 1, d.ID)
 	if math.Abs(dGot.Confidence-0.70) > 0.001 {
 		t.Fatalf("D conf=%v, want 0.70", dGot.Confidence)
 	}
-	eGot, _ := mr.Get(ctx, e.ID)
+	eGot, _ := mr.Get(ctx, 1, e.ID)
 	if eGot.Status != "superseded" || math.Abs(eGot.Confidence-0.40) > 0.001 {
 		t.Fatalf("E = %+v, want superseded conf=0.40", eGot)
 	}

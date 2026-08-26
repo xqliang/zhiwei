@@ -23,7 +23,7 @@ const topicPromptLimit = 30
 
 func stageExtract(d StageDeps) Handler {
 	return func(ctx context.Context, j *repo.Job, sessionID ids.ID) error {
-		s, err := d.Sessions.Get(ctx, sessionID)
+		s, err := d.Sessions.Get(ctx, 1, sessionID) // 阶段1：后台流水线无请求上下文，暂 user-1
 		if err != nil {
 			return fmt.Errorf("读取 session: %w", err)
 		}

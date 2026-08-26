@@ -37,7 +37,7 @@ func TestAgentMessageAppendAndList(t *testing.T) {
 		t.Fatalf("Append assistant: %v", err)
 	}
 
-	list, err := mr.ListByConversation(ctx, conv.ID)
+	list, err := mr.ListByConversation(ctx, 1, conv.ID)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestAgentMessageListEmpty(t *testing.T) {
 	}
 	mr := &AgentMessageRepo{DB: db}
 	ctx := t.Context()
-	list, err := mr.ListByConversation(ctx, ids.New())
+	list, err := mr.ListByConversation(ctx, 1, ids.New())
 	if err != nil {
 		t.Fatalf("ListByConversation empty: %v", err)
 	}

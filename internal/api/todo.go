@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
@@ -31,9 +32,14 @@ func RegisterTodo(r chi.Router, h *TodoHandler) {
 // ?dismissed=1 返回已忽略待办（折叠区查看，终态不可恢复，仅供查看+硬删）。
 // 列表行附带 source_session_id（前端「跳转时间线」用）。
 func (h *TodoHandler) List(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	// ?dismissed=1 单独取已忽略待办（与默认 List 的「排除 dismissed」互补）
 	if r.URL.Query().Get("dismissed") == "1" {
-		rows, err := h.Todos.ListDismissed(r.Context())
+		rows, err := h.Todos.ListDismissed(r.Context(), uid.Int64())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -56,7 +62,7 @@ func (h *TodoHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		topicID = &tid
 	}
-	rows, err := h.Todos.List(r.Context(), status, topicID)
+	rows, err := h.Todos.List(r.Context(), uid.Int64(), status, topicID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -69,6 +75,11 @@ func (h *TodoHandler) List(w http.ResponseWriter, r *http.Request) {
 // → 流转合法性（409，先校验后变更，避免 title 已改但 status 409 的半成功）→ 变更（先 title 后 status）。
 // CanTransition 用 Get 出的原始 td.Status（title 变更不影响状态判断）。title 不做 CanTransition，与状态独立。
 func (h *TodoHandler) Patch(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
@@ -91,7 +102,7 @@ func (h *TodoHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "status 取值非法", http.StatusBadRequest)
 		return
 	}
-	td, err := h.Todos.Get(r.Context(), id)
+	td, err := h.Todos.Get(r.Context(), uid.Int64(), id)
 	if err != nil {
 		http.Error(w, "todo 不存在", http.StatusNotFound)
 		return
@@ -130,6 +141,11 @@ func validTodoStatus(s string) bool {
 // AddTopic 手动给 todo 加 topic 关联（source='user'，INSERT IGNORE 幂等）。
 // 校验顺序：参数合法性（400）→ todo 存在（404）→ topic 存在且非 dismissed（404）。
 func (h *TodoHandler) AddTopic(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
@@ -147,11 +163,11 @@ func (h *TodoHandler) AddTopic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "topic_id 非法", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.Todos.Get(r.Context(), id); err != nil {
+	if _, err := h.Todos.Get(r.Context(), uid.Int64(), id); err != nil {
 		http.Error(w, "todo 不存在", http.StatusNotFound)
 		return
 	}
-	tp, err := h.Topics.Get(r.Context(), tid)
+	tp, err := h.Topics.Get(r.Context(), uid.Int64(), tid)
 	if err != nil || tp.Status == "dismissed" {
 		http.Error(w, "topic 不存在", http.StatusNotFound)
 		return
@@ -164,7 +180,14 @@ func (h *TodoHandler) AddTopic(w http.ResponseWriter, r *http.Request) {
 }
 
 // RemoveTopic 移除 todo↔topic 关联。幂等：关联不存在也不报错（DELETE 返回 204）。
+// 归属校验（评审 I2）：先按登录用户 Get todo，拿不到（他人/不存在）→ 404，
+// 不泄漏存在性；通过再解绑，杜绝跨租户改他人 todo 的关联。
 func (h *TodoHandler) RemoveTopic(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
@@ -175,6 +198,10 @@ func (h *TodoHandler) RemoveTopic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid topic_id", http.StatusBadRequest)
 		return
 	}
+	if _, err := h.Todos.Get(r.Context(), uid.Int64(), id); err != nil {
+		http.Error(w, "todo 不存在", http.StatusNotFound)
+		return
+	}
 	if err := h.TodoTopics.RemoveLink(r.Context(), id, tid); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -182,11 +209,22 @@ func (h *TodoHandler) RemoveTopic(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// Delete 硬删除待办 + 关联（单事务级联，2 步确认由前端）。幂等：不存在也 204。
+// Delete 硬删除待办 + 关联（单事务级联，2 步确认由前端）。
+// 归属校验（评审 I2）：先按登录用户 Get，拿不到（他人/不存在）→ 404，不泄漏存在性；
+// 通过再删。故删不存在/他人待办返回 404（不再是幂等 204）。
 func (h *TodoHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.Todos.Get(r.Context(), uid.Int64(), id); err != nil {
+		http.Error(w, "todo 不存在", http.StatusNotFound)
 		return
 	}
 	if err := h.Todos.Delete(r.Context(), id); err != nil {

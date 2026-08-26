@@ -124,7 +124,7 @@ func runSpeakerNameStage(ctx context.Context, d StageDeps, j *repo.Job, sessionI
 	if d.LLM == nil || d.SpeakerNameCandidates == nil {
 		return nil // 依赖未装配（测试/降级）→ no-op
 	}
-	s, err := d.Sessions.Get(ctx, sessionID)
+	s, err := d.Sessions.Get(ctx, 1, sessionID) // 阶段1：后台流水线无请求上下文，暂 user-1
 	if err != nil {
 		return fmt.Errorf("读 session: %w", err)
 	}

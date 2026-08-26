@@ -52,7 +52,7 @@ func (s *Service) ManualCreatePersonExt(ctx context.Context, tx *sqlx.Tx, name s
 
 // ManualUpdatePerson 手动编辑人物（改名/换绑声纹/改备注）。
 func (s *Service) ManualUpdatePerson(ctx context.Context, id ids.ID, name string, speakerID *ids.ID, summary *string) error {
-	p, err := s.Persons.Get(ctx, id)
+	p, err := s.Persons.Get(ctx, 1, id) // 阶段1：画像暂 user-1，阶段2 随登录用户
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,7 @@ func (s *Service) ManualUpdatePerson(ctx context.Context, id ids.ID, name string
 
 // ManualSetPersonStatus 人物状态流转（归档=dismissed 等）。
 func (s *Service) ManualSetPersonStatus(ctx context.Context, id ids.ID, status string) error {
-	p, err := s.Persons.Get(ctx, id)
+	p, err := s.Persons.Get(ctx, 1, id) // 阶段1：画像暂 user-1，阶段2 随登录用户
 	if err != nil {
 		return err
 	}

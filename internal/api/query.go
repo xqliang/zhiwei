@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
@@ -41,6 +42,13 @@ func RegisterQuery(r chi.Router, h *QueryHandler) {
 // todo_count（单 SQL 相关子查询，避免 N+1），并附最新 job 状态（处理进度）。
 // asr_full 不外泄（json:"-"），仅截断后以 asr_preview 输出。
 func (h *QueryHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
+	// 多租户隔离（评审 C2）：取登录用户，未登录 401。SQL 追加 WHERE s.user_id = ?，
+	// 只列该用户自己的会话，杜绝全表返回他人录音。
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	limit := intQuery(r, "limit", 50)
 	type row struct {
 		repo.AudioSession
@@ -59,7 +67,7 @@ SELECT s.*,
   (SELECT IFNULL(GROUP_CONCAT(seg.text ORDER BY seg.start_ms SEPARATOR ''), '')
      FROM transcript_segment seg JOIN transcript tr ON tr.id = seg.transcript_id
      WHERE tr.session_id = s.id) AS asr_full
-FROM audio_session s ORDER BY s.id DESC LIMIT ?`, limit)
+FROM audio_session s WHERE s.user_id = ? ORDER BY s.id DESC LIMIT ?`, uid.Int64(), limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -97,12 +105,17 @@ type segmentView struct {
 }
 
 func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	sid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	s, err := h.Sessions.Get(r.Context(), sid)
+	s, err := h.Sessions.Get(r.Context(), uid.Int64(), sid)
 	if err != nil {
 		http.Error(w, "session 不存在", http.StatusNotFound)
 		return
@@ -205,12 +218,17 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 // 跨会话 id 静默忽略）→ RecomputeFullText 同步 full_text/confidence。
 // 只改转写文本，不触发抽取；前端保存后可单独点「重新提取」走 Reextract。
 func (h *QueryHandler) PatchTranscript(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	sid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.Sessions.Get(r.Context(), sid); err != nil {
+	if _, err := h.Sessions.Get(r.Context(), uid.Int64(), sid); err != nil {
 		http.Error(w, "session 不存在", http.StatusNotFound)
 		return
 	}
@@ -255,12 +273,17 @@ func (h *QueryHandler) PatchTranscript(w http.ResponseWriter, r *http.Request) {
 // SetJobID 把 session 指向新 job，前端轮询 GET /api/sessions/{id} 的 job.status 可见进度。
 // 必须已有 transcript（无转写的 session 无法跑 segment→speaker→extract）。
 func (h *QueryHandler) Reextract(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	sid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.Sessions.Get(r.Context(), sid); err != nil {
+	if _, err := h.Sessions.Get(r.Context(), uid.Int64(), sid); err != nil {
 		http.Error(w, "session 不存在", http.StatusNotFound)
 		return
 	}
@@ -283,12 +306,17 @@ func (h *QueryHandler) Reextract(w http.ResponseWriter, r *http.Request) {
 // 区别于 Reextract（segment→speaker→extract，speaker 幂等跳过、不改已有归属）。
 // 注意：会覆盖手动换人，前端需二次确认。
 func (h *QueryHandler) Reidentify(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	sid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.Sessions.Get(r.Context(), sid); err != nil {
+	if _, err := h.Sessions.Get(r.Context(), uid.Int64(), sid); err != nil {
 		http.Error(w, "session 不存在", http.StatusNotFound)
 		return
 	}
@@ -339,12 +367,17 @@ func (h *QueryHandler) RetryJob(w http.ResponseWriter, r *http.Request) {
 // StoragePath 是服务端落盘路径，不通过 JSON 外泄；此处用 http.ServeFile
 // 按扩展名推断 Content-Type，支持 Range 请求（拖动进度条）。
 func (h *QueryHandler) ServeAudio(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	sid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	s, err := h.Sessions.Get(r.Context(), sid)
+	s, err := h.Sessions.Get(r.Context(), uid.Int64(), sid)
 	if err != nil {
 		http.Error(w, "session 不存在", http.StatusNotFound)
 		return
@@ -393,12 +426,17 @@ func intOffset(r *http.Request) int {
 // （DB 已删，文件残留可接受；区别于 DB 事务的强一致）。StoragePath 是 json:"-" 不外泄，
 // 此处仅服务端读用于删文件。
 func (h *QueryHandler) DeleteSession(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	sid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	s, err := h.Sessions.Get(r.Context(), sid)
+	s, err := h.Sessions.Get(r.Context(), uid.Int64(), sid)
 	if err != nil {
 		http.Error(w, "session 不存在", http.StatusNotFound)
 		return

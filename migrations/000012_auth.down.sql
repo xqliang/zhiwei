@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS user_session;
+DROP TABLE IF EXISTS app_user;

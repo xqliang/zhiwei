@@ -71,7 +71,7 @@ func TestPersonLifecycle(t *testing.T) {
 	if err := persons.Update(ctx, p.ID, "张三丰", &sid, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, err := persons.Get(ctx, p.ID)
+	got, err := persons.Get(ctx, 1, p.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestPersonLifecycle(t *testing.T) {
 	if err := persons.SetStatus(ctx, p.ID, "dismissed"); err != nil {
 		t.Fatal(err)
 	}
-	if g2, _ := persons.Get(ctx, p.ID); g2.Status != "dismissed" {
+	if g2, _ := persons.Get(ctx, 1, p.ID); g2.Status != "dismissed" {
 		t.Fatalf("SetStatus 未生效: %+v", g2)
 	}
 }

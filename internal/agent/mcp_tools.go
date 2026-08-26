@@ -157,7 +157,7 @@ func getTimelineHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, g
 		if limit > 50 {
 			limit = 50
 		}
-		ss, err := d.Session.List(ctx, limit, 0)
+		ss, err := d.Session.List(ctx, toolUserID, limit, 0)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -205,7 +205,7 @@ func getTodosHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, getT
 			}
 			topicID = &id
 		}
-		rows, err := d.Todo.List(ctx, a.Status, topicID)
+		rows, err := d.Todo.List(ctx, toolUserID, a.Status, topicID)
 		if err != nil {
 			return nil, nil, err
 		}

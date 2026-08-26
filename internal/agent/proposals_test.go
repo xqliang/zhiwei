@@ -119,7 +119,7 @@ func TestProposeMemoryEditNoMutation(t *testing.T) {
 	md, pd := p2dDeps(t)
 	ctx := t.Context()
 	m := seedMemory(t, md.Memory, "原标题NM", "原内容NM")
-	base, err := md.Memory.Get(ctx, m.ID) // 读库基线（version 由 DB 默认赋值, 非内存 m 的零值）
+	base, err := md.Memory.Get(ctx, 1, m.ID) // 读库基线（version 由 DB 默认赋值, 非内存 m 的零值）
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestProposeMemoryEditNoMutation(t *testing.T) {
 		t.Fatalf("提议异常: %+v", p)
 	}
 	// 关键：memory 未被改动
-	got, err := md.Memory.Get(ctx, m.ID)
+	got, err := md.Memory.Get(ctx, 1, m.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestConfirmMemoryUpdateApplyOnce(t *testing.T) {
 	md, pd := p2dDeps(t)
 	ctx := t.Context()
 	m := seedMemory(t, md.Memory, "旧标题AO", "旧内容AO")
-	before, _ := md.Memory.Get(ctx, m.ID)
+	before, _ := md.Memory.Get(ctx, 1, m.ID)
 
 	res, _, err := proposeMemoryEditHandler(md)(ctx, nil, proposeMemoryEditArgs{
 		MemoryID: m.ID.String(), NewTitle: "新标题AO", NewContent: "新内容AO",
@@ -169,7 +169,7 @@ func TestConfirmMemoryUpdateApplyOnce(t *testing.T) {
 	if code != http.StatusOK || p1.Status != "applied" {
 		t.Fatalf("confirm code=%d status=%s", code, p1.Status)
 	}
-	got, _ := md.Memory.Get(ctx, m.ID)
+	got, _ := md.Memory.Get(ctx, 1, m.ID)
 	if got.Title != "新标题AO" || got.Content != "新内容AO" {
 		t.Errorf("confirm 未落库: title=%q content=%q", got.Title, got.Content)
 	}
@@ -186,7 +186,7 @@ func TestConfirmMemoryUpdateApplyOnce(t *testing.T) {
 	if code2 != http.StatusOK || p2.Status != "applied" {
 		t.Fatalf("2nd confirm code=%d status=%s", code2, p2.Status)
 	}
-	got2, _ := md.Memory.Get(ctx, m.ID)
+	got2, _ := md.Memory.Get(ctx, 1, m.ID)
 	if got2.Version != verAfter {
 		t.Errorf("重复确认不应再改 version: %d → %d", verAfter, got2.Version)
 	}
@@ -210,7 +210,7 @@ func TestDismissProposal(t *testing.T) {
 	if code != http.StatusOK || p1.Status != "dismissed" {
 		t.Fatalf("dismiss code=%d status=%s", code, p1.Status)
 	}
-	got, _ := md.Memory.Get(ctx, m.ID)
+	got, _ := md.Memory.Get(ctx, 1, m.ID)
 	if got.Title != "放弃标题DZ" {
 		t.Errorf("放弃不应改 memory: title=%q", got.Title)
 	}
@@ -239,7 +239,7 @@ func TestConfirmTodoCreate(t *testing.T) {
 		t.Fatalf("confirm code=%d status=%s ref=%v", code, p1.Status, p1.AppliedRef)
 	}
 	t.Cleanup(func() { _, _ = pd.DB.Exec("DELETE FROM todo WHERE id = ?", p1.AppliedRef.Int64()) })
-	td, err := md.Todo.Get(ctx, *p1.AppliedRef)
+	td, err := md.Todo.Get(ctx, 1, *p1.AppliedRef)
 	if err != nil {
 		t.Fatalf("新 todo 应存在: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestConfirmTodoStatusIllegalTransition(t *testing.T) {
 	if code == http.StatusOK {
 		t.Fatalf("dismissed→confirmed 非法流转不应确认成功(code=%d)", code)
 	}
-	got, _ := md.Todo.Get(ctx, td.ID)
+	got, _ := md.Todo.Get(ctx, 1, td.ID)
 	if got.Status != "dismissed" {
 		t.Errorf("非法确认不应改 todo, status=%q", got.Status)
 	}

@@ -44,9 +44,11 @@ VALUES (:id, :user_id, :conversation_id, :role, :kind, :content, :citations, :to
 }
 
 // ListByConversation 按 id 升序（= 时间顺序）返回一段对话的全部消息。
-func (r *AgentMessageRepo) ListByConversation(ctx context.Context, convID ids.ID) ([]AgentMessage, error) {
+// 强制 user_id 隔离（AND user_id = ?）：即使调用方拿到他人的 convID，因消息行 user_id 不匹配
+// 也只会返回空列表，防越权读到他人对话内容。
+func (r *AgentMessageRepo) ListByConversation(ctx context.Context, userID int64, convID ids.ID) ([]AgentMessage, error) {
 	var rows []AgentMessage
 	err := r.DB.SelectContext(ctx, &rows,
-		`SELECT * FROM agent_message WHERE conversation_id = ? ORDER BY id ASC`, convID.Int64())
+		`SELECT * FROM agent_message WHERE conversation_id = ? AND user_id = ? ORDER BY id ASC`, convID.Int64(), userID)
 	return rows, err
 }

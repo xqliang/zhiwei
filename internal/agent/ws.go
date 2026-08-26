@@ -59,7 +59,7 @@ func (h *AgentHandler) handleWS(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cid"})
 		return
 	}
-	conv, err := h.Conversations.Get(r.Context(), cid)
+	conv, err := h.Conversations.Get(r.Context(), toolUserID, cid)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
 		return

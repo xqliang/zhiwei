@@ -243,7 +243,7 @@ func TestPersonAPIFlow(t *testing.T) {
 	if rec := doReq(t, h, "DELETE", "/api/persons/"+created.ID.String(), nil); rec.Code != 200 {
 		t.Fatalf("归档失败: %d", rec.Code)
 	}
-	if p, _ := svc.Persons.Get(ctx, created.ID); p.Status != "dismissed" {
+	if p, _ := svc.Persons.Get(ctx, 1, created.ID); p.Status != "dismissed" {
 		t.Fatalf("归档后应 dismissed: %+v", p)
 	}
 }
@@ -271,7 +271,7 @@ func TestPersonPatchPreservesSummary(t *testing.T) {
 		map[string]any{"display_name": "李四改"}); rec.Code != 200 {
 		t.Fatalf("改名失败: %d %s", rec.Code, rec.Body.String())
 	}
-	got, _ := svc.Persons.Get(ctx, p.ID)
+	got, _ := svc.Persons.Get(ctx, 1, p.ID)
 	if got.DisplayName != "李四改" {
 		t.Fatalf("改名未生效: %+v", got)
 	}
@@ -285,7 +285,7 @@ func TestPersonPatchPreservesSummary(t *testing.T) {
 		map[string]any{"summary": empty}); rec.Code != 200 {
 		t.Fatalf("清空 summary 失败: %d %s", rec.Code, rec.Body.String())
 	}
-	got, _ = svc.Persons.Get(ctx, p.ID)
+	got, _ = svc.Persons.Get(ctx, 1, p.ID)
 	if got.Summary != nil {
 		t.Fatalf("空串应清空 summary，却为: %q", *got.Summary)
 	}

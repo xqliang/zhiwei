@@ -27,7 +27,7 @@ func TestTopicCRUD(t *testing.T) {
 	}
 
 	// Get
-	got, err := r.Get(ctx, tp.ID)
+	got, err := r.Get(ctx, 1, tp.ID)
 	if err != nil || got.Name != "Rust 学习" || got.CreatedBy != "user" {
 		t.Fatalf("Get: %v %+v", err, got)
 	}
@@ -55,7 +55,7 @@ func TestTopicCRUD(t *testing.T) {
 	if err := r.UpdateName(ctx, tp.ID, "Rust 进阶"); err != nil {
 		t.Fatalf("UpdateName: %v", err)
 	}
-	got2, _ := r.Get(ctx, tp.ID)
+	got2, _ := r.Get(ctx, 1, tp.ID)
 	if got2.Name != "Rust 进阶" {
 		t.Fatalf("name = %s", got2.Name)
 	}
@@ -94,7 +94,7 @@ func TestTopicCreateExtTx(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = tx.Rollback()
-	if got, err := r.Get(ctx, rb.ID); !errors.Is(err, sql.ErrNoRows) {
+	if got, err := r.Get(ctx, 1, rb.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("ROLLBACK 后应查不到: got=%v err=%v", got, err)
 	}
 
@@ -110,7 +110,7 @@ func TestTopicCreateExtTx(t *testing.T) {
 	if err := tx2.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := r.Get(ctx, cm.ID); err != nil || got.Name != "提交主题" {
+	if got, err := r.Get(ctx, 1, cm.ID); err != nil || got.Name != "提交主题" {
 		t.Fatalf("COMMIT 后应查到: got=%v err=%v", got, err)
 	}
 }
@@ -241,7 +241,7 @@ func TestTopicUpdateNameStatusExt(t *testing.T) {
 	if err := r.UpdateStatusExt(ctx, db, tp.ID, "active"); err != nil {
 		t.Fatalf("UpdateStatusExt: %v", err)
 	}
-	got, err := r.Get(ctx, tp.ID)
+	got, err := r.Get(ctx, 1, tp.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

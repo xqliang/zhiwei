@@ -66,7 +66,7 @@ func TestMemoryInsertAndQuery(t *testing.T) {
 	}
 
 	// Get
-	got, err := mr.Get(ctx, m.ID)
+	got, err := mr.Get(ctx, 1, m.ID)
 	if err != nil || got.Title != "给 Tom 发邮件" {
 		t.Fatalf("Get: %v %+v", err, got)
 	}
@@ -77,16 +77,16 @@ func TestMemoryInsertAndQuery(t *testing.T) {
 	if err := mr.Save(ctx, got); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	got2, _ := mr.Get(ctx, m.ID)
+	got2, _ := mr.Get(ctx, 1, m.ID)
 	if got2.Version != 2 || got2.Content != "后天给 Tom 发邮件确认设计稿" {
 		t.Fatalf("after save: %+v", got2)
 	}
 
 	// 过滤列表：type 过滤命中，错误 type 无结果
-	if rows, _ = mr.List(ctx, MemoryFilter{Type: "event", Limit: 10}); len(rows) < 1 {
+	if rows, _ = mr.List(ctx, MemoryFilter{UserID: 1, Type: "event", Limit: 10}); len(rows) < 1 {
 		t.Fatal("type=event 应命中")
 	}
-	if rows, _ = mr.List(ctx, MemoryFilter{Type: "idea", Limit: 10}); len(rows) != 0 {
+	if rows, _ = mr.List(ctx, MemoryFilter{UserID: 1, Type: "idea", Limit: 10}); len(rows) != 0 {
 		t.Fatal("type=idea 不应命中")
 	}
 
@@ -99,7 +99,7 @@ func TestMemoryInsertAndQuery(t *testing.T) {
 	if rows, _ = mr.ListBySession(ctx, sid); len(rows) != 1 {
 		t.Fatalf("dismissed 应被 ListBySession 排除，got %d", len(rows))
 	}
-	if rows, _ = mr.List(ctx, MemoryFilter{Limit: 10, Offset: 9999}); len(rows) != 0 {
+	if rows, _ = mr.List(ctx, MemoryFilter{UserID: 1, Limit: 10, Offset: 9999}); len(rows) != 0 {
 		t.Fatalf("offset 越界应返回空，got %d", len(rows))
 	}
 }
@@ -159,7 +159,7 @@ func TestMemoryListSince(t *testing.T) {
 	// 故断言用「包含/不包含本组两条标题」而非精确计数。
 	mid := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
 	since := mid
-	rows, err := mr.List(ctx, MemoryFilter{Since: &since, Limit: 200})
+	rows, err := mr.List(ctx, MemoryFilter{UserID: 1, Since: &since, Limit: 200})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,11 +168,11 @@ func TestMemoryListSince(t *testing.T) {
 	}
 	// 等于 late 本身 → 仍命中（>= 含等于）
 	since = late
-	if rows, _ = mr.List(ctx, MemoryFilter{Since: &since, Limit: 200}); !hasTitle(rows, "since 用例-晚") {
+	if rows, _ = mr.List(ctx, MemoryFilter{UserID: 1, Since: &since, Limit: 200}); !hasTitle(rows, "since 用例-晚") {
 		t.Fatalf("Since=late 应命中（>= 含等于），结果 = %v", titles(rows))
 	}
 	// 零值 Since 不过滤 → 两条都在（Limit 200 容纳共享库其他 fixture 行）
-	if rows, _ = mr.List(ctx, MemoryFilter{Limit: 200}); !hasTitle(rows, "since 用例-早") || !hasTitle(rows, "since 用例-晚") {
+	if rows, _ = mr.List(ctx, MemoryFilter{UserID: 1, Limit: 200}); !hasTitle(rows, "since 用例-早") || !hasTitle(rows, "since 用例-晚") {
 		t.Fatalf("无 Since 应两条都在，结果 = %v", titles(rows))
 	}
 }
@@ -228,7 +228,7 @@ func TestMemoryListWithTopics(t *testing.T) {
 	if err := mtr.AddLink(ctx, m.ID, t2.ID); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := mr.List(ctx, MemoryFilter{Limit: 50})
+	rows, err := mr.List(ctx, MemoryFilter{UserID: 1, Limit: 50})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestMemoryBumpConfidence(t *testing.T) {
 	if err := mr.BumpConfidenceExt(ctx, db, lo.ID, 0.05); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := mr.Get(ctx, lo.ID)
+	got, _ := mr.Get(ctx, 1, lo.ID)
 	if math.Abs(got.Confidence-0.85) > 0.001 {
 		t.Fatalf("confidence = %v, want 0.85", got.Confidence)
 	}
@@ -301,7 +301,7 @@ func TestMemoryBumpConfidence(t *testing.T) {
 	if err := mr.BumpConfidenceExt(ctx, db, hi.ID, 0.05); err != nil {
 		t.Fatal(err)
 	}
-	gotHi, _ := mr.Get(ctx, hi.ID)
+	gotHi, _ := mr.Get(ctx, 1, hi.ID)
 	if math.Abs(gotHi.Confidence-0.99) > 0.001 {
 		t.Fatalf("confidence = %v, want 0.99（封顶）", gotHi.Confidence)
 	}
@@ -368,7 +368,7 @@ func TestMemoryApplyConsolidation(t *testing.T) {
 	if merged != 1 || adjusted != 0 {
 		t.Fatalf("merged=%d adjusted=%d, want 1/0（B 被 merge supersede，adjustment 跳过）", merged, adjusted)
 	}
-	bGot, _ := mr.Get(ctx, b.ID)
+	bGot, _ := mr.Get(ctx, 1, b.ID)
 	if bGot.Status != "superseded" {
 		t.Fatalf("B status=%s, want superseded", bGot.Status)
 	}
@@ -408,7 +408,7 @@ func TestMemorySaveExt(t *testing.T) {
 	}
 
 	// 读回插入后的版本再 +1（不假设 DB 默认版本值），传 db 调 SaveExt
-	cur, err := mr.Get(ctx, m.ID)
+	cur, err := mr.Get(ctx, 1, m.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestMemorySaveExt(t *testing.T) {
 	if err := mr.SaveExt(ctx, db, cur); err != nil {
 		t.Fatalf("SaveExt: %v", err)
 	}
-	got, err := mr.Get(ctx, m.ID)
+	got, err := mr.Get(ctx, 1, m.ID)
 	if err != nil {
 		t.Fatalf("Get after SaveExt: %v", err)
 	}

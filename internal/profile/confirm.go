@@ -21,7 +21,7 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 
 	switch kind {
 	case "person":
-		p, err := s.Persons.Get(ctx, id)
+		p, err := s.Persons.Get(ctx, 1, id) // 阶段1：画像暂 user-1，阶段2 随登录用户
 		if err != nil {
 			return err
 		}
@@ -183,7 +183,7 @@ func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) er
 
 	switch kind {
 	case "person":
-		p, err := s.Persons.Get(ctx, id)
+		p, err := s.Persons.Get(ctx, 1, id) // 阶段1：画像暂 user-1，阶段2 随登录用户
 		if err != nil {
 			return err
 		}

@@ -35,16 +35,21 @@ VALUES (:id, :user_id, :source, :filename, :storage_path, :duration_ms, :mime, :
 	return err
 }
 
-func (r *SessionRepo) Get(ctx context.Context, id ids.ID) (*AudioSession, error) {
+// Get 按 id 查会话，并强制 user_id 隔离（多租户越权防护）：
+// SQL 追加 AND user_id = ?，故用 userID 读他人的会话时命中 0 行，
+// 沿用 sqlx GetContext 的既有语义返回 sql.ErrNoRows（handler 层据此转 404）。
+// 未改动「未命中冒泡 ErrNoRows」的契约（internal/profile 等调用方依赖它）。
+func (r *SessionRepo) Get(ctx context.Context, userID int64, id ids.ID) (*AudioSession, error) {
 	var s AudioSession
-	err := r.DB.GetContext(ctx, &s, `SELECT * FROM audio_session WHERE id = ?`, id.Int64())
+	err := r.DB.GetContext(ctx, &s, `SELECT * FROM audio_session WHERE id = ? AND user_id = ?`, id.Int64(), userID)
 	return &s, err
 }
 
-func (r *SessionRepo) List(ctx context.Context, limit, offset int) ([]AudioSession, error) {
+// List 分页列出某用户的会话，强制 WHERE user_id = ? 隔离，只返回该用户自己的录音。
+func (r *SessionRepo) List(ctx context.Context, userID int64, limit, offset int) ([]AudioSession, error) {
 	var list []AudioSession
 	err := r.DB.SelectContext(ctx, &list,
-		`SELECT * FROM audio_session ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT * FROM audio_session WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`, userID, limit, offset)
 	return list, err
 }
 

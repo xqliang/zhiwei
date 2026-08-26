@@ -108,7 +108,7 @@ func TestOrchestratorSeedsInjection(t *testing.T) {
 	if fake.LastText == raw {
 		t.Errorf("应前置种子(≠原始): %q", fake.LastText)
 	}
-	msgs, err := msgRepo.ListByConversation(ctx, conv.ID)
+	msgs, err := msgRepo.ListByConversation(ctx, 1, conv.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

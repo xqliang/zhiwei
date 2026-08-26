@@ -65,7 +65,7 @@ func TestTodoInsertAndList(t *testing.T) {
 	td := tds[0]
 
 	// 列表联查来源 session
-	rows, err := tr.List(ctx, "", nil)
+	rows, err := tr.List(ctx, 1, "", nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestTodoInsertAndList(t *testing.T) {
 	if err := tr.UpdateStatus(ctx, td.ID, "bogus"); err == nil {
 		t.Fatal("非法状态 bogus 应返回错误")
 	}
-	rows2, _ := tr.List(ctx, "done", nil)
+	rows2, _ := tr.List(ctx, 1, "done", nil)
 	var seen bool
 	for _, row := range rows2 {
 		if row.ID == td.ID {
@@ -105,14 +105,14 @@ func TestTodoInsertAndList(t *testing.T) {
 	if err := tr.UpdateStatus(ctx, td.ID, "dismissed"); err != nil {
 		t.Fatalf("UpdateStatus dismissed: %v", err)
 	}
-	rows3, _ := tr.List(ctx, "", nil)
+	rows3, _ := tr.List(ctx, 1, "", nil)
 	for _, row := range rows3 {
 		if row.ID == td.ID {
 			t.Fatal("dismissed 不应出现在 List")
 		}
 	}
 	// dismissed 应出现在 ListDismissed（「已忽略」折叠区取数）
-	dismissedRows, _ := tr.ListDismissed(ctx)
+	dismissedRows, _ := tr.ListDismissed(ctx, 1)
 	var dismissedSeen bool
 	for _, row := range dismissedRows {
 		if row.ID == td.ID {
@@ -187,12 +187,12 @@ func TestTodoDedupSuggested(t *testing.T) {
 
 	// 逐条断言状态：给Tom 仍 suggested、给 Tom 变 dismissed、学习Rust 仍 suggested。
 	want := map[string]string{
-		"给Tom":    "suggested",
-		"给 Tom":   "dismissed",
+		"给Tom":   "suggested",
+		"给 Tom":  "dismissed",
 		"学习Rust": "suggested",
 	}
 	for _, td := range tds {
-		got, err := tr.Get(ctx, td.ID)
+		got, err := tr.Get(ctx, uid, td.ID)
 		if err != nil {
 			t.Fatalf("Get %q: %v", td.Title, err)
 		}
@@ -252,7 +252,7 @@ func TestTodoUpdateStatusExt(t *testing.T) {
 	if err := tr.UpdateStatusExt(ctx, db, td.ID, "confirmed"); err != nil {
 		t.Fatalf("UpdateStatusExt: %v", err)
 	}
-	got, _ := tr.Get(ctx, td.ID)
+	got, _ := tr.Get(ctx, 1, td.ID)
 	if got.Status != "confirmed" {
 		t.Fatalf("status = %q, want confirmed", got.Status)
 	}

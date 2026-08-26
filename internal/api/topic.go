@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
@@ -43,13 +44,18 @@ func RegisterTopic(r chi.Router, h *TopicHandler) {
 // List 返回非 dismissed 主题及关联计数（active memory 数 / confirmed todo 数），
 // 按计数倒序，供前端 Topics 页展示。
 func (h *TopicHandler) List(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	// ?dismissed=1 返回已忽略主题（折叠区查看/恢复）；默认返回非 dismissed（活跃列表）。
 	var list []repo.TopicWithCount
 	var err error
 	if r.URL.Query().Get("dismissed") == "1" {
-		list, err = h.Topics.ListDismissed(r.Context(), 1)
+		list, err = h.Topics.ListDismissed(r.Context(), uid.Int64())
 	} else {
-		list, err = h.Topics.ListWithCounts(r.Context(), 1)
+		list, err = h.Topics.ListWithCounts(r.Context(), uid.Int64())
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -60,6 +66,11 @@ func (h *TopicHandler) List(w http.ResponseWriter, r *http.Request) {
 
 // Create 手动创建主题：name 去空白后必填，与现有 active/suggested 重名则 409。
 func (h *TopicHandler) Create(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	var req struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -73,15 +84,15 @@ func (h *TopicHandler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name 不能为空", http.StatusBadRequest)
 		return
 	}
-	// 与现有 active/suggested 重名 → 409
-	if dup, err := h.Topics.FindActiveByName(r.Context(), 1, name); err != nil {
+	// 与该用户现有 active/suggested 重名 → 409（查重按登录用户隔离）
+	if dup, err := h.Topics.FindActiveByName(r.Context(), uid.Int64(), name); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	} else if dup != nil {
 		http.Error(w, "同名主题已存在", http.StatusConflict)
 		return
 	}
-	tp := &repo.Topic{Name: name, Status: "active", CreatedBy: "user"}
+	tp := &repo.Topic{UserID: uid.Int64(), Name: name, Status: "active", CreatedBy: "user"}
 	if req.Description != "" {
 		tp.Description = &req.Description
 	}
@@ -94,12 +105,17 @@ func (h *TopicHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 // Get 返回主题详情：topic 本体 + 挂在该主题下的 memories 与 todos。
 func (h *TopicHandler) Get(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	tp, err := h.Topics.Get(r.Context(), id)
+	tp, err := h.Topics.Get(r.Context(), uid.Int64(), id)
 	if err != nil {
 		http.Error(w, "topic 不存在", http.StatusNotFound)
 		return
@@ -120,6 +136,11 @@ func (h *TopicHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Patch 更新主题：status 仅允许 active|dismissed（确认/忽略），name 为改名。
 // 校验顺序：解码+参数校验（400）→ 存在性（404）→ 重名（409）。
 func (h *TopicHandler) Patch(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
@@ -138,7 +159,7 @@ func (h *TopicHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "status 取值非法（active|dismissed）", http.StatusBadRequest)
 		return
 	}
-	tp, err := h.Topics.Get(r.Context(), id)
+	tp, err := h.Topics.Get(r.Context(), uid.Int64(), id)
 	if err != nil {
 		http.Error(w, "topic 不存在", http.StatusNotFound)
 		return
@@ -151,7 +172,7 @@ func (h *TopicHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		}
 		// 改成与自身相同名字时跳过查重，避免误报 409
 		if name != tp.Name {
-			if dup, err := h.Topics.FindActiveByName(r.Context(), 1, name); err != nil {
+			if dup, err := h.Topics.FindActiveByName(r.Context(), uid.Int64(), name); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			} else if dup != nil {
@@ -170,7 +191,7 @@ func (h *TopicHandler) Patch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	got, err := h.Topics.Get(r.Context(), id)
+	got, err := h.Topics.Get(r.Context(), uid.Int64(), id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -184,12 +205,17 @@ func (h *TopicHandler) Patch(w http.ResponseWriter, r *http.Request) {
 // 流程：ListActive → 组 user 消息（JSON 数组）→ LLM.Chat → 容错解析 → 原样回传。
 // 容错解析照搬 memory/candidate.go 思路：模型可能输出前后废话/围栏，截取首个 { 到末个 }。
 func (h *TopicHandler) Consolidate(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	if h.LLM == nil {
 		http.Error(w, "LLM 未配置", http.StatusInternalServerError)
 		return
 	}
 	// 取该用户全部 active/suggested 主题（合并提议输入）
-	list, err := h.Topics.ListActive(r.Context(), 1, 500)
+	list, err := h.Topics.ListActive(r.Context(), uid.Int64(), 500)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -245,6 +271,11 @@ func (h *TopicHandler) Consolidate(w http.ResponseWriter, r *http.Request) {
 // member_ids 用 ids.ParseID 转 []ids.ID，交 TopicRepo.MergeGroups 在单事务内迁关联 +
 // 删 member 行 + member 置 dismissed。空 groups 也接受（直接返回 merged:true）。
 func (h *TopicHandler) Merge(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	var req struct {
 		Groups []struct {
 			CanonicalName string   `json:"canonical_name"`
@@ -255,7 +286,9 @@ func (h *TopicHandler) Merge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请求体非法", http.StatusBadRequest)
 		return
 	}
-	// 转换为 repo.MergeGroup：member_ids 字符串 → ids.ID
+	// 转换为 repo.MergeGroup：member_ids 字符串 → ids.ID。
+	// 归属校验（评审 I2）：对每个涉及的 topic id 先按登录用户 Get，拿不到（他人/不存在）
+	// → 404，不泄漏存在性；全部通过再落库，杜绝跨租户合并他人主题。
 	groups := make([]repo.MergeGroup, 0, len(req.Groups))
 	for _, g := range req.Groups {
 		mids := make([]ids.ID, 0, len(g.MemberIDs))
@@ -263,6 +296,10 @@ func (h *TopicHandler) Merge(w http.ResponseWriter, r *http.Request) {
 			id, err := ids.ParseID(s)
 			if err != nil {
 				http.Error(w, "非法 member_id: "+s, http.StatusBadRequest)
+				return
+			}
+			if _, err := h.Topics.Get(r.Context(), uid.Int64(), id); err != nil {
+				http.Error(w, "topic 不存在", http.StatusNotFound)
 				return
 			}
 			mids = append(mids, id)
@@ -279,11 +316,22 @@ func (h *TopicHandler) Merge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"merged": true})
 }
 
-// Delete 硬删除 topic + 关联（单事务级联，2 步确认由前端）。幂等：不存在也 204。
+// Delete 硬删除 topic + 关联（单事务级联，2 步确认由前端）。
+// 归属校验（评审 I2）：先按登录用户 Get，拿不到（他人/不存在）→ 404，不泄漏存在性；
+// 通过再删。故删不存在/他人主题返回 404（不再是幂等 204）。
 func (h *TopicHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.Topics.Get(r.Context(), uid.Int64(), id); err != nil {
+		http.Error(w, "topic 不存在", http.StatusNotFound)
 		return
 	}
 	if err := h.Topics.Delete(r.Context(), id); err != nil {

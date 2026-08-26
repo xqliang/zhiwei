@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
@@ -40,7 +41,13 @@ func RegisterMemory(r chi.Router, h *MemoryHandler) {
 // List 返回记忆列表（排除 dismissed），支持 type/topic_id/since/limit/offset
 // 过滤分页。since 是事件时间下界（spec §4）：RFC3339 或 YYYY-MM-DD（当日零点）。
 func (h *MemoryHandler) List(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	f := repo.MemoryFilter{
+		UserID: uid.Int64(), // 多租户隔离：只列登录用户的记忆（MemoryFilter.UserID 必填，为 0 则返回空）
 		Type:   r.URL.Query().Get("type"),
 		Limit:  intQuery(r, "limit", 50),
 		Offset: intOffset(r),
@@ -84,6 +91,11 @@ func parseSince(v string) (time.Time, error) {
 
 // Patch 修正记忆内容或 dismiss。改 title/content 则 version+1（乐观并发用）。
 func (h *MemoryHandler) Patch(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
@@ -102,7 +114,7 @@ func (h *MemoryHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "status 取值非法", http.StatusBadRequest)
 		return
 	}
-	m, err := h.Memories.Get(r.Context(), id)
+	m, err := h.Memories.Get(r.Context(), uid.Int64(), id)
 	if err != nil {
 		http.Error(w, "memory 不存在", http.StatusNotFound)
 		return
@@ -142,6 +154,11 @@ func validMemoryType(t string) bool {
 // AddTopic 手动给 memory 加 topic 关联（source='user'，INSERT IGNORE 幂等）。
 // 校验顺序：参数合法性（400）→ memory 存在（404）→ topic 存在且非 dismissed（404）。
 func (h *MemoryHandler) AddTopic(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
@@ -159,11 +176,11 @@ func (h *MemoryHandler) AddTopic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "topic_id 非法", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.Memories.Get(r.Context(), id); err != nil {
+	if _, err := h.Memories.Get(r.Context(), uid.Int64(), id); err != nil {
 		http.Error(w, "memory 不存在", http.StatusNotFound)
 		return
 	}
-	tp, err := h.Topics.Get(r.Context(), tid)
+	tp, err := h.Topics.Get(r.Context(), uid.Int64(), tid)
 	if err != nil || tp.Status == "dismissed" {
 		http.Error(w, "topic 不存在", http.StatusNotFound)
 		return
@@ -176,7 +193,14 @@ func (h *MemoryHandler) AddTopic(w http.ResponseWriter, r *http.Request) {
 }
 
 // RemoveTopic 移除 memory↔topic 关联。幂等：关联不存在也不报错（DELETE 返回 204）。
+// 归属校验（评审 I2）：先按登录用户 Get memory，拿不到（他人/不存在）→ 404，
+// 不泄漏存在性；通过再解绑，杜绝跨租户改他人 memory 的关联。
 func (h *MemoryHandler) RemoveTopic(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
@@ -185,6 +209,10 @@ func (h *MemoryHandler) RemoveTopic(w http.ResponseWriter, r *http.Request) {
 	tid, err := ids.ParseID(chi.URLParam(r, "topic_id"))
 	if err != nil {
 		http.Error(w, "invalid topic_id", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.Memories.Get(r.Context(), uid.Int64(), id); err != nil {
+		http.Error(w, "memory 不存在", http.StatusNotFound)
 		return
 	}
 	if err := h.MemoryTopics.RemoveLink(r.Context(), id, tid); err != nil {
@@ -198,11 +226,16 @@ func (h *MemoryHandler) RemoveTopic(w http.ResponseWriter, r *http.Request) {
 // 的关系判定（merges + adjustments），不改库。LLM 只判关系不给置信度数字；confidence 数字
 // 由 Merge 的规则（SQL 原子）算。流程：ListActive → 组 user 消息 → LLM.Chat → 容错解析 → 原样回传。
 func (h *MemoryHandler) Consolidate(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	if h.LLM == nil {
 		http.Error(w, "LLM 未配置", http.StatusInternalServerError)
 		return
 	}
-	list, err := h.Memories.ListActive(r.Context(), 1, 500)
+	list, err := h.Memories.ListActive(r.Context(), uid.Int64(), 500)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -273,6 +306,11 @@ func (h *MemoryHandler) Consolidate(w http.ResponseWriter, r *http.Request) {
 // （member 关联迁 canonical + member 置 superseded），后 adjustments（跳过已 supersede 的
 // member，按 kind 规则算 confidence，SQL 原子）。不调 LLM。
 func (h *MemoryHandler) Merge(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	var req struct {
 		Merges []struct {
 			CanonicalID string   `json:"canonical_id"`
@@ -289,6 +327,13 @@ func (h *MemoryHandler) Merge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请求体非法", http.StatusBadRequest)
 		return
 	}
+	// 归属校验（评审 I2）：req 里所有 memory id（merges 的 canonical+members、
+	// adjustments 的 memory_id + evidence ids）先按登录用户 Get，任一拿不到（他人/不存在）
+	// → 404，不泄漏存在性；全部通过再落库，杜绝跨租户整理他人记忆。
+	mustOwn := func(id ids.ID) bool {
+		_, err := h.Memories.Get(r.Context(), uid.Int64(), id)
+		return err == nil
+	}
 	cr := repo.ConsolidationReq{
 		Merges:      make([]repo.MemoryMerge, 0, len(req.Merges)),
 		Adjustments: make([]repo.MemoryAdjustment, 0, len(req.Adjustments)),
@@ -299,11 +344,19 @@ func (h *MemoryHandler) Merge(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "非法 canonical_id: "+g.CanonicalID, http.StatusBadRequest)
 			return
 		}
+		if !mustOwn(canon) {
+			http.Error(w, "memory 不存在", http.StatusNotFound)
+			return
+		}
 		mids := make([]ids.ID, 0, len(g.MemberIDs))
 		for _, s := range g.MemberIDs {
 			id, err := ids.ParseID(s)
 			if err != nil {
 				http.Error(w, "非法 member_id: "+s, http.StatusBadRequest)
+				return
+			}
+			if !mustOwn(id) {
+				http.Error(w, "memory 不存在", http.StatusNotFound)
 				return
 			}
 			mids = append(mids, id)
@@ -316,11 +369,19 @@ func (h *MemoryHandler) Merge(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "非法 memory_id: "+a.MemoryID, http.StatusBadRequest)
 			return
 		}
+		if !mustOwn(mid) {
+			http.Error(w, "memory 不存在", http.StatusNotFound)
+			return
+		}
 		eids := make([]ids.ID, 0, len(a.EvidenceIDs))
 		for _, s := range a.EvidenceIDs {
 			id, err := ids.ParseID(s)
 			if err != nil {
 				http.Error(w, "非法 evidence_id: "+s, http.StatusBadRequest)
+				return
+			}
+			if !mustOwn(id) {
+				http.Error(w, "memory 不存在", http.StatusNotFound)
 				return
 			}
 			eids = append(eids, id)

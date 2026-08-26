@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 
 	"zhiwei/internal/agent"
 	"zhiwei/internal/api"
+	"zhiwei/internal/auth"
 	"zhiwei/internal/config"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/memory"
@@ -79,6 +81,21 @@ func main() {
 	// 画像回填：owner「我」+ speaker→person（幂等，见 repo.EnsurePersonBootstrap）
 	if err := repo.EnsurePersonBootstrap(context.Background(), persons, speakers); err != nil {
 		log.Fatal("画像 bootstrap 失败: ", err)
+	}
+
+	// 鉴权（阶段1：cookie+session）。owner(id=1) 口令引导：其 password_hash 为空且配了
+	// ZW_OWNER_PASSWORD 时设置，便于首次登录（存量数据全 user_id=1，归 owner）。
+	authStore := &auth.Store{DB: db}
+	if cfg.OwnerPassword != "" {
+		if u, err := authStore.GetUser(context.Background(), ids.ID(1)); err == nil && u != nil && u.PasswordHash == "" {
+			if h, herr := auth.HashPassword(cfg.OwnerPassword); herr == nil {
+				if err := authStore.SetPasswordHash(context.Background(), ids.ID(1), h); err != nil {
+					log.Printf("[auth] owner 口令引导失败: %v", err)
+				} else {
+					log.Println("[auth] owner(id=1) 口令已由 ZW_OWNER_PASSWORD 引导设置")
+				}
+			}
+		}
 	}
 
 	// 抽取 prompt（版本化文件，运行时读取；版本号见文件名与文件首行）
@@ -217,6 +234,11 @@ func main() {
 	review.NewScheduler(reviewer, cfg.ReviewDailyCron).Start(ctx)
 
 	r := api.NewRouter()
+	// 鉴权端点（登录/登出/当前用户）。这三条豁免于 authGate（自行处理未登录态）。
+	sessionTTL := time.Duration(cfg.SessionTTLDays) * 24 * time.Hour
+	r.Post("/api/auth/login", auth.LoginHandler(authStore, sessionTTL, cfg.CookieSecure))
+	r.Post("/api/auth/logout", auth.LogoutHandler(authStore, cfg.CookieSecure))
+	r.Get("/api/auth/me", auth.MeHandler(authStore))
 	api.RegisterAudio(r, sessions, jobs, cfg.DataDir)
 	api.RegisterQuery(r, &api.QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
@@ -336,7 +358,26 @@ func main() {
 		})
 	}
 
-	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
+	// 会话过期清理：后台每小时删一次过期 session（GetValid 已惰性过滤，这里只做行清理）。
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if n, err := authStore.DeleteExpiredSessions(context.Background()); err == nil && n > 0 {
+					log.Printf("[auth] 清理过期会话 %d 条", n)
+				}
+			}
+		}
+	}()
+
+	// authGate 包裹整个 mux：豁免路径（健康检查/静态页/鉴权端点/内部 MCP 回连）放行，
+	// 其余要求有效会话并把 userID 注入 ctx（未登录 401）。放在 http.Server 层而非 chi.Use，
+	// 因业务路由在 NewRouter 之后平铺注册、Use 须先于路由（否则 chi panic）。
+	srv := &http.Server{Addr: ":" + cfg.Port, Handler: authGate(authStore, r)}
 	go func() {
 		log.Println("zhiwei-server listening on :" + cfg.Port)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
@@ -345,4 +386,43 @@ func main() {
 	}()
 	<-ctx.Done()
 	_ = srv.Close()
+}
+
+// authGate 用 auth 中间件包裹 mux，但豁免不需登录的路径：健康检查、静态页、鉴权端点自身、
+// 内部 MCP 回连（dsh 走 loopback，不做用户鉴权）。其余路径要求有效会话（注入 userID，否则 401）。
+// 放在 http.Server 层而非 chi.Use：业务路由在 NewRouter 之后平铺注册，chi 要求 Use 先于路由。
+func authGate(store *auth.Store, next http.Handler) http.Handler {
+	protected := auth.Middleware(store)(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		// /internal/mcp[/*]：仅本机 dsh 边车经 loopback 回连，绝不对外——非环回一律 403（C1）。
+		// 服务可能绑 0.0.0.0，故不能靠「豁免鉴权」等同「仅本机可达」，必须显式校验 RemoteAddr 环回。
+		if p == "/internal/mcp" || strings.HasPrefix(p, "/internal/mcp/") {
+			if !isLoopbackReq(r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+		exempt := p == "/api/health" ||
+			p == "/api/auth/login" || p == "/api/auth/logout" || p == "/api/auth/me" ||
+			p == "/" || p == "/index.html" ||
+			strings.HasPrefix(p, "/app/")
+		if exempt {
+			next.ServeHTTP(w, r)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	})
+}
+
+// isLoopbackReq 判定请求来自本机环回（127.0.0.0/8 或 ::1）——用于把内部 MCP 端点锁在本机。
+func isLoopbackReq(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -37,7 +37,7 @@ func (g *Generator) gatherDaily(ctx context.Context, date time.Time) (DailyInput
 	// 而不是「Since 下界 + 倒序取前 N 行再 Go 内滤 <end」——后者对过去的日期会取到全是
 	// 晚于窗口的最新行，Go 侧 inRange 全滤掉 → 明明有数据却汇聚为空。Limit 用 repo 上限 200
 	// （单日记忆量远小于此）。inRange 保留仅作 event_at 为 NULL 的防御。按话题分组
-	mrows, err := g.Memories.List(ctx, repo.MemoryFilter{Since: &start, Before: &end, Limit: 200})
+	mrows, err := g.Memories.List(ctx, repo.MemoryFilter{UserID: reviewUserID, Since: &start, Before: &end, Limit: 200})
 	if err != nil {
 		return in, fmt.Errorf("汇聚 memory: %w", err)
 	}
@@ -66,7 +66,7 @@ func (g *Generator) gatherDaily(ctx context.Context, date time.Time) (DailyInput
 	}
 
 	// 待办：非 dismissed 全量（有界 200），Go 内按 created_at/updated_at/status 分组
-	todos, err := g.Todos.List(ctx, "", nil)
+	todos, err := g.Todos.List(ctx, reviewUserID, "", nil)
 	if err != nil {
 		return in, fmt.Errorf("汇聚 todo: %w", err)
 	}
@@ -83,7 +83,7 @@ func (g *Generator) gatherDaily(ctx context.Context, date time.Time) (DailyInput
 	}
 
 	// 时间线统计：当天 session（有界 200），累加时长；分段/说话人 best-effort 遍历当天 session
-	sessions, err := g.Sessions.List(ctx, 200, 0)
+	sessions, err := g.Sessions.List(ctx, reviewUserID, 200, 0)
 	if err != nil {
 		return in, fmt.Errorf("汇聚 session: %w", err)
 	}
@@ -169,7 +169,7 @@ func (g *Generator) gatherWeekly(ctx context.Context, weekStart time.Time) (Week
 	for i := 0; i < 7; i++ {
 		dayStart := ws.AddDate(0, 0, i)
 		dayEnd := dayStart.AddDate(0, 0, 1)
-		mrows, err := g.Memories.List(ctx, repo.MemoryFilter{Since: &dayStart, Before: &dayEnd, Limit: 200})
+		mrows, err := g.Memories.List(ctx, repo.MemoryFilter{UserID: reviewUserID, Since: &dayStart, Before: &dayEnd, Limit: 200})
 		if err != nil {
 			return in, fmt.Errorf("汇聚 memory: %w", err)
 		}
@@ -198,7 +198,7 @@ func (g *Generator) gatherWeekly(ctx context.Context, weekStart time.Time) (Week
 	}
 
 	// 待办：本周完成 + 未完成；完成按 updated_at 天桶计数
-	todos, err := g.Todos.List(ctx, "", nil)
+	todos, err := g.Todos.List(ctx, reviewUserID, "", nil)
 	if err != nil {
 		return in, fmt.Errorf("汇聚 todo: %w", err)
 	}
@@ -241,7 +241,7 @@ func (g *Generator) Weekly(ctx context.Context, weekStart time.Time) (*repo.Week
 // gatherTopicStatus 汇聚某话题数据为 TopicStatusInput。话题不存在返回 error。
 func (g *Generator) gatherTopicStatus(ctx context.Context, topicID ids.ID) (TopicStatusInput, error) {
 	var in TopicStatusInput
-	tp, err := g.Topics.Get(ctx, topicID)
+	tp, err := g.Topics.Get(ctx, reviewUserID, topicID)
 	if err != nil {
 		// 话题不存在（无此行）用 sentinel 包裹，供 handler errors.Is → 404；
 		// 其余 DB 错误按原样上抛（handler 默认 502）。

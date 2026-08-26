@@ -259,7 +259,7 @@ func TestStageSpeakerNameContextAssembly(t *testing.T) {
 	sessions := &repo.SessionRepo{DB: db}
 
 	// 取当前 session 的 created_at，前置 session 定时到它前 5 分钟（落在 10min 回看窗口内）。
-	cur, err := sessions.Get(ctx, sid)
+	cur, err := sessions.Get(ctx, 1, sid)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
@@ -36,6 +37,13 @@ var allowedExt = map[string]string{
 const maxUploadBytes = 200 << 20 // 200MB
 
 func (h *AudioHandler) Upload(w http.ResponseWriter, r *http.Request) {
+	// 多租户隔离（评审 I3）：取登录用户，未登录 401；入库时写 user_id，
+	// 使录音归属登录用户（而非默认恒 1），后续列表/详情/删除按 user_id 隔离才生效。
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		http.Error(w, "解析上传失败: "+err.Error(), http.StatusBadRequest)
@@ -79,7 +87,7 @@ func (h *AudioHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s := &repo.AudioSession{
-		ID: sid, Source: source, Filename: header.Filename,
+		ID: sid, UserID: uid.Int64(), Source: source, Filename: header.Filename,
 		StoragePath: dst, DurationMS: 0, Mime: mime, Status: "processing",
 	}
 	if err := h.Sessions.Create(r.Context(), s); err != nil {

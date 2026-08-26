@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
 	"zhiwei/internal/ids"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
@@ -65,7 +63,7 @@ func setupTopicAPI(t *testing.T) (http.Handler, *repo.TopicRepo, *repo.MemoryRep
 		t.Fatal(err)
 	}
 
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterTopic(r, &TopicHandler{Topics: tr, Memories: mr, Todos: tdr})
 	return r, tr, mr, tdr, tp
 }
@@ -162,7 +160,7 @@ func TestTopicDetailAndPatch(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("confirm: %d", rec2.Code)
 	}
-	got, _ := tr.Get(context.Background(), tp.ID)
+	got, _ := tr.Get(context.Background(), 1, tp.ID)
 	if got.Status != "active" {
 		t.Fatalf("status = %s", got.Status)
 	}
@@ -176,7 +174,7 @@ func TestTopicDetailAndPatch(t *testing.T) {
 	if rec3.Code != http.StatusOK {
 		t.Fatalf("rename: %d", rec3.Code)
 	}
-	got2, _ := tr.Get(context.Background(), tp.ID)
+	got2, _ := tr.Get(context.Background(), 1, tp.ID)
 	if got2.Name != "API用例主题Rust进阶" {
 		t.Fatalf("name = %s", got2.Name)
 	}
@@ -311,7 +309,7 @@ WHERE user_id = 1 AND name = ? AND status IN ('active','suggested')`, name); err
 func TestTopicMerge(t *testing.T) {
 	tr, mr, tdr, a, b := setupMergeFixtures(t)
 
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	// Merge 不调 LLM，LLM 留 nil
 	RegisterTopic(r, &TopicHandler{Topics: tr, Memories: mr, Todos: tdr})
 
@@ -343,7 +341,7 @@ func TestTopicMerge(t *testing.T) {
 		t.Fatalf("A todo count = %d, want 2", len(todoA))
 	}
 	// B status = dismissed
-	gotB, err := tr.Get(ctx, b.ID)
+	gotB, err := tr.Get(ctx, 1, b.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +374,7 @@ func TestTopicConsolidate(t *testing.T) {
 	// 用真实 id 填进 canned 响应，模拟 LLM 按输入 topic id 给出合并提议
 	canned := fmt.Sprintf(`{"groups":[{"canonical_name":"合并后","member_ids":["%s","%s"]}]}`,
 		a.ID.String(), b.ID.String())
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterTopic(r, &TopicHandler{
 		Topics: tr, Memories: mr, Todos: tdr,
 		LLM: &fakeConsolidateLLM{resp: canned}, LLMModel: "test", ConsolidatePrompt: "sys",
@@ -421,7 +419,7 @@ func TestTopicConsolidate(t *testing.T) {
 // member B 完好（关联不误删）。区别于 dismiss（PATCH dismissed 软删）。重复删除幂等。
 func TestTopicDelete(t *testing.T) {
 	tr, mr, tdr, a, b := setupMergeFixtures(t)
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterTopic(r, &TopicHandler{Topics: tr, Memories: mr, Todos: tdr}) // Delete 不调 LLM
 	ctx := context.Background()
 
@@ -430,7 +428,7 @@ func TestTopicDelete(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
 	}
-	if _, err := tr.Get(ctx, a.ID); err == nil {
+	if _, err := tr.Get(ctx, 1, a.ID); err == nil {
 		t.Fatal("topic a 仍存在")
 	}
 	// a 的关联已级联删
@@ -448,15 +446,16 @@ func TestTopicDelete(t *testing.T) {
 		t.Fatalf("a todo_topic 残留 %d", n)
 	}
 	// b 完好（未被误删/误改 dismissed）
-	gotB, err := tr.Get(ctx, b.ID)
+	gotB, err := tr.Get(ctx, 1, b.ID)
 	if err != nil || gotB.Status == "dismissed" {
 		t.Fatalf("b 被误删/误改: err=%v status=%s", err, gotB.Status)
 	}
-	// 重复删除幂等（204）
+	// 归属校验后：删已不存在的 topic → 404（评审 I2：先 Get 校验归属/存在性，
+	// 拿不到即 404，不再是幂等 204）
 	rec2 := httptest.NewRecorder()
 	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodDelete, "/api/topics/"+a.ID.String(), nil))
-	if rec2.Code != http.StatusNoContent {
-		t.Fatalf("idempotent delete: %d", rec2.Code)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("删已不存在应 404, got %d", rec2.Code)
 	}
 }
 
@@ -464,7 +463,7 @@ func TestTopicDelete(t *testing.T) {
 // GET /api/topics（默认）排除 dismissed（含 b、不含 a）。供「已忽略主题」折叠区 + 恢复。
 func TestTopicListDismissed(t *testing.T) {
 	tr, mr, tdr, a, b := setupMergeFixtures(t)
-	r := chi.NewRouter()
+	r := newAuthedRouter()
 	RegisterTopic(r, &TopicHandler{Topics: tr, Memories: mr, Todos: tdr})
 	ctx := context.Background()
 

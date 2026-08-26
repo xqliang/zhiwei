@@ -99,7 +99,7 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 	// s.now()（墙钟，仅测试/无 session 场景；生产 extract 恒有真 session）。
 	fallbackAt := s.now()
 	if s.Sessions != nil {
-		if sess, err := s.Sessions.Get(ctx, sessionID); err == nil && sess != nil && !sess.CreatedAt.IsZero() {
+		if sess, err := s.Sessions.Get(ctx, 1, sessionID); err == nil && sess != nil && !sess.CreatedAt.IsZero() { // 阶段1：暂 user-1
 			fallbackAt = sess.CreatedAt
 		}
 	}

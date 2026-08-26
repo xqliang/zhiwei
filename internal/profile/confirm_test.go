@@ -144,7 +144,7 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	if err := svc.ConfirmPending(ctx, "person", cand.ID); err != nil {
 		t.Fatal(err)
 	}
-	if c2, _ := svc.Persons.Get(ctx, cand.ID); c2.Status != "active" {
+	if c2, _ := svc.Persons.Get(ctx, 1, cand.ID); c2.Status != "active" {
 		t.Fatalf("人物确认后应 active: %+v", c2)
 	}
 
@@ -165,13 +165,13 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	if err := svc.ManualUpdatePerson(ctx, p.ID, "Bob2", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := svc.Persons.Get(ctx, p.ID); b == nil || b.DisplayName != "Bob2" {
+	if b, _ := svc.Persons.Get(ctx, 1, p.ID); b == nil || b.DisplayName != "Bob2" {
 		t.Fatalf("改名后应为 Bob2: %+v", b)
 	}
 	if err := svc.ManualSetPersonStatus(ctx, p.ID, "dismissed"); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := svc.Persons.Get(ctx, p.ID); b == nil || b.Status != "dismissed" {
+	if b, _ := svc.Persons.Get(ctx, 1, p.ID); b == nil || b.Status != "dismissed" {
 		t.Fatalf("归档后应 dismissed: %+v", b)
 	}
 	if err := svc.ManualDeleteRelationship(ctx, rel.ID); err != nil {

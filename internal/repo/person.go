@@ -57,10 +57,12 @@ func (r *PersonRepo) Create(ctx context.Context, p *Person) error {
 	return r.CreateExt(ctx, r.DB, p)
 }
 
-// Get 按 id 查；不存在返回 (nil, nil)（与 FindActiveByNameExt 风格一致，调用方判 nil）。
-func (r *PersonRepo) Get(ctx context.Context, id ids.ID) (*Person, error) {
+// Get 按 id 查人物，并强制 user_id 隔离（多租户越权防护）：SQL 追加 AND user_id = ?，
+// 用 userID 读他人人物时命中 0 行。沿用本方法既有约定：未命中（含越权）返回 (nil, nil)，
+// 供调用方判 nil 转 404（与 FindActiveByNameExt 风格一致）。
+func (r *PersonRepo) Get(ctx context.Context, userID int64, id ids.ID) (*Person, error) {
 	var p Person
-	err := r.DB.GetContext(ctx, &p, `SELECT * FROM person WHERE id = ?`, id.Int64())
+	err := r.DB.GetContext(ctx, &p, `SELECT * FROM person WHERE id = ? AND user_id = ?`, id.Int64(), userID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

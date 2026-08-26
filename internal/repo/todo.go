@@ -76,9 +76,11 @@ DELETE FROM todo WHERE source_memory_id IN (SELECT id FROM memory WHERE session_
 	return err
 }
 
-func (r *TodoRepo) Get(ctx context.Context, id ids.ID) (*Todo, error) {
+// Get 按 id 查待办，并强制 user_id 隔离（多租户越权防护）：SQL 追加 AND user_id = ?，
+// 用 userID 读他人待办时命中 0 行，沿用 GetContext 既有语义返回 sql.ErrNoRows（handler 转 404）。
+func (r *TodoRepo) Get(ctx context.Context, userID int64, id ids.ID) (*Todo, error) {
 	var td Todo
-	err := r.DB.GetContext(ctx, &td, `SELECT * FROM todo WHERE id = ?`, id.Int64())
+	err := r.DB.GetContext(ctx, &td, `SELECT * FROM todo WHERE id = ? AND user_id = ?`, id.Int64(), userID)
 	return &td, err
 }
 
@@ -148,11 +150,12 @@ const todoListBase = `
 SELECT t.*, m.session_id AS source_session_id
 FROM todo t LEFT JOIN memory m ON t.source_memory_id = m.id`
 
-// List 列表。status / topicID 为空不过滤；dismissed 永不出现。
+// List 列表。强制 user_id 隔离（WHERE t.user_id = ?），只列该用户的待办。
+// status / topicID 为空不过滤；dismissed 永不出现。
 // topicID 非空时走关联表 todo_topic 子查询过滤（不走 legacy todo.topic_id）。
-func (r *TodoRepo) List(ctx context.Context, status string, topicID *ids.ID) ([]TodoRow, error) {
-	sql := todoListBase + " WHERE t.status != 'dismissed'"
-	var args []any
+func (r *TodoRepo) List(ctx context.Context, userID int64, status string, topicID *ids.ID) ([]TodoRow, error) {
+	sql := todoListBase + " WHERE t.user_id = ? AND t.status != 'dismissed'"
+	args := []any{userID}
 	if status != "" {
 		sql += " AND t.status = ?"
 		args = append(args, status)
@@ -173,12 +176,13 @@ func (r *TodoRepo) List(ctx context.Context, status string, topicID *ids.ID) ([]
 	return rows, nil
 }
 
-// ListDismissed 返回已忽略（status=dismissed）待办，供前端「已忽略」折叠区展示。
-// dismissed 是终态不可恢复，此处仅供查看 + 硬删。与 List（排除 dismissed）互补。
-func (r *TodoRepo) ListDismissed(ctx context.Context) ([]TodoRow, error) {
+// ListDismissed 返回某用户已忽略（status=dismissed）待办，供前端「已忽略」折叠区展示。
+// 强制 user_id 隔离（WHERE t.user_id = ?）。dismissed 是终态不可恢复，此处仅供查看 + 硬删。
+// 与 List（排除 dismissed）互补。
+func (r *TodoRepo) ListDismissed(ctx context.Context, userID int64) ([]TodoRow, error) {
 	var rows []TodoRow
 	err := r.DB.SelectContext(ctx, &rows, todoListBase+`
- WHERE t.status = 'dismissed' ORDER BY t.id DESC LIMIT 200`)
+ WHERE t.user_id = ? AND t.status = 'dismissed' ORDER BY t.id DESC LIMIT 200`, userID)
 	if err != nil {
 		return nil, err
 	}

@@ -30,7 +30,7 @@ func TestAgentConversationCRUD(t *testing.T) {
 		t.Error("DSHSessionID 应默认非空（回退用会话 ID 字符串）")
 	}
 
-	got, err := r.Get(ctx, c.ID)
+	got, err := r.Get(ctx, 1, c.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestAgentConversationMissing(t *testing.T) {
 	ctx := t.Context()
 	missing := ids.New()
 
-	if _, err := r.Get(ctx, missing); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := r.Get(ctx, 1, missing); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("Get 缺失应返回 sql.ErrNoRows, got %v", err)
 	}
 	if err := r.Touch(ctx, missing); err != nil {

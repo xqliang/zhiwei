@@ -44,7 +44,7 @@ func (h *AgentHandler) createConversation(w http.ResponseWriter, r *http.Request
 	}
 	// I2：Create 不回填 DB 默认列（status/created_at/last_active_at），直接返回 c 会带出
 	// 空 status 和零值时间戳。读回完整行再响应，保证前端拿到 active + 真实时间。
-	if full, err := h.Conversations.Get(r.Context(), c.ID); err == nil {
+	if full, err := h.Conversations.Get(r.Context(), toolUserID, c.ID); err == nil {
 		c = full
 	}
 	writeJSON(w, 200, c)
@@ -65,7 +65,7 @@ func (h *AgentHandler) getConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid cid"})
 		return
 	}
-	msgs, err := h.Messages.ListByConversation(r.Context(), cid)
+	msgs, err := h.Messages.ListByConversation(r.Context(), toolUserID, cid)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -86,7 +86,7 @@ func (h *AgentHandler) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "text required"})
 		return
 	}
-	conv, err := h.Conversations.Get(r.Context(), cid)
+	conv, err := h.Conversations.Get(r.Context(), toolUserID, cid)
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"error": "conversation not found"})
 		return

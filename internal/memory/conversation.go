@@ -55,7 +55,7 @@ const convTopicPromptLimit = 30
 // 空对话/无文本消息直接返回零结果（非错误）。产物是候选记忆（走 memory 候选流程，
 // 不建 agent_proposal——见计划 D-A）。
 func ExtractConversation(ctx context.Context, d ConversationExtractDeps, convID ids.ID) (ConversationExtractResult, error) {
-	msgs, err := d.AgentMessages.ListByConversation(ctx, convID)
+	msgs, err := d.AgentMessages.ListByConversation(ctx, 1, convID) // 阶段1：后台抽取无请求上下文，暂 user-1
 	if err != nil {
 		return ConversationExtractResult{}, fmt.Errorf("读对话消息: %w", err)
 	}
