@@ -1924,7 +1924,13 @@ const app = createApp({
     const reextractingIds = reactive(new Set()); // 正在重新提取的 session id 集合（支持多卡片并行）
     const reextractConfirmId = ref(null);        // 待确认重新提取的 session id
     const reextractTimers = new Map();           // sessionId → 轮询 timer（并行时各自独立，互不覆盖）
-    function askReextract(s) { deletingSessionId.value = null; reextractConfirmId.value = s.id; }
+    // jobInProgress 判断会话是否有任务在跑/排队（列表富化的 job_status；处理中禁再
+    // 触发重新提取/重新识别——后端也会 409 拒，这里提前提示避免白点一趟确认按钮）。
+    function jobInProgress(s) { return s.job_status === 'running' || s.job_status === 'pending'; }
+    function askReextract(s) {
+      if (jobInProgress(s)) { notify('该录音正在处理中，等当前任务完成后再重新提取（避免重复排队）'); return; }
+      deletingSessionId.value = null; reextractConfirmId.value = s.id;
+    }
     function cancelReextract() { reextractConfirmId.value = null; }
     async function confirmReextract(s) { reextractConfirmId.value = null; await reextractSession(s); }
     async function reextractSession(s) {
@@ -1970,7 +1976,10 @@ const app = createApp({
     const reidentifyingIds = reactive(new Set()); // 正在重新识别的 session id 集合（支持多卡片并行）
     const reidentifyConfirmId = ref(null);        // 待确认重新识别的 session id
     const reidentifyTimers = new Map();           // sessionId → 轮询 timer（并行时各自独立）
-    function askReidentify(s) { deletingSessionId.value = null; reextractConfirmId.value = null; reidentifyConfirmId.value = s.id; }
+    function askReidentify(s) {
+      if (jobInProgress(s)) { notify('该录音正在处理中，等当前任务完成后再重新识别（避免重复排队）'); return; }
+      deletingSessionId.value = null; reextractConfirmId.value = null; reidentifyConfirmId.value = s.id;
+    }
     function cancelReidentify() { reidentifyConfirmId.value = null; }
     async function confirmReidentify(s) { reidentifyConfirmId.value = null; await reidentifySession(s); }
     async function reidentifySession(s) {

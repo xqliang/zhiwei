@@ -512,20 +512,40 @@ func (h *QueryHandler) PatchTranscript(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// jobInProgress 判断该会话当前是否有正在跑/排队的任务（前端「重新提取/重新识别」的
+// 防重入闸：处理中再建新 job 会和旧 job 抢同一 session 的数据——如 reidentify 清空
+// speaker_id 的同时旧 speaker stage 正在回填）。以 session 当前指向的 job 状态为准。
+func (h *QueryHandler) jobInProgress(ctx context.Context, s *repo.AudioSession) bool {
+	if s.JobID == nil {
+		return false
+	}
+	j, err := h.Jobs.Get(ctx, *s.JobID)
+	if err != nil {
+		return false // job 读不到（已删/脏数据）按不在处理中放行
+	}
+	return j.Status == "pending" || j.Status == "running"
+}
+
 // Reextract 基于当前（可能已编辑的）ASR 重新抽取记忆/待办：
 // 在 segment stage 建一个 pending job，pool 领取后重算 full_text（segment）→
 // speaker（幂等：段已解析则 no-op，不覆盖手动换人、不依赖 sidecar）→
 // 重新抽取（extract，对本 session 幂等：删旧 memory/todo 再重插）→ done。
 // SetJobID 把 session 指向新 job，前端轮询 GET /api/sessions/{id} 的 job.status 可见进度。
 // 必须已有 transcript（无转写的 session 无法跑 segment→speaker→extract）。
+// 当前有任务在跑/排队时 409 拒绝（避免重复排队、新旧 job 抢同一 session 数据）。
 func (h *QueryHandler) Reextract(w http.ResponseWriter, r *http.Request) {
 	sid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.Sessions.Get(r.Context(), sid); err != nil {
+	s, err := h.Sessions.Get(r.Context(), sid)
+	if err != nil {
 		http.Error(w, "session 不存在", http.StatusNotFound)
+		return
+	}
+	if h.jobInProgress(r.Context(), s) {
+		http.Error(w, "该录音正在处理中，请等当前任务完成后再操作", http.StatusConflict)
 		return
 	}
 	if _, err := h.Transcripts.GetBySession(r.Context(), sid); err != nil {
@@ -546,14 +566,20 @@ func (h *QueryHandler) Reextract(w http.ResponseWriter, r *http.Request) {
 // 切片提向 + 按最新声纹库 1:N 匹配（用户录入/合并/改名声纹后重算归属用）。
 // 区别于 Reextract（segment→speaker→extract，speaker 幂等跳过、不改已有归属）。
 // 注意：会覆盖手动换人，前端需二次确认。
+// 当前有任务在跑/排队时 409 拒绝（清空 speaker_id 会和正在跑的 speaker stage 竞写）。
 func (h *QueryHandler) Reidentify(w http.ResponseWriter, r *http.Request) {
 	sid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.Sessions.Get(r.Context(), sid); err != nil {
+	s, err := h.Sessions.Get(r.Context(), sid)
+	if err != nil {
 		http.Error(w, "session 不存在", http.StatusNotFound)
+		return
+	}
+	if h.jobInProgress(r.Context(), s) {
+		http.Error(w, "该录音正在处理中，请等当前任务完成后再操作", http.StatusConflict)
 		return
 	}
 	tr, err := h.Transcripts.GetBySession(r.Context(), sid)
