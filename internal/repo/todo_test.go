@@ -7,6 +7,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 // 纯逻辑：状态机（验证非法流转被拒绝）
@@ -38,7 +39,7 @@ func TestTodoCanTransition(t *testing.T) {
 }
 
 func TestTodoInsertAndList(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestTodoInsertAndList(t *testing.T) {
 // 三条 todo 共享同一 memory fixture 作为 source_memory_id；
 // created_at 由显式 UPDATE 设定确定性顺序，保证「保留最旧」结果稳定。
 func TestTodoDedupSuggested(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,8 +187,8 @@ func TestTodoDedupSuggested(t *testing.T) {
 
 	// 逐条断言状态：给Tom 仍 suggested、给 Tom 变 dismissed、学习Rust 仍 suggested。
 	want := map[string]string{
-		"给Tom":    "suggested",
-		"给 Tom":   "dismissed",
+		"给Tom":   "suggested",
+		"给 Tom":  "dismissed",
 		"学习Rust": "suggested",
 	}
 	for _, td := range tds {

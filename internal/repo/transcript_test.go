@@ -6,12 +6,13 @@ import (
 	"time"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 // TestTranscriptUpdateAndRecompute 覆盖 ASR 就地编辑落库链路：
 // UpdateSegmentText 改文本 + 跨 transcript 作用域静默忽略 + RecomputeFullText 重算。
 func TestTranscriptUpdateAndRecompute(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +80,7 @@ func TestTranscriptUpdateAndRecompute(t *testing.T) {
 // SetSegmentSpeakerByID 单段换人 + 作用域防跨会话；
 // ListSpeakersForTranscript 聚合视图按首段 sequence_no 定序。
 func TestSetSegmentSpeaker(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +176,7 @@ func TestSetSegmentSpeaker(t *testing.T) {
 // 建 3 段(前2段同人连续)，合并前 2 段 → keeper 文本=拼接、时间=[min,max]、speaker_id=target，
 // 第 2 段删除，第 3 段保留。对应后端 POST /sessions/{id}/segments/merge。未设 TEST_MYSQL_DSN 跳过。
 func TestTranscriptMergeSegments(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +319,7 @@ func TestListSegmentsInWallClockWindow(t *testing.T) {
 // 把本 transcript 内所有 speaker_id = fromID 的段改判为 toID，返回改动行数；
 // 不碰 speaker_id 为其他人或 NULL 的段，也不越过 transcript 作用域波及其他会话。
 func TestReassignSpeakerInTranscript(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

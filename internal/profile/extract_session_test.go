@@ -7,6 +7,7 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // mkSession 给 ExtractSession 造最小 session+transcript+segments 夹具。
@@ -42,7 +43,7 @@ func mkSession(t *testing.T, svc *Service, texts []string) ids.ID {
 // 不触达 LLM 的用例（如边界路径）可不传。
 func newExtractService(t *testing.T, resps ...string) *Service {
 	t.Helper()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

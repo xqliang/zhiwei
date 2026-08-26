@@ -15,6 +15,7 @@ import (
 	"zhiwei/internal/ids"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // setupTopicAPI 准备 topic 路由 + 一条 suggested 主题，
@@ -23,7 +24,7 @@ import (
 func setupTopicAPI(t *testing.T) (http.Handler, *repo.TopicRepo, *repo.MemoryRepo, *repo.TodoRepo, *repo.Topic) {
 	t.Helper()
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +229,7 @@ func (f *fakeConsolidateLLM) Chat(_ context.Context, _ provider.ChatRequest) (pr
 func setupMergeFixtures(t *testing.T) (*repo.TopicRepo, *repo.MemoryRepo, *repo.TodoRepo, *repo.Topic, *repo.Topic) {
 	t.Helper()
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

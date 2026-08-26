@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 func TestPersonLifecycle(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func TestPersonLifecycle(t *testing.T) {
 }
 
 func TestPersonListWithPendingAndRecentSessions(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

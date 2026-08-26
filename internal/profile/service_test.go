@@ -7,6 +7,7 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // fakeLLM 已在 extractor_test.go 定义（同包共享），此处不重复定义。
@@ -24,7 +25,7 @@ func TestMain(m *testing.M) {
 // Memories/Speakers 必须给：ApplyFacts 读 session memories，speaker 归属解析查名册。
 func newTestService(t *testing.T) *Service {
 	t.Helper()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,13 +15,14 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // setupMemoryAPI 准备 memory 路由 + 一条带 topic 的记忆（type=event）。
 // 标题用 "API 用例记忆" 前缀，避免与其他包的 fixture 混淆。
 func setupMemoryAPI(t *testing.T) (http.Handler, *repo.MemoryRepo, *repo.TopicRepo, *repo.Memory) {
 	t.Helper()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +168,7 @@ func titlesOf(rows []repo.MemoryRow) []string {
 // POST 幂等、GET 列表反映增删、DELETE 204、不存在 topic_id → 404。
 func TestMemoryAddRemoveTopic(t *testing.T) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +298,7 @@ func setupMemoryConsolidateFixtures(t *testing.T) (*repo.MemoryRepo, *repo.Memor
 	if err := ids.InitForTest(); err != nil {
 		t.Fatal(err)
 	}
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,11 +7,12 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // 冒烟：pending 任务被领取执行，成功后推进到 done
 func TestPoolRunsJobToDone(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

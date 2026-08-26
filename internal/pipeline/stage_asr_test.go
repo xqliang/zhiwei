@@ -10,6 +10,7 @@ import (
 	"zhiwei/internal/ids"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 type fakeASR struct{}
@@ -32,7 +33,7 @@ func requireFFmpeg(t *testing.T) {
 
 func TestStagesASRAndSegment(t *testing.T) {
 	requireFFmpeg(t)
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

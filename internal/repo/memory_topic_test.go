@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 func TestMemoryTopicRepo(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +80,7 @@ func TestMemoryTopicRepo(t *testing.T) {
 // 再加一条 ai 关联（不同 topic），断言快照仍只返回 user 行（source 过滤）。
 // 守护 commitExtract 删旧前抓 user 行成 map 这条路径（spec §6）。
 func TestMemoryTopicSnapshotUser(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

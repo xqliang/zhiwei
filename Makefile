@@ -41,7 +41,7 @@ migrate-down:
 	migrate -path migrations -database "mysql://zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei" down 1
 
 # 重建集成测试库（每次干净状态）+ 授权。
-# F6 完整并行：真正的测试库是按包隔离的 zhiwei_test_<pkg>，由 repo.TestDSN 懒建。
+# F6 完整并行：真正的测试库是按包隔离的 zhiwei_test_<pkg>，由 repotest.DSN 懒建。
 # 本目标负责三件事：①清理上一轮遗留的 zhiwei_test_<pkg>（逐个 DROP，防脏 schema）；
 # ②给 zhiwei 用户授予 `zhiwei_test_%`.* 通配符权限（MySQL 通配符 GRANT 对「尚不存在」
 # 的库也生效，故懒建时 zhiwei 已有全权限）；③兜底建共享库 zhiwei_test + 迁移（旧流程/
@@ -52,7 +52,7 @@ init-testdb:
 	migrate -path migrations -database "mysql://root:root@tcp(127.0.0.1:3307)/zhiwei_test" up
 
 # 集成测试：需要 docker compose 里的 MySQL 已启动；init-testdb 会清库并配好通配符授权。
-# 无需 -p 1：各测试包经 repo.TestDSN 懒建独立库 zhiwei_test_<pkg>，并行跑包时各用各的库、
+# 无需 -p 1：各测试包经 repotest.DSN 懒建独立库 zhiwei_test_<pkg>，并行跑包时各用各的库、
 # 互不可见，两个并行根因（ClaimNext 全局抢 pending job、extract user_id=1 跨包去重污染）
 # 均由库级隔离消解。
 test-integration: init-testdb
