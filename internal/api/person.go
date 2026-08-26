@@ -836,7 +836,7 @@ func (h *PersonHandler) ListActivities(w http.ResponseWriter, r *http.Request) {
 // AddActivity 手动加活动（走 Service：active/manual/conf=1.0 + 审计）。
 // activity 空 400；tool/location/commute_mode 可空（Service trim 空→NULL）；started_at 原始串
 // 透传 Service（parseEventAt 尽力解析，空/失败落 time.Now()）；duration_min 用 json int 的
-// 0=未给（Service ≤0 不落列，不臆造 0 分钟）。返回 {activity: row}（与 GET 的 {activities:[]} 同族封套）。
+// 0=未给（Service ≤0 不落列，不臆造 0 分钟）。返回裸行（对齐 AddMetric/AddCycle/AddEvent；列表端点才有 {activities:[]} 封套）。
 func (h *PersonHandler) AddActivity(w http.ResponseWriter, r *http.Request) {
 	pid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {

@@ -79,7 +79,7 @@ ORDER BY is_owner DESC, updated_at DESC`, userID)
 	return list, err
 }
 
-// ListWithPending 名册 + 每人 pending 计数（全五平面：属性/关系/大事记/指标/周期），
+// ListWithPending 名册 + 每人 pending 计数（全六平面：属性/关系/大事记/指标/周期/生活轨迹），
 // 供名册角标——须与 /api/profile/pending 队列的并集口径一致，漏平面会少计。
 func (r *PersonRepo) ListWithPending(ctx context.Context, userID int64) ([]PersonWithPending, error) {
 	var list []PersonWithPending
