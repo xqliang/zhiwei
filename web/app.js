@@ -1318,7 +1318,10 @@ const app = createApp({
         paddingLeft: '8px',
         borderLeft: '3px solid ' + (imp >= 0.8 ? 'var(--accent)' : 'transparent'),
       };
-      if (imp < 0.6) style.opacity = '0.55';
+      // 淡显阈值 <0.45（非 <0.6）：三档按钮 一般=0.5 须保持常规亮度——若阈值取 0.6 会把
+      // 「一般」也淡显，与「日常」(0.3) 渲染无差别（final review Low 修正）。类型默认 0.4
+      // （其他）落淡显档、0.5/0.8 常规、0.9 重亮——各档可辨。
+      if (imp < 0.45) style.opacity = '0.55';
       return style;
     }
 
