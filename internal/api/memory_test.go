@@ -18,6 +18,20 @@ import (
 	"zhiwei/internal/repotest"
 )
 
+// resetMemoryTables 清空 memory 及其关联表，供依赖「全局 /api/memories 列表」的用例在
+// setup 开头调用。该列表默认 limit=50、上限 200、按 event_at DESC 排序：脏库连跑时历史
+// 记忆跨运行累积，会把本用例（event_at 较早或为空的）fixture 挤出返回窗口，令 presence/
+// count 断言误判。本包独占 zhiwei_test_api（F6 隔离）且 schema 无外键，可安全整表清空，
+// 使断言只面对本用例自建 fixture。
+func resetMemoryTables(ctx context.Context, t *testing.T, mr *repo.MemoryRepo) {
+	t.Helper()
+	for _, table := range []string{"memory_topic", "memory"} {
+		if _, err := mr.DB.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			t.Fatalf("清空 %s: %v", table, err)
+		}
+	}
+}
+
 // setupMemoryAPI 准备 memory 路由 + 一条带 topic 的记忆（type=event）。
 // 标题用 "API 用例记忆" 前缀，避免与其他包的 fixture 混淆。
 func setupMemoryAPI(t *testing.T) (http.Handler, *repo.MemoryRepo, *repo.TopicRepo, *repo.Memory) {
@@ -33,6 +47,7 @@ func setupMemoryAPI(t *testing.T) (http.Handler, *repo.MemoryRepo, *repo.TopicRe
 	tr := &repo.TopicRepo{DB: db}
 	mtr := &repo.MemoryTopicRepo{DB: db}
 	ctx := context.Background()
+	resetMemoryTables(ctx, t, mr) // 脏库连跑：先清历史记忆，避免 event_at DESC 列表窗口挤出本用例 fixture
 
 	topic := &repo.Topic{Name: "API测试工作", Status: "active", CreatedBy: "user"}
 	if err := tr.Create(ctx, topic); err != nil {
@@ -58,12 +73,13 @@ func setupMemoryAPI(t *testing.T) (http.Handler, *repo.MemoryRepo, *repo.TopicRe
 func TestMemoryListAndFilter(t *testing.T) {
 	r, mr, tr, mem := setupMemoryAPI(t)
 	_ = tr
-	_ = mem
 	ctx := context.Background()
-	// 再插一条不同 type 的记忆，验证 type 过滤
-	if err := mr.InsertExt(ctx, mr.DB, []*repo.Memory{{Type: "fact", Title: "API 用例记忆 B",
+	// 再插一条不同 type 的记忆（fact），验证 type=event 过滤会把它排除掉。
+	// 捕获其指针以拿到回填的 ID，供下面「不应出现在 event 结果里」的范围断言。
+	factMem := &repo.Memory{Type: "fact", Title: "API 用例记忆 B",
 		Content: "事实 B 的完整描述内容", EpistemicType: "observed", Confidence: 0.9,
-		SessionID: ids.New(), Status: "active"}}); err != nil {
+		SessionID: ids.New(), Status: "active"}
+	if err := mr.InsertExt(ctx, mr.DB, []*repo.Memory{factMem}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -76,15 +92,26 @@ func TestMemoryListAndFilter(t *testing.T) {
 		Memories []repo.MemoryRow `json:"memories"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if len(resp.Memories) != 1 {
-		t.Fatalf("type=event 过滤后 = %d, want 1", len(resp.Memories))
+	// 脏库连跑时 event 记忆会跨运行累积，故不断言全局计数，改按本用例自建记忆的 id 做范围断言：
+	// 本用例的 event 记忆 mem 必须在结果中；fact 记忆 factMem 必须被 type=event 过滤排除。
+	var gotRow *repo.MemoryRow
+	for i := range resp.Memories {
+		switch resp.Memories[i].ID {
+		case mem.ID:
+			gotRow = &resp.Memories[i]
+		case factMem.ID:
+			t.Fatalf("type=event 结果不应含 fact 记忆 %s", factMem.ID)
+		}
 	}
-	if len(resp.Memories[0].Topics) != 1 || resp.Memories[0].Topics[0].Name != "API测试工作" {
-		t.Fatalf("topics = %+v, want [{API测试工作}]", resp.Memories[0].Topics)
+	if gotRow == nil {
+		t.Fatalf("type=event 结果应含本用例 event 记忆 %s, got titles=%v", mem.ID, titlesOf(resp.Memories))
+	}
+	if len(gotRow.Topics) != 1 || gotRow.Topics[0].Name != "API测试工作" {
+		t.Fatalf("topics = %+v, want [{API测试工作}]", gotRow.Topics)
 	}
 
 	// topic_id 过滤命中（走关联表子查询）
-	topicID := resp.Memories[0].Topics[0].ID
+	topicID := gotRow.Topics[0].ID
 	rec2 := httptest.NewRecorder()
 	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet,
 		"/api/memories?topic_id="+topicID.String(), nil))
@@ -176,6 +203,7 @@ func TestMemoryAddRemoveTopic(t *testing.T) {
 	mr := &repo.MemoryRepo{DB: db}
 	topics := &repo.TopicRepo{DB: db}
 	mtr := &repo.MemoryTopicRepo{DB: db}
+	resetMemoryTables(ctx, t, mr) // 脏库连跑：本用例断言全局列表含/不含某 topic，先清历史记忆避免窗口挤出
 
 	mem := &repo.Memory{Type: "fact", Title: "加删 topic 用例记忆", Content: "足够长的内容描述",
 		EpistemicType: "observed", Confidence: 0.9, SessionID: ids.New(), Status: "active"}
