@@ -148,3 +148,94 @@ func TestManualSetPersonStatusCascade(t *testing.T) {
 		t.Fatalf("级联汇总审计应恰好 1 条（恢复流转不级联/不重复写），实得 %d: %+v", cascadeCount, logs2)
 	}
 }
+
+// TestManualSetPersonStatusReverseCascade 覆盖 F5 反向边补充（spec §13 / P6）：归档人物 A 时，
+// 他人 C 指向 A 的 **pending** 反向关系边（related_person_id=A）应被级联 dismissed——清确认队列里
+// 「对着一半已归档的人让用户确认关系」的孤儿噪声；而 C 指向 A 的 **active** 反向边刻意保留——那是
+// C 的画像数据，归档 A 不替对端做主篡改（P5 决策，本任务不改）。同时校验汇总审计 Note 带
+// 「反向 pending 关系边 N 条」计数。
+//
+// 造两个独立测试人物 A、C（非共享 owner），t.Cleanup 删两人的属性/关系行 + 审计 + person 行，
+// 恢复干净基线（跨包非自隔离，模式参照 TestManualSetPersonStatusCascade）。
+func TestManualSetPersonStatusReverseCascade(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	pa, err := svc.ManualCreatePerson(ctx, "反向级联-被归档A", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aid := pa.ID
+	pc, err := svc.ManualCreatePerson(ctx, "反向级联-对端C", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid := pc.ID
+
+	t.Cleanup(func() {
+		cctx := context.Background()
+		for _, pk := range []int64{aid.Int64(), cid.Int64()} {
+			_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_attribute WHERE person_id = ?", pk)
+			_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_relationship WHERE person_id = ?", pk)
+			_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_change_log WHERE person_id = ?", pk)
+			_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person WHERE id = ?", pk)
+		}
+	})
+
+	// A 自身一条 active 属性——顺带验证正向级联仍生效（归档后应 dismissed）。
+	attr, err := svc.ManualAddAttribute(ctx, aid, "city", "上海")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// C→A 反向边两条（person_id=C、related_person_id=A）：一条 pending（应被级联清掉）、
+	// 一条 active（应保留）。ManualAddRelationship 建 active/manual；pending 那条建完再 SetStatus
+	// 翻成 pending。用不同 relation_type 让两条共存（自然键含类型）。
+	relPending, err := svc.ManualAddRelationship(ctx, cid, "朋友", &aid, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Relationships.SetStatus(ctx, relPending.ID, "pending"); err != nil {
+		t.Fatal(err)
+	}
+	relActive, err := svc.ManualAddRelationship(ctx, cid, "同事", &aid, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ---- 归档 A ----
+	if err := svc.ManualSetPersonStatus(ctx, aid, "dismissed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A 自身属性正向级联 dismissed。
+	if a, _ := svc.Attributes.Get(ctx, attr.ID); a == nil || a.Status != "dismissed" {
+		t.Fatalf("A 自身属性应正向级联 dismissed: %+v", a)
+	}
+	// C→A 的 pending 反向边被级联 dismissed。
+	if r, _ := svc.Relationships.Get(ctx, relPending.ID); r == nil || r.Status != "dismissed" {
+		t.Fatalf("pending 反向边应级联 dismissed: %+v", r)
+	}
+	// C→A 的 active 反向边保留不动（对端画像不篡改）。
+	if r, _ := svc.Relationships.Get(ctx, relActive.ID); r == nil || r.Status != "active" {
+		t.Fatalf("active 反向边应保留 active（归档不篡改对端）: %+v", r)
+	}
+
+	// 汇总审计 Note 应含反向 pending 计数（本例恰 1 条）。
+	logs, err := svc.ChangeLogs.ListByPerson(ctx, aid, "person", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cascade *string
+	for i := range logs {
+		if logs[i].Note != nil && strings.Contains(*logs[i].Note, "人物归档：级联 dismissed") {
+			cascade = logs[i].Note
+		}
+	}
+	if cascade == nil {
+		t.Fatalf("应有归档级联汇总审计: %+v", logs)
+	}
+	if !strings.Contains(*cascade, "反向 pending 关系边 1 条") {
+		t.Fatalf("级联审计应含「反向 pending 关系边 1 条」: %q", *cascade)
+	}
+}

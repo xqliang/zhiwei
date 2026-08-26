@@ -390,7 +390,7 @@ P1a 实现后（2026-08-25 final review）追加的合并后跟进清单：
 - **F2 关系先行的批内顺序**：`subject:relation:TYPE` 的属性事实依赖同批对应关系事实先落库（prompt 示例排序兜底但不保证）；LLM 乱序时该属性被跳过（非破坏，后续会话可再抽到）。跟进：ApplyFacts 两趟落库（relationship 平面先行）或 facts 稳定排序。✅ 已于 P5 解决（2026-08-26）
 - **F3 profile stage 致命性**：作为 flow 末段，画像抽取失败会把整个 session 置 failed（transcript/memory 已落库也被标失败）。跟进：考虑非致命化（记 trace 后放行）。✅ 已于 P5 解决（2026-08-26）
 - **F4 枚举/类型值写入端不校验**：EnumOptions 与 bool/date 规范形态对 LLM/手动路径均为建议性。跟进：写入校验与规范化。
-- **F5 人物归档不级联**：dismiss 人物后其属性/关系行不变，可能留孤儿引用。跟进：级联处置。✅ 已于 P5 解决（2026-08-26）：反向引用（对端关系边/event related_person_ids）刻意不级联——归档不篡改对端人物画像；确认队列可能出现指向已归档人物的 pending 反向边。
+- **F5 人物归档不级联**：dismiss 人物后其属性/关系行不变，可能留孤儿引用。跟进：级联处置。✅ 已于 P5 解决（2026-08-26）正向六平面级联；P6 补充（2026-08-26）：**pending 反向关系边**（他人指向已归档人物、待确认的边）一并级联 dismissed，清确认队列孤儿噪声。**active 反向边仍刻意不动**——那是对端人物画像，归档本人不篡改对端；**event related_person_ids 是 JSON 列无法索引级联**，指向已归档人物的事件引用留跟进。
 - **P2a 简化（2026-08-25 final review 记录）**：① event 的 importance 用 confidence 代偿（手动路径 1.0），独立重要度建模留后续；② related_person_ids MVP 存单元素或空（多人事件取最主要者）；③ 事件自然键对 title 原始精确匹配（不归一化），LLM 标题字面近重复会建两条 active 而非佐证。
 - **F6 小项**：ListPending 的 supersedes CurrentValue 查询 N+1（队列规模小，可接受）；属性自然键 SQL 用原始 value_text 精确比较（ParseFacts 已 trim，轻微出入）；集成测试共享 user_id=1 靠 t.Cleanup 维持隔离（可改独立 user_id）。
 - **F7 独处时间派生指标未实现（P4 后记录）**：`person_activity` 表无「同场人物」字段，无法从活动流聚合出独处/社交时段；数据稀疏时也不宜展示（spec §12 派生指标、§399）。P4 只落活动流录入/抽取/时间线可视化，独处时间派生留后续（需 activity 增同场人物维度或与 event 的 related_person_ids 聚合）。

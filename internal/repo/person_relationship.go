@@ -178,11 +178,35 @@ func (r *PersonRelationshipRepo) SetStatus(ctx context.Context, id ids.ID, statu
 // 级联语义——只动 active 与 pending：superseded（已被新版本取代）与 dismissed（已放弃/已归档）
 // 都是**终态**，不再改动；否则会把「历史被取代行」也翻成 dismissed，既无意义又污染 supersedes
 // 链的历史可读性。故用 status IN ('active','pending') 精确圈定活跃态。
-// 注：这里只级联「以该人物为主体（person_id）」的关系边；反向边（其他人物 related_person_id
-// 指向本人）不动——那属于对端人物的关系，归档本人不应替对端做主（留跟进）。
+// 注：这里只级联「以该人物为主体（person_id）」的**正向**关系边；反向边（其他人物
+// related_person_id 指向本人）里的 pending 由 DismissPendingReverseExt 单独级联，active 反向边
+// 刻意保留——那属于对端人物的画像，归档本人不替对端做主（见 DismissPendingReverseExt 注释）。
 func (r *PersonRelationshipRepo) DismissAllByPersonExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
 	res, err := ext.ExecContext(ctx,
 		`UPDATE person_relationship SET status = 'dismissed' WHERE person_id = ? AND status IN ('active','pending')`,
+		personID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// DismissPendingReverseExt 人物归档级联的「反向边」补充（spec §13 F5，P6）：把**指向该人物**
+// （related_person_id = personID）且仍处 pending 的关系边批量置 dismissed，返回受影响行数。
+// 供 ManualSetPersonStatus 归档分支在事务内、六平面正向级联之后调用（ext 传 *sqlx.Tx，随归档
+// 事务一起提交/回滚）。
+//
+// 为什么**只动 pending、不动 active**——这是刻意的边界：
+//   - pending 反向边（如 C→A 待确认）：A 都归档了，还让用户去确认「C 与 A 的关系」是纯噪声，
+//     属于确认队列里的孤儿项，应清掉；
+//   - active 反向边（C→A 已确认）：那是**对端人物 C 的画像数据**，归档 A 不应替 C 做主篡改其
+//     已确认的关系（P5 已记 spec：归档不篡改对端人物画像），故 active 反向边保留不动。
+//
+// 另注：事件平面的 related_person_ids 是 JSON 数组列，无法像这里用等值条件走索引做级联，
+// 指向已归档人物的事件引用暂不处理（留 spec 跟进）。
+func (r *PersonRelationshipRepo) DismissPendingReverseExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
+	res, err := ext.ExecContext(ctx,
+		`UPDATE person_relationship SET status = 'dismissed' WHERE related_person_id = ? AND status = 'pending'`,
 		personID.Int64())
 	if err != nil {
 		return 0, err

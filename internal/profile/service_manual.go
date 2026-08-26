@@ -66,8 +66,9 @@ func (s *Service) ManualUpdatePerson(ctx context.Context, id ids.ID, name string
 //
 // F5（spec §13）归档级联：status=="dismissed"（归档人物）时，在**同一事务**内把该人物六个平面
 // （属性/关系/大事记/指标/周期/活动）上所有 active|pending 的行一并置 dismissed——否则名册里人物
-// 虽已隐藏，其平面行仍会进抽取闸门/确认队列，留下孤儿引用。级联行数**汇总**记入 person 的
-// change_log Note（一行审计），**不逐平面、不逐行**写审计条目，这是刻意取舍：
+// 虽已隐藏，其平面行仍会进抽取闸门/确认队列，留下孤儿引用。**另加**反向边补充（P6）：他人指向
+// 本人的 pending 关系边也一并级联 dismissed（active 反向边刻意保留，那是对端画像）。级联行数
+// **汇总**记入 person 的 change_log Note（一行审计），**不逐平面、不逐行**写审计条目，这是刻意取舍：
 //   - 归档是「显式用户意图」——用户已明确要清掉这个人的全部画像数据，无需逐行留痕来还原意图；
 //   - 六平面可能有成百上千行（metric/activity 是测点流），逐行写审计会让 change_log 爆量、得不偿失。
 //     故只在 person 行上留一条带级联计数的汇总审计（可审计「归档时清了多少」，够用）。
@@ -123,8 +124,15 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, id ids.ID, status s
 		if err != nil {
 			return err
 		}
-		note = fmt.Sprintf("人物归档：级联 dismissed 属性 %d/关系 %d/大事记 %d/指标 %d/周期 %d/活动 %d 行",
-			nAttr, nRel, nEvt, nMet, nCyc, nAct)
+		// 反向边补充（F5，P6）：他人指向本人（related_person_id=id）的 pending 关系边——归档本人后
+		// 这些「待确认关系」成了确认队列里的孤儿噪声，一并级联 dismissed。active 反向边刻意不动
+		// （那是对端人物画像，归档不替对端做主——见 DismissPendingReverseExt 注释）。行数并入汇总审计。
+		nRevRel, err := s.Relationships.DismissPendingReverseExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		note = fmt.Sprintf("人物归档：级联 dismissed 属性 %d/关系 %d/大事记 %d/指标 %d/周期 %d/活动 %d 行；反向 pending 关系边 %d 条",
+			nAttr, nRel, nEvt, nMet, nCyc, nAct, nRevRel)
 	}
 
 	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
