@@ -49,10 +49,12 @@ func NormalizeAttrValue(d AttrDef, value string) (string, error) {
 	v := strings.TrimSpace(value)
 	switch d.ValueType {
 	case ValueTypeEnum:
-		// 精确命中 EnumOptions 之一才放行；否则报错（不猜映射）。
+		// 命中 EnumOptions 之一才放行（大小写不敏感——目录里唯一的英文枚举 mbti 是
+		// 全大写形态 INTJ，LLM/用户常出小写 intj，字面精确比较会误杀；中文枚举在
+		// case-fold 下无碰撞，归一到目录形态无副作用）；否则报错（不猜映射）。
 		for _, opt := range d.EnumOptions {
-			if v == opt {
-				return v, nil
+			if strings.EqualFold(v, opt) {
+				return opt, nil
 			}
 		}
 		return "", fmt.Errorf("%w：属性「%s」期望枚举值之一 %v，得到「%s」",

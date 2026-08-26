@@ -30,7 +30,7 @@ func TestNormalizeAttrValue(t *testing.T) {
 		{"enum 空串", Def("gender"), "", "", true},
 		{"enum 英文别名不接受", Def("gender"), "male", "", true},
 		{"enum 另一目录 mbti 命中", Def("mbti"), "INTJ", "INTJ", false},
-		{"enum mbti 小写不命中(大小写敏感)", Def("mbti"), "intj", "", true},
+		{"enum mbti 小写命中(大小写不敏感归一目录形态)", Def("mbti"), "intj", "INTJ", false},
 
 		// ---- bool（smokes）：只认 true/false，大小写不敏感，归一小写 ----
 		{"bool true", Def("smokes"), "true", "true", false},
