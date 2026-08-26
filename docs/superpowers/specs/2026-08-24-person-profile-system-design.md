@@ -393,6 +393,7 @@ P1a 实现后（2026-08-25 final review）追加的合并后跟进清单：
 - **F5 人物归档不级联**：dismiss 人物后其属性/关系行不变，可能留孤儿引用。跟进：级联处置。
 - **P2a 简化（2026-08-25 final review 记录）**：① event 的 importance 用 confidence 代偿（手动路径 1.0），独立重要度建模留后续；② related_person_ids MVP 存单元素或空（多人事件取最主要者）；③ 事件自然键对 title 原始精确匹配（不归一化），LLM 标题字面近重复会建两条 active 而非佐证。
 - **F6 小项**：ListPending 的 supersedes CurrentValue 查询 N+1（队列规模小，可接受）；属性自然键 SQL 用原始 value_text 精确比较（ParseFacts 已 trim，轻微出入）；集成测试共享 user_id=1 靠 t.Cleanup 维持隔离（可改独立 user_id）。
+- **F7 独处时间派生指标未实现（P4 后记录）**：`person_activity` 表无「同场人物」字段，无法从活动流聚合出独处/社交时段；数据稀疏时也不宜展示（spec §12 派生指标、§399）。P4 只落活动流录入/抽取/时间线可视化，独处时间派生留后续（需 activity 增同场人物维度或与 event 的 related_person_ids 聚合）。
 
 - 人物归属对「同名不同人」「代词指代」依赖 LLM+规则，边界情形进 pending 由人确认。
 - 回填端点对大量历史 session 的批处理性能，P1 先小批/单 session，规模化留后续。
