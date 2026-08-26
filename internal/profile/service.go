@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,9 @@ type Service struct {
 	Persons       *repo.PersonRepo
 	Attributes    *repo.PersonAttributeRepo
 	Relationships *repo.PersonRelationshipRepo
-	Events        *repo.PersonEventRepo // event 平面（P2 大事记）
+	Events        *repo.PersonEventRepo  // event 平面（P2 大事记）
+	Metrics       *repo.PersonMetricRepo // metric 平面（P3 时序指标）
+	Cycles        *repo.PersonCycleRepo  // cycle 平面（P3 周期/日程，敏感）
 	ChangeLogs    *repo.PersonChangeLogRepo
 
 	LLM           provider.LLMProvider // ExtractSession 用（Task 13）；手动 CRUD 不需要
@@ -75,9 +78,24 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 		return st, fmt.Errorf("读 session memories: %w", err)
 	}
 
+	// sessionTime：metric 测点 measured_at 的兜底锚点——LLM 未给测点时刻时，用「对话发生
+	// 时刻」（session.created_at）作为测点时间（比留 NULL 更符合时序语义，图表要有锚点）。
+	// 生产路径经 ExtractSession 进来时 session 行必存在；此处再取一次让 ApplyFacts 自洽
+	// （API 确认/回填等直接调用点无需额外传参，公开签名保持稳定）。
+	// SessionRepo.Get 未命中返回 sql.ErrNoRows（且 Sessions 可能未接线，如 profile 单测），
+	// 一律优雅降级到 time.Now()——既有平面不消费 sessionTime，降级无副作用；注意 metric 的
+	// 幂等去重依赖 measured_at 稳定，故 metric 生产/测试路径必须有真实 session（其 created_at
+	// 稳定），不能靠 time.Now() 兜底（每次不同会破坏自然键去重）。
+	sessionTime := time.Now()
+	if s.Sessions != nil {
+		if ss, err := s.Sessions.Get(ctx, sessionID); err == nil {
+			sessionTime = ss.CreatedAt
+		}
+	}
+
 	for _, f := range facts {
 		prov := Provenance{SessionID: sessionID, SegmentIDs: f.SegmentIDs}
-		if err := s.applyFact(ctx, tx, userID, f, prov, memRows, &st); err != nil {
+		if err := s.applyFact(ctx, tx, userID, f, prov, memRows, sessionTime, &st); err != nil {
 			return st, fmt.Errorf("应用事实(plane=%s key=%s relation=%s subject=%s): %w",
 				f.Plane, f.AttrKey, f.RelationType, f.Subject.Kind, err)
 		}
@@ -89,7 +107,7 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 }
 
 func (s *Service) applyFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
-	prov Provenance, memRows []repo.MemoryRow, st *ApplyStats) error {
+	prov Provenance, memRows []repo.MemoryRow, sessionTime time.Time, st *ApplyStats) error {
 
 	personID, err := s.resolveSubject(ctx, tx, f.Subject, prov)
 	if err != nil {
@@ -103,6 +121,12 @@ func (s *Service) applyFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fa
 
 	if f.Plane == "event" {
 		return s.applyEventFact(ctx, tx, userID, f, personID, memID, prov, st)
+	}
+	if f.Plane == "metric" {
+		return s.applyMetricFact(ctx, tx, userID, f, personID, memID, prov, sessionTime, st)
+	}
+	if f.Plane == "cycle" {
+		return s.applyCycleFact(ctx, tx, userID, f, personID, memID, prov, st)
 	}
 	if f.Plane == "relationship" {
 		return s.applyRelationshipFact(ctx, tx, userID, f, personID, memID, prov, st)
@@ -285,6 +309,127 @@ func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 			return err
 		}
 		if err := s.ChangeLogs.CreateExt(ctx, tx, createEventLog(personID, row, memID, prov)); err != nil {
+			return err
+		}
+		if status == "active" {
+			st.Active++
+		} else {
+			st.Pending++
+		}
+	}
+	return nil
+}
+
+// ---- metric 平面（P3 时序指标）----
+
+// applyMetricFact 测点流语义：每个测点独立一行，无当前值/无冲突/无佐证——纯置信闸门。
+// measured_at 解析链：parseEventAt(f.MeasuredAt) 成功用之，失败 → sessionTime（对话发生时
+// 即测点时刻，比留 NULL 更符合时序语义——图表按时间排布不能没有锚点）。
+// 数值/类别分流：strconv.ParseFloat 成功 → value_num+value_text 双存（formatMetricValue
+// 单点格式化，见其注释）；失败 → 仅 value_text（类别型如「焦虑」「火锅」）。
+func (s *Service) applyMetricFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
+	personID ids.ID, memID *ids.ID, prov Provenance, sessionTime time.Time, st *ApplyStats) error {
+
+	// measured_at 先定（自然键成分）：解析失败落 sessionTime。
+	measuredAt := sessionTime
+	if t, ok := parseEventAt(f.MeasuredAt); ok {
+		measuredAt = t
+	}
+	// value 分流：数值型走 formatMetricValue 单点格式化（value_num 与 value_text 同源，
+	// 防 "72.5"/"72.50" 漂移破坏自然键幂等）；类别型仅存原文本。自然键统一按 value_text。
+	var valueNum *float64
+	valueText := strings.TrimSpace(f.MetricValue)
+	if n, err := strconv.ParseFloat(valueText, 64); err == nil {
+		vn := n
+		valueNum = &vn
+		valueText = formatMetricValue(n)
+	}
+	vt := valueText
+	dedup, err := s.Metrics.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, f.MetricKey, &vt, measuredAt)
+	if err != nil {
+		return err
+	}
+
+	dec := DecideMetric(f, dedup != nil, s.Gate)
+	if dec == DecisionSkip {
+		st.Skipped++
+		return nil
+	}
+	// 测点无冲突无佐证，Active/Pending 两路径只差 status（对齐 applyEventFact 模式）。
+	status := "pending"
+	if dec == DecisionCreateActive {
+		status = "active"
+	}
+	row := metricRow(userID, personID, f, valueNum, valueText, measuredAt, status, memID, prov)
+	if err := s.Metrics.CreateExt(ctx, tx, row); err != nil {
+		return err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, createMetricLog(personID, row, memID, prov)); err != nil {
+		return err
+	}
+	if status == "active" {
+		st.Active++
+	} else {
+		st.Pending++
+	}
+	return nil
+}
+
+// ---- cycle 平面（P3 周期/日程，敏感）----
+
+// applyCycleFact 单值语义（同 person+type+label 至多一条 active）：冲突 pending+supersedes
+// 绝不静默覆盖（对齐 attribute 单值模式）。next_predicted_at = anchor_date + period_days
+// （两者齐才算；纯估算非医疗建议，spec §9，算在 cycleRow→applyCycleParams 内）。
+// label 统一 trim 后空串→nil（repo <=> NULL 匹配；混用 ''/NULL 会产生重复 active）。
+func (s *Service) applyCycleFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
+	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
+
+	var label *string
+	if l := strings.TrimSpace(f.CycleLabel); l != "" {
+		label = &l
+	}
+	existing, err := s.Cycles.FindActiveByKeyExt(ctx, tx, personID, f.CycleType, label)
+	if err != nil {
+		return err
+	}
+	dedup, err := s.Cycles.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, f.CycleType, label)
+	if err != nil {
+		return err
+	}
+
+	dec := DecideCycle(f, existing, dedup != nil, s.Gate)
+	switch dec {
+	case DecisionSkip:
+		st.Skipped++
+	case DecisionConflictPending:
+		// DecideCycle 仅在 existing != nil 时返回 ConflictPending，故此处 existing 必非空；
+		// 仍防御性判空（与 applyAttributeFact 冲突分支同构）。
+		var sup *ids.ID
+		note := ""
+		if existing != nil {
+			idv := existing.ID
+			sup = &idv
+			note = "conflict: 与现有周期记录冲突，待人工确认"
+			st.Conflicts++
+		}
+		row := cycleRow(userID, personID, f, label, "pending", sup, memID, prov)
+		if err := s.Cycles.CreateExt(ctx, tx, row); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, createCycleLog(personID, row, memID, prov, note)); err != nil {
+			return err
+		}
+		st.Pending++
+	default: // DecisionCreateActive / DecisionCreatePending
+		status := "pending"
+		if dec == DecisionCreateActive {
+			status = "active"
+		}
+		row := cycleRow(userID, personID, f, label, status, nil, memID, prov)
+		if err := s.Cycles.CreateExt(ctx, tx, row); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, createCycleLog(personID, row, memID, prov, "")); err != nil {
 			return err
 		}
 		if status == "active" {
@@ -499,6 +644,87 @@ func reaffirmEventLog(personID ids.ID, row *repo.PersonEvent, memID *ids.ID, pro
 	}
 }
 
+// ---- metric / cycle 平面行与审计构造 ----
+
+func metricRow(userID int64, personID ids.ID, f Fact, valueNum *float64, valueText string,
+	measuredAt time.Time, status string, memID *ids.ID, prov Provenance) *repo.PersonMetric {
+	row := &repo.PersonMetric{
+		UserID: userID, PersonID: personID, MetricKey: f.MetricKey,
+		ValueText: &valueText, ValueNum: valueNum,
+		MeasuredAt: measuredAt,
+		Confidence: f.Confidence, EpistemicType: f.EpistemicType,
+		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+	if u := strings.TrimSpace(f.MetricUnit); u != "" {
+		row.Unit = &u
+	}
+	return row
+}
+
+func cycleRow(userID int64, personID ids.ID, f Fact, label *string, status string,
+	sup *ids.ID, memID *ids.ID, prov Provenance) *repo.PersonCycle {
+	row := &repo.PersonCycle{
+		UserID: userID, PersonID: personID, CycleType: f.CycleType, Label: label,
+		Confidence: f.Confidence, EpistemicType: f.EpistemicType,
+		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs), SupersedesID: sup,
+	}
+	applyCycleParams(row, f.AnchorDate, f.PeriodDays, f.DurationDays, f.Dosage, f.FrequencyText)
+	return row
+}
+
+// applyCycleParams 把周期的可选参数（anchor/period/duration/dosage/frequency）填入 row，
+// 并据 anchor+period 计算 next_predicted_at。LLM 路径（cycleRow）与手动路径（ManualAddCycle）
+// 共用，保证「下次预测」算法与「LLM 未给的 0/空不落列」规则单点——散落两处易漂移。
+// anchor 走 parseEventAt（UTC 午夜归一，防 DSN 转 UTC 偏移，见其注释）；period/duration<=0
+// 视为 LLM 未给，不设列；next_predicted = anchor + period（两者齐才算，估算非医疗建议 spec §9）。
+func applyCycleParams(row *repo.PersonCycle, anchorDate string, periodDays, durationDays int, dosage, frequency string) {
+	if t, ok := parseEventAt(anchorDate); ok {
+		row.AnchorDate = &t
+	}
+	if periodDays > 0 {
+		pd := periodDays
+		row.PeriodDays = &pd
+	}
+	if durationDays > 0 {
+		dd := durationDays
+		row.DurationDays = &dd
+	}
+	if d := strings.TrimSpace(dosage); d != "" {
+		row.Dosage = &d
+	}
+	if fr := strings.TrimSpace(frequency); fr != "" {
+		row.FrequencyText = &fr
+	}
+	if row.AnchorDate != nil && row.PeriodDays != nil {
+		nxt := row.AnchorDate.AddDate(0, 0, *row.PeriodDays)
+		row.NextPredictedAt = &nxt
+	}
+}
+
+func createMetricLog(personID ids.ID, row *repo.PersonMetric, memID *ids.ID, prov Provenance) *repo.PersonChangeLog {
+	return &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "metric", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "llm", NewValue: snap(*row.ValueText),
+		Confidence: fp(row.Confidence), SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+}
+
+func createCycleLog(personID ids.ID, row *repo.PersonCycle, memID *ids.ID, prov Provenance, note string) *repo.PersonChangeLog {
+	l := &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "cycle", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "llm", NewValue: snap(row.CycleType),
+		Confidence: fp(row.Confidence), SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+	if note != "" {
+		l.Note = strPtr(note)
+	}
+	return l
+}
+
 func createAttrLog(personID ids.ID, row *repo.PersonAttribute, memID *ids.ID, prov Provenance, note string) *repo.PersonChangeLog {
 	l := &repo.PersonChangeLog{
 		PersonID: personID, EntityKind: "attribute", EntityID: &row.ID,
@@ -582,6 +808,10 @@ func snap(v any) *string {
 func strPtr(s string) *string { return &s }
 
 func fp(f float64) *float64 { return &f }
+
+// formatMetricValue 数值型测点的规范字符串形态——value_num 与 value_text 的唯一格式化点
+// （双存约定：自然键去重按 value_text 字符串比较，两列必须同源，散落 fmt 会漂移破坏幂等）。
+func formatMetricValue(f float64) string { return strconv.FormatFloat(f, 'g', -1, 64) }
 
 // idPtr 0 → nil（SQL NULL 安全传参）。
 func idPtr(id ids.ID) *ids.ID {

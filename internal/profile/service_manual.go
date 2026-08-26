@@ -3,7 +3,9 @@ package profile
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
@@ -307,6 +309,149 @@ func (s *Service) ManualDeleteEvent(ctx context.Context, id ids.ID) error {
 	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
 		PersonID: e.PersonID, EntityKind: "event", EntityID: &id,
 		ChangeType: "delete", ChangedBy: "user", OldValue: snap(e.Title),
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ---- metric 平面手动 CRUD（P3 时序指标）----
+
+// ManualAddMetric 手动加测点（active/manual conf=1.0 + create 审计）。
+// 数值/类别分流同 LLM 路径（formatMetricValue 单点格式化，value_num/value_text 双存）；
+// measuredAt 解析失败 → time.Now() 兜底：手动录入没有「对话发生时刻」可依，不知道时间就记
+// 当下（区别于 LLM 路径 applyMetricFact 的 sessionTime——那里能用 session.created_at）。
+func (s *Service) ManualAddMetric(ctx context.Context, personID ids.ID, metricKey, value, unit, measuredAt string) (*repo.PersonMetric, error) {
+	if !ValidMetricKeys[metricKey] {
+		return nil, fmt.Errorf("非法指标类型: %s", metricKey)
+	}
+	valueText := strings.TrimSpace(value)
+	if valueText == "" {
+		return nil, fmt.Errorf("value 不能为空")
+	}
+	var valueNum *float64
+	if n, err := strconv.ParseFloat(valueText, 64); err == nil {
+		vn := n
+		valueNum = &vn
+		valueText = formatMetricValue(n)
+	}
+	at := time.Now()
+	if t, ok := parseEventAt(measuredAt); ok {
+		at = t
+	}
+	row := &repo.PersonMetric{
+		PersonID: personID, MetricKey: metricKey,
+		ValueText: &valueText, ValueNum: valueNum, MeasuredAt: at,
+		Confidence: 1.0, EpistemicType: "observed", Source: "manual", Status: "active",
+	}
+	if u := strings.TrimSpace(unit); u != "" {
+		row.Unit = &u
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Metrics.CreateExt(ctx, tx, row); err != nil {
+		return nil, err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "metric", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "user", NewValue: snap(*row.ValueText),
+		Confidence: fp(1.0),
+	}); err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualDeleteMetric 手动删测点 → dismissed + delete 审计。
+func (s *Service) ManualDeleteMetric(ctx context.Context, id ids.ID) error {
+	m, err := s.Metrics.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if m == nil {
+		return ErrNotFound
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Metrics.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
+		return err
+	}
+	old := ""
+	if m.ValueText != nil {
+		old = *m.ValueText
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: m.PersonID, EntityKind: "metric", EntityID: &id,
+		ChangeType: "delete", ChangedBy: "user", OldValue: snap(old),
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ---- cycle 平面手动 CRUD（P3 周期/日程，敏感）----
+
+// ManualAddCycle 手动加周期/日程（active/manual conf=1.0 + create 审计）。label 空→nil；
+// next_predicted_at 经 applyCycleParams 与 LLM 路径共用同一算法（anchor+period）；period/
+// duration<=0 不落列（同 LLM 路径「未给不设」）。参数多，调用方为 API handler。
+func (s *Service) ManualAddCycle(ctx context.Context, personID ids.ID, cycleType, label, anchorDate,
+	frequency, dosage string, periodDays, durationDays int) (*repo.PersonCycle, error) {
+
+	if !ValidCycleTypes[cycleType] {
+		return nil, fmt.Errorf("非法周期类型: %s", cycleType)
+	}
+	row := &repo.PersonCycle{
+		PersonID: personID, CycleType: cycleType,
+		Confidence: 1.0, EpistemicType: "observed", Source: "manual", Status: "active",
+	}
+	if l := strings.TrimSpace(label); l != "" {
+		row.Label = &l
+	}
+	applyCycleParams(row, anchorDate, periodDays, durationDays, dosage, frequency)
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Cycles.CreateExt(ctx, tx, row); err != nil {
+		return nil, err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "cycle", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "user", NewValue: snap(row.CycleType),
+		Confidence: fp(1.0),
+	}); err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualDeleteCycle 手动删周期 → dismissed + delete 审计。
+func (s *Service) ManualDeleteCycle(ctx context.Context, id ids.ID) error {
+	c, err := s.Cycles.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if c == nil {
+		return ErrNotFound
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Cycles.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
+		return err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: c.PersonID, EntityKind: "cycle", EntityID: &id,
+		ChangeType: "delete", ChangedBy: "user", OldValue: snap(c.CycleType),
 	}); err != nil {
 		return err
 	}

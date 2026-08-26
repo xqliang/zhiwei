@@ -30,11 +30,14 @@ func newTestService(t *testing.T) *Service {
 	}
 	svc := &Service{
 		DB: db, Persons: &repo.PersonRepo{DB: db},
+		Sessions:      &repo.SessionRepo{DB: db}, // metric measured_at 兜底取 session.created_at
 		Memories:      &repo.MemoryRepo{DB: db},
 		Speakers:      &repo.SpeakerRepo{DB: db},
 		Attributes:    &repo.PersonAttributeRepo{DB: db},
 		Relationships: &repo.PersonRelationshipRepo{DB: db},
 		Events:        &repo.PersonEventRepo{DB: db},
+		Metrics:       &repo.PersonMetricRepo{DB: db},
+		Cycles:        &repo.PersonCycleRepo{DB: db},
 		ChangeLogs:    &repo.PersonChangeLogRepo{DB: db},
 		Gate:          GateConfig{AutoConf: 0.75},
 	}
@@ -320,5 +323,266 @@ func TestApplyEventFacts(t *testing.T) {
 	logs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "event", "")
 	if len(logs) < 5 {
 		t.Fatalf("event 审计不足: %d", len(logs))
+	}
+}
+
+func TestApplyMetricFacts(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+
+	// metric 平面把体重/情绪测点写到共享 owner（user_id=1）。本包所有测试共用同一 zhiwei_test
+	// 库、不逐个重置；这些行若留到下一次 -count=1 重跑会让测点计数/审计断言失真。收尾删掉 owner
+	// 的 person_metric、owner 的 metric 审计条目、以及本用例造的 session。提前用 t.Cleanup 注册，
+	// 保证任一断言 t.Fatal 提前退出时也会清理（模式参照 TestApplyEventFacts）。
+	var sessPK int64
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			ownerPK := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_metric WHERE person_id = ?`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'metric'`, ownerPK)
+		}
+		if sessPK != 0 {
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM audio_session WHERE id = ?`, sessPK)
+		}
+	})
+
+	// metric 的 measured_at 兜底取 session.created_at，故须造真实 session（不能用裸 ids.New()）：
+	// created_at 稳定才能保证「空 measured_at」测点重跑时自然键命中而 skip（time.Now() 兜底会漂移）。
+	sess := &repo.AudioSession{ID: ids.New(), Source: "web_upload", Filename: "m.wav", StoragePath: "/tmp/m.wav", Status: "completed"}
+	if err := svc.Sessions.Create(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	sessPK = sess.ID.Int64()
+	ss, err := svc.Sessions.Get(ctx, sess.ID) // 读回 DB 默认填充的 created_at
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	facts := []Fact{
+		// ① 数值型 weight 高置信 → active；value_num/value_text 双存一致
+		{Plane: "metric", Subject: Subject{Kind: "self"}, MetricKey: "weight",
+			MetricValue: "72.5", MetricUnit: "kg", MeasuredAt: "2026-08-20",
+			Confidence: 0.9, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+		// ② 类别型 emotion 低置信 → pending；value_num 为 NULL
+		{Plane: "metric", Subject: Subject{Kind: "self"}, MetricKey: "emotion",
+			MetricValue: "焦虑", MeasuredAt: "2026-08-20",
+			Confidence: 0.6, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+		// ③ MeasuredAt 空 → measured_at 落 sessionTime（= session.created_at）
+		{Plane: "metric", Subject: Subject{Kind: "self"}, MetricKey: "weight",
+			MetricValue: "70", Confidence: 0.9, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+	}
+	st, err := svc.ApplyFacts(ctx, sess.ID, 1, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ①③ active；② pending
+	if st.Active != 2 || st.Pending != 1 || st.Skipped != 0 {
+		t.Fatalf("统计错误: %+v", st)
+	}
+
+	ws, err := svc.Metrics.ListByPerson(ctx, oid, "weight", nil, nil)
+	if err != nil || len(ws) != 2 {
+		t.Fatalf("应 2 条 weight 测点: %d %v", len(ws), err)
+	}
+	var w725, w70 *repo.PersonMetric
+	for i := range ws {
+		if ws[i].ValueText == nil {
+			continue
+		}
+		switch *ws[i].ValueText {
+		case "72.5":
+			w725 = &ws[i]
+		case "70":
+			w70 = &ws[i]
+		}
+	}
+	if w725 == nil || w70 == nil {
+		t.Fatalf("weight 测点值缺失（双存 value_text）: %+v", ws)
+	}
+	// 数值型双存一致：value_num=72.5 且 value_text="72.5"（同源，防漂移）
+	if w725.Status != "active" || w725.Source != "llm" {
+		t.Fatalf("weight 72.5 应 llm/active: %+v", w725)
+	}
+	if w725.ValueNum == nil || *w725.ValueNum != 72.5 {
+		t.Fatalf("value_num 应 72.5: %v", w725.ValueNum)
+	}
+	if w725.Unit == nil || *w725.Unit != "kg" {
+		t.Fatalf("unit 应 kg: %v", w725.Unit)
+	}
+	if w725.MeasuredAt.UTC().Format("2006-01-02") != "2026-08-20" {
+		t.Fatalf("measured_at 应 2026-08-20，实得 %s", w725.MeasuredAt.UTC().Format("2006-01-02"))
+	}
+	// 类别型：value_num NULL，value_text 存类别串
+	es, _ := svc.Metrics.ListByPerson(ctx, oid, "emotion", nil, nil)
+	if len(es) != 1 {
+		t.Fatalf("应 1 条 emotion 测点: %d", len(es))
+	}
+	if em := es[0]; em.Status != "pending" || em.ValueNum != nil || em.ValueText == nil || *em.ValueText != "焦虑" {
+		t.Fatalf("emotion 类别型测点错误（应 pending/value_num NULL/value_text=焦虑）: %+v", em)
+	}
+	// ③ 空 measured_at → 落 session.created_at 日期
+	if w70.Status != "active" || w70.ValueNum == nil || *w70.ValueNum != 70 {
+		t.Fatalf("weight 70 应 active 且 value_num=70: %+v", w70)
+	}
+	if got, want := w70.MeasuredAt.UTC().Format("2006-01-02"), ss.CreatedAt.UTC().Format("2006-01-02"); got != want {
+		t.Fatalf("空 measured_at 应落 session 时间 %s，实得 %s", want, got)
+	}
+
+	// 幂等：同 session 重跑全 skip（数值经 formatMetricValue 串比较，sessionTime 稳定）
+	st2, err := svc.ApplyFacts(ctx, sess.ID, 1, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st2.Skipped != 3 || st2.Active != 0 || st2.Pending != 0 {
+		t.Fatalf("重跑应全 skip: %+v", st2)
+	}
+
+	// 手动加（value="73.2" → 双存）删
+	mm, err := svc.ManualAddMetric(ctx, oid, "weight", "73.2", "kg", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mm.Status != "active" || mm.Source != "manual" {
+		t.Fatalf("手动测点应 manual/active: %+v", mm)
+	}
+	if mm.ValueNum == nil || *mm.ValueNum != 73.2 || mm.ValueText == nil || *mm.ValueText != "73.2" {
+		t.Fatalf("手动数值型双存应一致（73.2/\"73.2\"）: num=%v text=%v", mm.ValueNum, mm.ValueText)
+	}
+	if err := svc.ManualDeleteMetric(ctx, mm.ID); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := svc.Metrics.Get(ctx, mm.ID); d == nil || d.Status != "dismissed" {
+		t.Fatalf("删除应 dismissed: %+v", d)
+	}
+	// 审计：metric 平面条目（llm create×3 + user create + delete = 5）
+	logs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "metric", "")
+	if len(logs) < 5 {
+		t.Fatalf("metric 审计不足: %d", len(logs))
+	}
+}
+
+func TestApplyCycleFacts(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+
+	// cycle 平面把服药/生理期/随访周期写到共享 owner（user_id=1）。含冲突后 pending 行、手动
+	// dismissed 行——测试内自己造的数据自己清，按 person_id 全删即可（模式参照 TestApplyEventFacts）。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			ownerPK := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_cycle WHERE person_id = ?`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'cycle'`, ownerPK)
+		}
+	})
+
+	sess1 := ids.New()
+	facts := []Fact{
+		// ① medication 降压药 anchor 2026-08-01 + period 30 高置信 → active
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "medication",
+			CycleLabel: "降压药", AnchorDate: "2026-08-01", PeriodDays: 30,
+			Dosage: "5mg", FrequencyText: "每日一次",
+			Confidence: 0.9, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+		// ② menstrual 空 label 合法 → active（label nil）
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "menstrual",
+			Confidence: 0.9, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+	}
+	st, err := svc.ApplyFacts(ctx, sess1, 1, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Active != 2 || st.Pending != 0 || st.Skipped != 0 {
+		t.Fatalf("统计错误: %+v", st)
+	}
+
+	cs, err := svc.Cycles.ListByPerson(ctx, oid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var med, men *repo.PersonCycle
+	for i := range cs {
+		switch cs[i].CycleType {
+		case "medication":
+			med = &cs[i]
+		case "menstrual":
+			men = &cs[i]
+		}
+	}
+	if med == nil || men == nil {
+		t.Fatalf("周期记录缺失: %+v", cs)
+	}
+	if med.Status != "active" || med.Source != "llm" || med.Label == nil || *med.Label != "降压药" {
+		t.Fatalf("medication 行错误: %+v", med)
+	}
+	if med.PeriodDays == nil || *med.PeriodDays != 30 {
+		t.Fatalf("period_days 应 30: %v", med.PeriodDays)
+	}
+	if med.AnchorDate == nil || med.AnchorDate.UTC().Format("2006-01-02") != "2026-08-01" {
+		t.Fatalf("anchor_date 应 2026-08-01: %v", med.AnchorDate)
+	}
+	// next_predicted_at = anchor + period = 2026-08-01 + 30d = 2026-08-31
+	if med.NextPredictedAt == nil || med.NextPredictedAt.UTC().Format("2006-01-02") != "2026-08-31" {
+		t.Fatalf("next_predicted_at 应 2026-08-31: %v", med.NextPredictedAt)
+	}
+	// 空 label 的 menstrual：label nil
+	if men.Status != "active" || men.Label != nil {
+		t.Fatalf("menstrual 空 label 应 nil: %+v", men)
+	}
+	medID := med.ID
+
+	// 幂等：同 session 重跑全 skip
+	st2, err := svc.ApplyFacts(ctx, sess1, 1, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st2.Skipped != 2 || st2.Active != 0 {
+		t.Fatalf("重跑应全 skip: %+v", st2)
+	}
+
+	// 冲突：另一 session 同 (type,label) 不同参数 → ConflictPending + supersedes 指向 active 行
+	sess2 := ids.New()
+	st3, err := svc.ApplyFacts(ctx, sess2, 1, []Fact{
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "medication",
+			CycleLabel: "降压药", AnchorDate: "2026-09-01", PeriodDays: 20,
+			Confidence: 0.9, EpistemicType: "observed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st3.Conflicts != 1 || st3.Pending != 1 {
+		t.Fatalf("冲突统计错误: %+v", st3)
+	}
+	pend, err := svc.Cycles.FindByNaturalKeyExt(ctx, svc.DB, sess2, oid, "medication", strPtr("降压药"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pend == nil || pend.Status != "pending" || pend.SupersedesID == nil || *pend.SupersedesID != medID {
+		t.Fatalf("冲突 pending 应指向 active 现值行: pend=%+v 期望 supersedes=%d", pend, medID)
+	}
+
+	// 手动加删（period 0 无 next_predicted）
+	mc, err := svc.ManualAddCycle(ctx, oid, "followup", "复诊", "", "每月一次", "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mc.Status != "active" || mc.Source != "manual" || mc.Label == nil || *mc.Label != "复诊" {
+		t.Fatalf("手动周期应 manual/active/label=复诊: %+v", mc)
+	}
+	if mc.NextPredictedAt != nil {
+		t.Fatalf("无 anchor/period 不应有 next_predicted: %v", mc.NextPredictedAt)
+	}
+	if err := svc.ManualDeleteCycle(ctx, mc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := svc.Cycles.Get(ctx, mc.ID); d == nil || d.Status != "dismissed" {
+		t.Fatalf("删除应 dismissed: %+v", d)
+	}
+	// 审计：cycle 平面条目（llm create×2 + 冲突 create + user create + delete = 5）
+	logs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "cycle", "")
+	if len(logs) < 5 {
+		t.Fatalf("cycle 审计不足: %d", len(logs))
 	}
 }
