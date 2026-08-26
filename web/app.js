@@ -1301,8 +1301,29 @@ const app = createApp({
     // 事件类型枚举与后端 ValidEventTypes 一致（9 类）
     const EVENT_TYPES = ['里程碑','聚会','会议','旅行','健康','成就','挫折','负面','其他'];
 
+    // 重要度三档（P7）：语义档位（人生分量）比数字输入更贴近用户直觉，映射后端 clamp 到 (0,1] 的值。
+    // 默认「一般」(0.5)；手动录入恒发所选档（见 submitAddEvent），与后端「类型默认」路径(LLM/缺省)互不干扰。
+    const EVENT_IMPORTANCE_LEVELS = [
+      { label: '重大', value: 0.9 },
+      { label: '一般', value: 0.5 },
+      { label: '日常', value: 0.3 },
+    ];
+    // 大事记行重要度视觉分层（P7）：不引新色，用「左侧 accent 竖条 + 透明度」映射人生分量三档——
+    // 重大(≥0.8) 显示 accent 左竖条(视觉加重)、一般(0.6~0.8) 常规、日常(<0.6) 淡显。所有行恒留 3px
+    // 左竖条槽位(默认透明)保持左对齐，只切换颜色不产生位移；纯视觉不暴露数值(数值走 hover title)。
+    // 对齐 dataviz「数据是唯一主角」：importance 是权重信号，用视觉重量表达而非再塞一个数字。
+    function eventRowStyle(ev) {
+      const imp = ev && typeof ev.importance === 'number' ? ev.importance : 0.5;
+      const style = {
+        paddingLeft: '8px',
+        borderLeft: '3px solid ' + (imp >= 0.8 ? 'var(--accent)' : 'transparent'),
+      };
+      if (imp < 0.6) style.opacity = '0.55';
+      return style;
+    }
+
     const showAddEvent = ref(false);
-    const addEventForm = reactive({ event_type: '', title: '', description: '', occurred_at: '', end_at: '', location: '', related_person_id: '' });
+    const addEventForm = reactive({ event_type: '', title: '', description: '', occurred_at: '', end_at: '', location: '', related_person_ids: [], importance: 0.5 });
     const addingEvent = ref(false);
     const deletingEventId = ref(null);  // 2 步删除确认
 
@@ -1329,7 +1350,8 @@ const app = createApp({
     }
     function resetAddEventForm() {
       addEventForm.event_type = ''; addEventForm.title = ''; addEventForm.description = '';
-      addEventForm.occurred_at = ''; addEventForm.end_at = ''; addEventForm.location = ''; addEventForm.related_person_id = '';
+      addEventForm.occurred_at = ''; addEventForm.end_at = ''; addEventForm.location = '';
+      addEventForm.related_person_ids = []; addEventForm.importance = 0.5;  // 数组与档位对称清理（默认「一般」）
     }
     // 开合切换：收起清草稿（对齐 toggleAddAttr/toggleAddRel 对称模式）
     function toggleAddEvent() {
@@ -1350,7 +1372,11 @@ const app = createApp({
         if (addEventForm.occurred_at) body.occurred_at = addEventForm.occurred_at;
         if (addEventForm.end_at) body.end_at = addEventForm.end_at;
         if (addEventForm.location.trim()) body.location = addEventForm.location.trim();
-        if (addEventForm.related_person_id) body.related_person_id = addEventForm.related_person_id;
+        // 同行人物多选（P7）：数组非空才发 related_person_ids（后端 []string，逐个 ParseID）
+        if (addEventForm.related_person_ids.length) body.related_person_ids = addEventForm.related_person_ids;
+        // 重要度恒发所选档（P7）：手动录入 WYSIWYG——用户所见档位(默认「一般」0.5)即其意图，
+        // 恒发避免「看着是一般的里程碑被后端类型默认悄悄提成重大」的意外；后端 clamp 到 (0,1]。
+        body.importance = addEventForm.importance;
         await api('POST', '/api/persons/' + personDetail.value.person.id + '/events', body);
         await reloadPersonDetail();
         showAddEvent.value = false;
@@ -2002,7 +2028,7 @@ const app = createApp({
       epiText, personNameOf,
       attrCatalog, attrDefOf, addAttrDef, editAttrDef, onAddAttrKeyChange, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
-      EVENT_TYPES, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
+      EVENT_TYPES, EVENT_IMPORTANCE_LEVELS, eventRowStyle, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
       METRIC_KEYS, metricKey, metricRows, metricLoading, metricIsNumeric, metricDef, switchMetric, showAddMetric, addMetricForm, addingMetric, toggleAddMetric, submitAddMetric, deletingMetricId, askDeleteMetric, confirmDeleteMetric, metricChart, metricHover, onMetricChartMove, CHART_W, CHART_H, metricNumericRows, metricCategoryRows, showMetricList,
       CYCLE_TYPES, healthOpen, cycles, cyclesNote, cycleLoading, toggleHealth, showAddCycle, addCycleForm, addingCycle, toggleAddCycle, submitAddCycle, deletingCycleId, askDeleteCycle, confirmDeleteCycle, cycleTypeLabel, fmtDateOnly,
       activities, activityRows, activityLoading, showAddActivity, addActivityForm, addingActivity, toggleAddActivity, submitAddActivity, deletingActivityId, askDeleteActivity, confirmDeleteActivity,

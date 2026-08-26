@@ -921,7 +921,10 @@
         <div class="muted" style="font-weight:600; margin-bottom:4px">大事记</div>
         <div v-for="g in eventsByYear" :key="g.year" style="margin-bottom:8px">
           <div class="muted" style="font-size:var(--fs-xs); margin:4px 0">{{ g.year }}</div>
-          <div v-for="ev in g.items" :key="ev.id" class="seg">
+          <!-- 重要度视觉分层（P7）：左侧 accent 竖条(重大≥0.8)+透明度淡显(日常<0.6)映射人生分量，
+               纯视觉不暴露数值；hover title 才给数值（见 app.js eventRowStyle） -->
+          <div v-for="ev in g.items" :key="ev.id" class="seg" :style="eventRowStyle(ev)"
+               :title="'重要度 ' + (typeof ev.importance === 'number' ? ev.importance.toFixed(1) : '—')">
             <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ ev.event_type }}</span>
             <div class="seg-text">
               <div>
@@ -1191,14 +1194,19 @@
           <input class="txt" v-model="addEventForm.occurred_at" type="date" title="发生日期" style="width:auto; min-width:130px">
           <input class="txt" v-model="addEventForm.end_at" type="date" title="结束日期（旅行/会议等跨天事件）" style="width:auto; min-width:130px">
           <input class="txt" v-model="addEventForm.location" placeholder="地点（可空）" style="flex:1; min-width:100px">
-          <select class="txt" v-model="addEventForm.related_person_id" style="min-width:120px" title="同场主要人物">
-            <option value="">（同行人物，可空）</option>
+          <select class="txt" v-model="addEventForm.related_person_ids" multiple size="3" style="min-width:140px"
+                  title="同行人物，可多选（按住 Ctrl / ⌘ 点选多个）">
             <option v-for="p in persons.filter(x => x.id !== personDetail.person.id)" :key="p.id" :value="p.id">{{ p.display_name }}</option>
           </select>
+          <!-- 重要度三档（P7）：语义档位比数字更贴近「人生分量」；选中样式照 METRIC_KEYS 切换按钮 -->
+          <span class="muted" style="font-size:var(--fs-xs)">重要度</span>
+          <button v-for="lv in EVENT_IMPORTANCE_LEVELS" :key="lv.value" type="button" class="btn mini"
+                  :style="addEventForm.importance === lv.value ? { background:'var(--accent)', color:'#fff', borderColor:'var(--accent)' } : {}"
+                  @click="addEventForm.importance = lv.value">{{ lv.label }}</button>
           <button class="btn primary" :disabled="addingEvent" @click="submitAddEvent">{{ addingEvent ? '保存中…' : '保存' }}</button>
         </div>
         <input class="txt" v-model="addEventForm.description" placeholder="细节（可空）" style="width:100%; margin-top:8px">
-        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；日期可选，只知道大概时间可留空。</div>
+        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；同行人物可多选；日期可选，只知道大概时间可留空。</div>
       </div>
 
       <!-- 加属性表单 -->
@@ -1617,6 +1625,6 @@
   </div>
 </div>
 
-<script src="/app/app.a58a0498.js"></script>
+<script src="/app/app.a818fad7.js"></script>
 </body>
 </html>
