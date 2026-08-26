@@ -63,6 +63,14 @@ func main() {
 	todoTopics := &repo.TodoTopicRepo{DB: db}
 	speakers := &repo.SpeakerRepo{DB: db}
 	nameCandidates := &repo.SpeakerNameCandidateRepo{DB: db}
+	speakerEmbeddings := &repo.SpeakerEmbeddingRepo{DB: db}
+	// 多条声纹回填：既有 speaker.embedding（单向量时代）幂等物化成首条样本行
+	// （幂等，见 repo.EnsureSpeakerEmbeddingBootstrap；迁移 000012 的 Go 侧回填）
+	if n, err := speakerEmbeddings.EnsureSpeakerEmbeddingBootstrap(context.Background()); err != nil {
+		log.Fatal("声纹样本 bootstrap 失败: ", err)
+	} else if n > 0 {
+		log.Printf("[speaker] 声纹样本回填 %d 条（speaker.embedding → 首条样本）", n)
+	}
 
 	persons := &repo.PersonRepo{DB: db}
 	personAttrs := &repo.PersonAttributeRepo{DB: db}
@@ -154,6 +162,7 @@ func main() {
 		ExtractWindow: cfg.ExtractWindow,
 		Gate:          memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
 		Voiceprint:    voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
+		SpeakerEmbeddings:     speakerEmbeddings,
 		NameInferPrompt:       string(nameInferBytes),
 		SpeakerNameCandidates: nameCandidates,
 		NameInferWindowMin:    cfg.NameInferWindowMin,
@@ -189,6 +198,7 @@ func main() {
 	api.RegisterSpeaker(r, &api.SpeakerHandler{
 		Speakers: speakers, Transcripts: transcripts,
 		Voiceprint: voiceprintCli, DataDir: cfg.DataDir,
+		SpeakerEmbeddings:     speakerEmbeddings,
 		EnrollMinDurationMS:   cfg.EnrollMinDurationMS,
 		VoiceprintThreshold:   cfg.VoiceprintThreshold,
 		SpeakerNameCandidates: nameCandidates,

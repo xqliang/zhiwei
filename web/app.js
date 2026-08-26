@@ -57,8 +57,7 @@ const app = createApp({
       return text ? JSON.parse(text) : null;
     }
     function showError(e) {
-      toast.value = (e && e.message) || String(e);
-      setTimeout(() => { toast.value = ''; }, 3000);
+      notify((e && e.message) || String(e),3000);
     }
     function typeMeta(t) { return TYPE_META[t] || { label: t, color: '#6b7280' }; }
     function statusText(status, stage) {
@@ -341,7 +340,7 @@ const app = createApp({
     async function createTopic() {
       if (creating.value) return; // 防重复提交
       if (!newTopic.value.name.trim()) {
-        toast.value = '请输入主题名称'; setTimeout(() => { toast.value = ''; }, 2000);
+        notify('请输入主题名称', 2000);
         return;
       }
       creating.value = true; // 即时反馈：按钮变「创建中…」+ spinner
@@ -354,7 +353,7 @@ const app = createApp({
         newTopic.value = { name: '', description: '' };
         showNewTopic.value = false;
         await loadTopics();
-        toast.value = '主题已创建'; setTimeout(() => { toast.value = ''; }, 2000);
+        notify('主题已创建', 2000);
       } catch (e) { showError(e); }
       finally { creating.value = false; }
     }
@@ -418,8 +417,7 @@ const app = createApp({
         }));
         if (!merges.length && !adjustments.length) {
           // 无可整理项：只 toast 提示（3s 自动消失），不弹「确认整理」面板
-          toast.value = '暂无需要整理的记忆';
-          setTimeout(() => { toast.value = ''; }, 3000);
+          notify('暂无需要整理的记忆',3000);
           return;
         }
         memoryDraft.value = { merges, adjustments };
@@ -469,8 +467,7 @@ const app = createApp({
         }));
         if (!groups.length) {
           // 无可合并组：只 toast 提示（3s 自动消失），不弹「确认合并」面板
-          toast.value = '暂无需要合并的主题';
-          setTimeout(() => { toast.value = ''; }, 3000);
+          notify('暂无需要合并的主题',3000);
           return;
         }
         mergeDraft.value = groups;
@@ -514,9 +511,9 @@ const app = createApp({
     }
     async function applyManualMerge() {
       const ids = manualSelected.value.slice();
-      if (ids.length < 2) { toast.value = '至少选 2 个主题'; return; }
+      if (ids.length < 2) { notify('至少选 2 个主题'); return; }
       const name = manualMergeName.value.trim();
-      if (!name) { toast.value = '请输入规范名'; return; }
+      if (!name) { notify('请输入规范名'); return; }
       try {
         await api('POST', '/api/topics/merge', { groups: [{ canonical_name: name, member_ids: ids }] });
         cancelManualMerge();
@@ -718,7 +715,7 @@ const app = createApp({
         await api('PATCH', '/api/sessions/' + s.id + '/transcript', { segments: [{ id: sg.id, text }] });
         delete segDraft.value[sg.id];
         await reloadSession(s.id);
-        toast.value = '转写已保存'; setTimeout(() => { toast.value = ''; }, 2000);
+        notify('转写已保存', 2000);
       } catch (e) { showError(e); }
     }
     const segDirty = computed(() => Object.keys(segDraft.value).length > 0);
@@ -786,7 +783,7 @@ const app = createApp({
         await api('POST', '/api/sessions/' + s.id + '/segments/merge', { segment_ids: ids, speaker_id: mergeTarget.value });
         cancelMerge();
         await reloadSession(s.id);
-        toast.value = '已合并 ' + ids.length + ' 段为一条'; setTimeout(() => { toast.value = ''; }, 2000);
+        notify('已合并 ' + ids.length + ' 段为一条', 2000);
       } catch (e) { showError(e); }
     }
 
@@ -807,7 +804,7 @@ const app = createApp({
         cancelSegEnroll();
         await loadAllSpeakers(); // 新说话人立即可在换人下拉选到
         await reloadSession(s.id);
-        toast.value = '已从该段录入说话人'; setTimeout(() => { toast.value = ''; }, 2000);
+        notify('已从该段录入说话人', 2000);
       } catch (e) { showError(e); }
     }
 
@@ -819,7 +816,7 @@ const app = createApp({
         await api('PATCH', '/api/sessions/' + s.id + '/transcript', { segments: segs });
         segDraft.value = {};
         await reloadSession(s.id);
-        toast.value = '转写已保存'; setTimeout(() => { toast.value = ''; }, 2000);
+        notify('转写已保存', 2000);
       } catch (e) { showError(e); }
     }
 
@@ -900,7 +897,7 @@ const app = createApp({
         await loadAllSpeakers();
         enrollOpen.value = false;     // 时间线面板的录入表单
         showEnrollForm.value = false; // 声纹 tab 的录入表单（两处共用 submitEnroll，成功后一并收起）
-        toast.value = '已录入说话人'; setTimeout(() => { toast.value = ''; }, 2000);
+        notify('已录入说话人', 2000);
       } catch (e) { showError(e); }
       finally { enrolling.value = false; }
     }
@@ -908,6 +905,60 @@ const app = createApp({
     // 说话人对象有两种来源：时间线面板的 detail.speakers 用 speaker_id 字段；声纹 tab 的 allSpeakers 用 id 字段。
     // 用 `sp.speaker_id || sp.id` 兼容两者（两者都是同一个 speaker 主键，只是响应结构里的字段名不同）。
     function startRenameSpeaker(sp) { renamingSpeaker.value = { id: sp.speaker_id || sp.id, name: sp.name }; }
+
+    // ---------- 多条声纹样本（一个人可录多条；合并说话人时累加不覆盖） ----------
+    const addEmbNotes = reactive({});       // speakerId → 追加备注草稿（可空）
+    const addEmbTargetId = ref(null);       // 点「＋ 追加声纹」的目标说话人
+    const addingEmbId = ref(null);          // 正在上传追加样本的说话人（按钮显 loading）
+    const editingEmbNote = ref(null);       // { id, note }：正在改备注的样本
+    const deletingEmbId = ref(null);        // 待确认删除的样本 id
+    const embFileInput = ref(null);         // 隐藏的文件选择器（共用，点按目标唤起）
+    function embSourceText(s) {
+      return { manual: '手动录', auto: '自动登记', merge: '合并迁入' }[s] || s;
+    }
+    // 追加声纹：点按钮 → 记目标说话人 → 唤起文件选择；选完即上传（multipart file+note）。
+    // 后端聚合重算代表向量（全部样本均值）并更新 FAISS，成功后重拉名册刷新样本列表。
+    function triggerAddEmb(sp) {
+      if (addingEmbId.value) return; // 上传中防重复
+      addEmbTargetId.value = sp.id;
+      if (embFileInput.value) { embFileInput.value.value = ''; embFileInput.value.click(); }
+    }
+    async function onAddEmbFile(ev) {
+      const file = ev.target.files && ev.target.files[0];
+      const spId = addEmbTargetId.value;
+      if (!file || !spId) return;
+      addingEmbId.value = spId;
+      const fd = new FormData();
+      fd.append('file', file);
+      const note = (addEmbNotes[spId] || '').trim();
+      if (note) fd.append('note', note);
+      try {
+        await api('POST', '/api/speakers/' + spId + '/embeddings', fd);
+        addEmbNotes[spId] = '';
+        await loadAllSpeakers();
+        notify('声纹已追加，代表向量已重算', 2000);
+      } catch (e) { showError(e); }
+      finally { addingEmbId.value = null; }
+    }
+    function startEditEmbNote(e) { editingEmbNote.value = { id: e.id, note: e.note || '' }; }
+    async function commitEmbNote(sp, e) {
+      const ed = editingEmbNote.value;
+      editingEmbNote.value = null;
+      if (!ed || !sp || !e) return;
+      try {
+        await api('PATCH', '/api/speakers/' + sp.id + '/embeddings/' + e.id, { note: ed.note });
+        await loadAllSpeakers();
+      } catch (err) { showError(err); }
+    }
+    async function confirmDeleteEmb(sp, e) {
+      deletingEmbId.value = null;
+      if (!sp || !e) return;
+      try {
+        await api('DELETE', '/api/speakers/' + sp.id + '/embeddings/' + e.id);
+        await loadAllSpeakers();
+        notify('已删除该条声纹，代表向量已重算', 2000);
+      } catch (err) { showError(err); }
+    }
 
     // ---------- 切换声纹（识别错时的一键批量改判） ----------
     // 把本会话内某说话人的全部段一键改判给目标声纹（后端按 transcript 作用域批量 UPDATE，
@@ -1041,7 +1092,7 @@ const app = createApp({
     async function createPerson() {
       if (creatingPerson.value) return;
       const name = newPerson.value.display_name.trim();
-      if (!name) { toast.value = '请输入姓名'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      if (!name) { notify('请输入姓名', 2000); return; }
       creatingPerson.value = true;
       try {
         // speaker_id 可空（只被提到、没录音的人也能建档）；后端校验声纹冲突返回 409。
@@ -1054,7 +1105,7 @@ const app = createApp({
         await api('POST', '/api/persons', body);
         cancelNewPerson();
         await loadPersons();
-        toast.value = '人物已创建'; setTimeout(() => { toast.value = ''; }, 2000);
+        notify('人物已创建', 2000);
       } catch (e) { showError(e); }
       finally { creatingPerson.value = false; }
     }
@@ -1139,7 +1190,7 @@ const app = createApp({
         await api('PATCH', '/api/persons/' + p.id, { status: 'active' });
         await loadPersons();
         await loadDeletedPersons();
-        toast.value = '人物已恢复'; setTimeout(() => { toast.value = ''; }, 2000);
+        notify('人物已恢复', 2000);
       } catch (e) { showError(e); }
     }
     // epistemic_type（认知来源）→ 中文标签，属性徽标用。
@@ -1194,7 +1245,7 @@ const app = createApp({
     async function submitAddAttr() {
       if (addingAttr.value) return;
       const key = addAttrForm.attr_key.trim(), val = addAttrForm.value.trim();
-      if (!key || !val) { toast.value = 'key 与值必填'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      if (!key || !val) { notify('key 与值必填', 2000); return; }
       addingAttr.value = true;
       try {
         await api('POST', '/api/persons/' + personDetail.value.person.id + '/attributes', { attr_key: key, value: val });
@@ -1262,7 +1313,7 @@ const app = createApp({
     async function submitAddRel() {
       if (addingRel.value) return;
       const rt = addRelForm.relation_type;
-      if (!rt) { toast.value = '请选择关系类型'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      if (!rt) { notify('请选择关系类型', 2000); return; }
       addingRel.value = true;
       try {
         const body = { relation_type: rt };
@@ -1365,8 +1416,8 @@ const app = createApp({
       if (addingEvent.value) return;
       const et = addEventForm.event_type;
       const title = addEventForm.title.trim();
-      if (!et) { toast.value = '请选择事件类型'; setTimeout(() => { toast.value = ''; }, 2000); return; }
-      if (!title) { toast.value = '请输入标题'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      if (!et) { notify('请选择事件类型', 2000); return; }
+      if (!title) { notify('请输入标题', 2000); return; }
       addingEvent.value = true;
       try {
         // 日期用 <input type="date"> 的 YYYY-MM-DD；可选字段仅非空才传（后端 parseEventAt 尽力解析）
@@ -1444,7 +1495,7 @@ const app = createApp({
     async function submitAddMetric() {
       if (addingMetric.value) return;
       const v = addMetricForm.value.trim();
-      if (!v) { toast.value = metricIsNumeric.value ? '请输入数值' : '请输入内容'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      if (!v) { notify(metricIsNumeric.value ? '请输入数值' : '请输入内容', 2000); return; }
       addingMetric.value = true;
       try {
         const body = { metric_key: metricKey.value, value: v };
@@ -1564,7 +1615,7 @@ const app = createApp({
     async function submitAddCycle() {
       if (addingCycle.value) return;
       const ct = addCycleForm.cycle_type;
-      if (!ct) { toast.value = '请选择周期类型'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      if (!ct) { notify('请选择周期类型', 2000); return; }
       addingCycle.value = true;
       try {
         const body = { cycle_type: ct };
@@ -1628,7 +1679,7 @@ const app = createApp({
     async function submitAddActivity() {
       if (addingActivity.value) return;
       const act = addActivityForm.activity.trim();
-      if (!act) { toast.value = '请输入活动'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      if (!act) { notify('请输入活动', 2000); return; }
       addingActivity.value = true;
       try {
         // 可选字段非空才发（后端 trim 空→NULL）；duration_min 表单是字符串，Number() 转数字。
@@ -1853,17 +1904,17 @@ const app = createApp({
       spMergeTarget.value = spMergeSelected.value[0] || null;
     }
     async function applySpMerge() {
-      if (spMergeSelected.value.length < 2) { toast.value = '至少选 2 个说话人'; return; }
-      if (!spMergeTarget.value) { toast.value = '请选择保留的目标说话人'; return; }
+      if (spMergeSelected.value.length < 2) { notify('至少选 2 个说话人'); return; }
+      if (!spMergeTarget.value) { notify('请选择保留的目标说话人'); return; }
       const sources = spMergeSelected.value.filter(id => id !== spMergeTarget.value);
-      if (!sources.length) { toast.value = '目标之外还需至少 1 个源'; return; }
+      if (!sources.length) { notify('目标之外还需至少 1 个源'); return; }
       try {
         await api('POST', '/api/speakers/merge', { source_ids: sources, target_id: spMergeTarget.value });
         cancelSpMerge();
         await loadAllSpeakers();
         // 合并影响当前展开会话的说话人/段 → 重拉同步（声纹 tab 无展开会话则 detail 为空，跳过）
         if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
-        toast.value = '已合并 ' + sources.length + ' 个说话人到目标'; setTimeout(() => { toast.value = ''; }, 2000);
+        notify('已合并 ' + sources.length + ' 个说话人到目标', 2000);
       } catch (e) { showError(e); }
     }
 
@@ -1885,7 +1936,7 @@ const app = createApp({
       reextractingIds.add(s.id);
       try {
         await api('POST', '/api/sessions/' + s.id + '/reextract', {});
-        toast.value = '正在重新提取…';
+        notify('正在重新提取…');
         const poll = async () => {
           let st = '', err = '';
           try {
@@ -1896,14 +1947,13 @@ const app = createApp({
           if (st === 'done' || st === 'completed') {
             reextractingIds.delete(s.id);
             reextractTimers.delete(s.id);
-            toast.value = '重新提取完成'; setTimeout(() => { toast.value = ''; }, 2500);
+            notify('重新提取完成', 2500);
             await loadSessions();
             if (expandedId.value === s.id) await reloadSession(s.id);
           } else if (st === 'failed') {
             reextractingIds.delete(s.id);
             reextractTimers.delete(s.id);
-            toast.value = '重新提取失败' + (err ? '：' + err : '');
-            setTimeout(() => { toast.value = ''; }, 4000);
+            notify('重新提取失败' + (err ? '：' + err : ''),4000);
           } else {
             reextractTimers.set(s.id, setTimeout(poll, 2000));
           }
@@ -1928,7 +1978,7 @@ const app = createApp({
       reidentifyingIds.add(s.id);
       try {
         await api('POST', '/api/sessions/' + s.id + '/reidentify', {});
-        toast.value = '正在重新识别说话人…';
+        notify('正在重新识别说话人…');
         const poll = async () => {
           let st = '', err = '';
           try {
@@ -1939,14 +1989,13 @@ const app = createApp({
           if (st === 'done' || st === 'completed') {
             reidentifyingIds.delete(s.id);
             reidentifyTimers.delete(s.id);
-            toast.value = '重新识别完成'; setTimeout(() => { toast.value = ''; }, 2500);
+            notify('重新识别完成', 2500);
             await loadSessions();
             if (expandedId.value === s.id) await reloadSession(s.id);
           } else if (st === 'failed') {
             reidentifyingIds.delete(s.id);
             reidentifyTimers.delete(s.id);
-            toast.value = '重新识别失败' + (err ? '：' + err : '');
-            setTimeout(() => { toast.value = ''; }, 4000);
+            notify('重新识别失败' + (err ? '：' + err : ''),4000);
           } else {
             reidentifyTimers.set(s.id, setTimeout(poll, 2000));
           }
@@ -2014,6 +2063,8 @@ const app = createApp({
       speakerColor, segSpeakerBg, toggleSpeakerFilter, openEnroll, onEnrollDrop, submitEnroll, loadAllSpeakers,
       startEnrollRec, stopEnrollRec, enrollRecording, enrollRecSeconds, enrollPromptText,
       startRenameSpeaker, commitRenameSpeaker, askDeleteSpeaker, reassignSegment,
+      addEmbNotes, addingEmbId, editingEmbNote, deletingEmbId, embFileInput, embSourceText,
+      triggerAddEmb, onAddEmbFile, startEditEmbNote, commitEmbNote, confirmDeleteEmb,
       switchingSpeaker, switchTarget, switchSegCount, startSwitchSpeaker, cancelSwitchSpeaker, commitSwitchSpeaker,
       hasNameCandidates, acceptNameCandidate, dismissNameCandidate,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
