@@ -202,7 +202,8 @@ func main() {
 	})
 	api.RegisterPerson(r, &api.PersonHandler{
 		Persons: persons, Attributes: personAttrs, Relationships: personRels,
-		Events: personEvents, ChangeLogs: personLogs, Service: profileSvc,
+		Events: personEvents, Metrics: personMetrics, Cycles: personCycles,
+		ChangeLogs: personLogs, Service: profileSvc,
 	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}

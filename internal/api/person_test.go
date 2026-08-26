@@ -45,8 +45,9 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 		Memories: &repo.MemoryRepo{DB: db}, Speakers: &repo.SpeakerRepo{DB: db},
 		Persons: &repo.PersonRepo{DB: db}, Attributes: &repo.PersonAttributeRepo{DB: db},
 		Relationships: &repo.PersonRelationshipRepo{DB: db}, ChangeLogs: &repo.PersonChangeLogRepo{DB: db},
-		Events: &repo.PersonEventRepo{DB: db},
-		LLM:    &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
+		Events:  &repo.PersonEventRepo{DB: db},
+		Metrics: &repo.PersonMetricRepo{DB: db}, Cycles: &repo.PersonCycleRepo{DB: db},
+		LLM: &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
 		Gate: profile.GateConfig{AutoConf: 0.75},
 	}
 	if err := repo.EnsurePersonBootstrap(context.Background(), svc.Persons, svc.Speakers); err != nil {
@@ -56,7 +57,7 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 	RegisterPerson(r, &PersonHandler{
 		Persons: svc.Persons, Attributes: svc.Attributes,
 		Relationships: svc.Relationships, ChangeLogs: svc.ChangeLogs,
-		Events: svc.Events, Service: svc,
+		Events: svc.Events, Metrics: svc.Metrics, Cycles: svc.Cycles, Service: svc,
 	})
 	return r, svc
 }
@@ -477,6 +478,202 @@ func TestPersonEventAPI(t *testing.T) {
 		t.Fatalf("删除失败: %d", rec.Code)
 	}
 	if d, _ := svc.Events.Get(ctx, ev.ID); d.Status != "dismissed" {
+		t.Fatalf("删除后应 dismissed: %+v", d)
+	}
+}
+
+// TestPersonMetricAPI 覆盖时序指标 API 全链路：手动加测点（数值型 value_num/value_text 双存）、
+// metric_key 枚举校验、空值校验、时间窗查询（半开区间 [from,to) + from 烂串 400）、确认队列含
+// metric 条目并 HTTP 确认、删除转 dismissed。跨包非自隔离：t.Cleanup 删掉 owner 的 person_metric
+// 行 + entity_kind='metric' 审计行，防污染 profile 包同库断言。
+func TestPersonMetricAPI(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+	t.Cleanup(func() {
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_metric WHERE person_id = ?", owner.ID.Int64())
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'metric'", owner.ID.Int64())
+	})
+
+	// 手动加测点（数值型：value_num 数值副本 + value_text fmt 串双存）
+	rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/metrics",
+		map[string]any{"metric_key": "weight", "value": "72.5", "unit": "kg", "measured_at": "2026-08-20"})
+	if rec.Code != 200 {
+		t.Fatalf("加测点失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var m repo.PersonMetric
+	_ = json.Unmarshal(rec.Body.Bytes(), &m)
+	if m.Status != "active" || m.Source != "manual" {
+		t.Fatalf("手动测点错误: %+v", m)
+	}
+	if m.ValueNum == nil || *m.ValueNum != 72.5 {
+		t.Fatalf("value_num 应为 72.5: %v", m.ValueNum)
+	}
+	if m.ValueText == nil || *m.ValueText != "72.5" {
+		t.Fatalf("value_text 应为 \"72.5\": %v", m.ValueText)
+	}
+
+	// 非法 metric_key → 400
+	if rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/metrics",
+		map[string]any{"metric_key": "身高", "value": "180"}); rec.Code != 400 {
+		t.Fatalf("非法 metric_key 应 400: %d", rec.Code)
+	}
+	// 空 value → 400（handler 层校验，非 Service 500）
+	if rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/metrics",
+		map[string]any{"metric_key": "weight", "value": "  "}); rec.Code != 400 {
+		t.Fatalf("空 value 应 400: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 时间窗查询：半开区间 [2026-08-20, 2026-08-21) 命中 08-20 测点 → 1 条
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/metrics?metric_key=weight&from=2026-08-20&to=2026-08-21", nil)
+	if rec.Code != 200 {
+		t.Fatalf("查询失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var listR struct {
+		Metrics []repo.PersonMetric `json:"metrics"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if len(listR.Metrics) != 1 {
+		t.Fatalf("时间窗应命中 1 条: %d", len(listR.Metrics))
+	}
+	// from 烂串 → 400
+	if rec := doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/metrics?from=abc", nil); rec.Code != 400 {
+		t.Fatalf("from 烂串应 400: %d", rec.Code)
+	}
+
+	// 造一条 pending（低置信 0.5<0.75）→ 队列含 metric 条目 → HTTP 确认 → active
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []profile.Fact{
+		{Plane: "metric", Subject: profile.Subject{Kind: "self"}, MetricKey: "weight",
+			MetricValue: "80.5", MeasuredAt: "2026-08-22", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = doReq(t, h, "GET", "/api/profile/pending", nil)
+	var pend struct {
+		Items []map[string]any `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pend)
+	var mItemID string
+	for _, it := range pend.Items {
+		if it["kind"] == "metric" && it["value"] == "80.5" {
+			mItemID, _ = it["id"].(string)
+		}
+	}
+	if mItemID == "" {
+		t.Fatalf("队列缺 metric 条目: %+v", pend.Items)
+	}
+	if rec := doReq(t, h, "POST", "/api/profile/pending/metric/"+mItemID+"/confirm", nil); rec.Code != 200 {
+		t.Fatalf("测点确认失败: %d %s", rec.Code, rec.Body.String())
+	}
+	mid2, _ := ids.ParseID(mItemID)
+	if got, _ := svc.Metrics.Get(ctx, mid2); got == nil || got.Status != "active" {
+		t.Fatalf("确认后应 active: %+v", got)
+	}
+
+	// 删除不存在的测点（合法 id 但库中无此行）→ 404
+	if rec := doReq(t, h, "DELETE", "/api/persons/"+owner.ID.String()+"/metrics/"+ids.New().String(), nil); rec.Code != 404 {
+		t.Fatalf("删除不存在测点应 404: %d %s", rec.Code, rec.Body.String())
+	}
+	// 删除测点 → dismissed
+	if rec := doReq(t, h, "DELETE", "/api/persons/"+owner.ID.String()+"/metrics/"+m.ID.String(), nil); rec.Code != 200 {
+		t.Fatalf("删除失败: %d", rec.Code)
+	}
+	if d, _ := svc.Metrics.Get(ctx, m.ID); d == nil || d.Status != "dismissed" {
+		t.Fatalf("删除后应 dismissed: %+v", d)
+	}
+}
+
+// TestPersonCycleAPI 覆盖周期/日程 API 全链路：手动加周期（anchor+period 算 next_predicted_at）、
+// cycle_type 枚举校验、列表带 note 免责文案（spec §9）、确认队列含 cycle 条目并 HTTP 确认、
+// 删除转 dismissed。跨包非自隔离：t.Cleanup 删掉 owner 的 person_cycle 行 + entity_kind='cycle'
+// 审计行，防污染 profile 包同库断言。
+func TestPersonCycleAPI(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+	t.Cleanup(func() {
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_cycle WHERE person_id = ?", owner.ID.Int64())
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'cycle'", owner.ID.Int64())
+	})
+
+	// 手动加周期（medication + anchor 2026-08-01 + period 30 → next_predicted_at = 08-31）
+	rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/cycles",
+		map[string]any{"cycle_type": "medication", "label": "API 测试-降压药",
+			"anchor_date": "2026-08-01", "period_days": 30, "dosage": "5mg", "frequency": "每日一次"})
+	if rec.Code != 200 {
+		t.Fatalf("加周期失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var c repo.PersonCycle
+	_ = json.Unmarshal(rec.Body.Bytes(), &c)
+	if c.Status != "active" || c.Source != "manual" {
+		t.Fatalf("手动周期错误: %+v", c)
+	}
+	// anchor 2026-08-01 + period 30 天 = 2026-08-31（估算非医疗建议）
+	if c.NextPredictedAt == nil || c.NextPredictedAt.Format("2006-01-02") != "2026-08-31" {
+		t.Fatalf("next_predicted_at 应为 2026-08-31: %v", c.NextPredictedAt)
+	}
+
+	// 非法 cycle_type → 400
+	if rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/cycles",
+		map[string]any{"cycle_type": "健身"}); rec.Code != 400 {
+		t.Fatalf("非法 cycle_type 应 400: %d", rec.Code)
+	}
+
+	// 列表带 note 免责文案（spec §9）
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/cycles", nil)
+	if rec.Code != 200 {
+		t.Fatalf("列表失败: %d", rec.Code)
+	}
+	var listR struct {
+		Cycles []repo.PersonCycle `json:"cycles"`
+		Note   string             `json:"note"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if listR.Note == "" {
+		t.Fatal("cycles 响应应含 note 免责文案")
+	}
+	if len(listR.Cycles) < 1 {
+		t.Fatalf("列表应含 1 条: %d", len(listR.Cycles))
+	}
+
+	// 造一条 pending（低置信、不同 type/label 避免撞上面 active 的冲突路径）→ 队列含 cycle → 确认
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []profile.Fact{
+		{Plane: "cycle", Subject: profile.Subject{Kind: "self"}, CycleType: "followup",
+			CycleLabel: "API 测试-复诊", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = doReq(t, h, "GET", "/api/profile/pending", nil)
+	var pend struct {
+		Items []map[string]any `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pend)
+	var cItemID string
+	for _, it := range pend.Items {
+		if it["kind"] == "cycle" && it["cycle_type"] == "followup" {
+			cItemID, _ = it["id"].(string)
+		}
+	}
+	if cItemID == "" {
+		t.Fatalf("队列缺 cycle 条目: %+v", pend.Items)
+	}
+	if rec := doReq(t, h, "POST", "/api/profile/pending/cycle/"+cItemID+"/confirm", nil); rec.Code != 200 {
+		t.Fatalf("周期确认失败: %d %s", rec.Code, rec.Body.String())
+	}
+	cid2, _ := ids.ParseID(cItemID)
+	if got, _ := svc.Cycles.Get(ctx, cid2); got == nil || got.Status != "active" {
+		t.Fatalf("确认后应 active: %+v", got)
+	}
+
+	// 删除不存在的周期 → 404
+	if rec := doReq(t, h, "DELETE", "/api/persons/"+owner.ID.String()+"/cycles/"+ids.New().String(), nil); rec.Code != 404 {
+		t.Fatalf("删除不存在周期应 404: %d %s", rec.Code, rec.Body.String())
+	}
+	// 删除周期 → dismissed
+	if rec := doReq(t, h, "DELETE", "/api/persons/"+owner.ID.String()+"/cycles/"+c.ID.String(), nil); rec.Code != 200 {
+		t.Fatalf("删除失败: %d", rec.Code)
+	}
+	if d, _ := svc.Cycles.Get(ctx, c.ID); d == nil || d.Status != "dismissed" {
 		t.Fatalf("删除后应 dismissed: %+v", d)
 	}
 }

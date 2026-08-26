@@ -260,3 +260,124 @@ func TestConfirmEvent(t *testing.T) {
 		t.Fatal("非法 kind 应报错")
 	}
 }
+
+// TestConfirmMetricCycle 覆盖 metric/cycle 平面的确认队列后端：造 pending（低置信 LLM 路径）
+// → 确认转 active（cycle 无冲突现值故不带 supersedes）；再造一条 → 放弃转 dismissed。
+// metric 无 supersedes（独立采样）、cycle 有 supersedes（单值语义）——本用例覆盖无冲突路径。
+// 跨包非自隔离：t.Cleanup 删掉 owner 的 person_metric/person_cycle 行 + 对应审计行。
+func TestConfirmMetricCycle(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_metric WHERE person_id = ?", oid.Int64())
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_cycle WHERE person_id = ?", oid.Int64())
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind IN ('metric','cycle')", oid.Int64())
+	})
+
+	// ---- metric：造 pending → 确认 → active ----
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "metric", Subject: Subject{Kind: "self"}, MetricKey: "weight",
+			MetricValue: "70.5", MeasuredAt: "2026-08-20", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metrics, _ := svc.Metrics.ListPending(ctx, 1)
+	var mID ids.ID
+	for _, m := range metrics {
+		if m.MetricKey == "weight" && m.ValueText != nil && *m.ValueText == "70.5" {
+			mID = m.ID
+		}
+	}
+	if mID == 0 {
+		t.Fatal("pending metric 未生成")
+	}
+	if err := svc.ConfirmPending(ctx, "metric", mID); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := svc.Metrics.Get(ctx, mID); m == nil || m.Status != "active" {
+		t.Fatalf("metric 确认后应 active: %+v", m)
+	}
+
+	// metric 放弃 → dismissed
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "metric", Subject: Subject{Kind: "self"}, MetricKey: "emotion",
+			MetricValue: "确认测试-焦虑", MeasuredAt: "2026-08-21", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metrics2, _ := svc.Metrics.ListPending(ctx, 1)
+	var mID2 ids.ID
+	for _, m := range metrics2 {
+		if m.MetricKey == "emotion" {
+			mID2 = m.ID
+		}
+	}
+	if mID2 == 0 {
+		t.Fatal("第二条 pending metric 未生成")
+	}
+	if err := svc.DismissPending(ctx, "metric", mID2); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := svc.Metrics.Get(ctx, mID2); m == nil || m.Status != "dismissed" {
+		t.Fatalf("metric 放弃后应 dismissed: %+v", m)
+	}
+
+	// ---- cycle：造 pending → 确认 → active ----
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "medication",
+			CycleLabel: "确认周期测试-降压药", AnchorDate: "2026-08-01", PeriodDays: 30,
+			Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cycles, _ := svc.Cycles.ListPending(ctx, 1)
+	var cID ids.ID
+	for _, c := range cycles {
+		if c.Label != nil && *c.Label == "确认周期测试-降压药" {
+			cID = c.ID
+		}
+	}
+	if cID == 0 {
+		t.Fatal("pending cycle 未生成")
+	}
+	if err := svc.ConfirmPending(ctx, "cycle", cID); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := svc.Cycles.Get(ctx, cID); c == nil || c.Status != "active" {
+		t.Fatalf("cycle 确认后应 active: %+v", c)
+	}
+
+	// cycle 放弃 → dismissed
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "followup",
+			CycleLabel: "确认周期测试-复诊", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cycles2, _ := svc.Cycles.ListPending(ctx, 1)
+	var cID2 ids.ID
+	for _, c := range cycles2 {
+		if c.Label != nil && *c.Label == "确认周期测试-复诊" {
+			cID2 = c.ID
+		}
+	}
+	if cID2 == 0 {
+		t.Fatal("第二条 pending cycle 未生成")
+	}
+	if err := svc.DismissPending(ctx, "cycle", cID2); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := svc.Cycles.Get(ctx, cID2); c == nil || c.Status != "dismissed" {
+		t.Fatalf("cycle 放弃后应 dismissed: %+v", c)
+	}
+
+	// 非 pending 再确认 → 报错；非法 kind → 报错
+	if err := svc.ConfirmPending(ctx, "metric", mID); err == nil {
+		t.Fatal("非 pending metric 再确认应报错")
+	}
+	if err := svc.ConfirmPending(ctx, "bogus", cID); err == nil {
+		t.Fatal("非法 kind 应报错")
+	}
+}
