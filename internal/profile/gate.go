@@ -121,3 +121,18 @@ func DecideCycle(f Fact, existing *repo.PersonCycle, dedupHit bool, cfg GateConf
 	}
 	return DecisionCreatePending
 }
+
+// DecideActivity 活动闸门：测点流语义（完全对齐 DecideMetric）——无当前值/无冲突/无佐证，
+// 纯置信闸门 + 自然键防重跑。activity 是「某段时间在做的一件事」的采样流：同一活动不同时刻
+// （今早通勤 vs 昨早通勤）是两条独立记录（各自成行），既非佐证也非冲突，故无 existing 分支。
+// 唯一去重是自然键（session,person,activity,tool,location,commute_mode,started_at,duration_min）
+// 防同 session 重跑（dedupHit）。
+func DecideActivity(f Fact, dedupHit bool, cfg GateConfig) Decision {
+	if dedupHit {
+		return DecisionSkip
+	}
+	if autoWritable(f, cfg) {
+		return DecisionCreateActive
+	}
+	return DecisionCreatePending
+}

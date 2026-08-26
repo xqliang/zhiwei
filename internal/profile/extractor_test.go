@@ -247,6 +247,51 @@ func TestExtractorCycleNoCollapse(t *testing.T) {
 	}
 }
 
+// TestExtractorActivityNoCollapse 是 activity 平面 factKey 判别的回归测试（对齐 metric 先例）：
+// 同一窗口内多条 self activity——主体全是 self，仅靠 activity/tool/location/commute_mode/
+// started_at/duration_min 六段判别。activity 是测点流（同活动不同时刻各自成行），关键盯住
+// activity（做什么）与 started_at（何时）两个判别位；全键相同才塌缩（保高置信）。
+func TestExtractorActivityNoCollapse(t *testing.T) {
+	blocks := []memory.Block{
+		{SpeakerLabel: "我", Text: "今早坐地铁通勤，上午写代码，昨天也坐地铁通勤", SegmentIDs: []ids.ID{801}},
+	}
+	// 四条 self activity，逐位盯住判别键：
+	//   通勤·地铁·8-20 vs 写代码·电脑·8-20     —— activity 不同（钉 activity 判别位）
+	//   通勤·地铁·8-20 vs 通勤·地铁·8-19       —— 同活动不同 started_at（钉时间判别位：两次通勤不塌缩）
+	//   通勤·地铁·8-20(conf .9) vs 通勤·地铁·8-20(conf .6) —— 全键相同：**应塌缩**，高置信(.9)胜出
+	resp := `{"facts":[
+		{"plane":"activity","subject":{"kind":"self"},"activity":"通勤","commute_mode":"地铁",
+		 "started_at":"2026-08-20","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"activity","subject":{"kind":"self"},"activity":"写代码","tool":"电脑",
+		 "started_at":"2026-08-20","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"activity","subject":{"kind":"self"},"activity":"通勤","commute_mode":"地铁",
+		 "started_at":"2026-08-19","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"activity","subject":{"kind":"self"},"activity":"通勤","commute_mode":"地铁",
+		 "started_at":"2026-08-20","confidence":0.6,"epistemic_type":"observed","block_index":1}
+	]}`
+	ex := &Extractor{LLM: &fakeLLM{resps: []string{resp}}, Model: "m", Prompt: "s", Window: 10}
+	facts, err := ex.Extract(context.Background(), blocks, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 通勤·8-20 两条(仅 conf 不同)塌缩成 1，加写代码、通勤·8-19 → 共 3 条
+	if len(facts) != 3 {
+		t.Fatalf("activity 应 3 条(通勤 8-20 塌缩、写代码/通勤 8-19 各留): %+v", facts)
+	}
+	// 存活的通勤·8-20 须是高置信那条(conf .9)——证明全键相同时高置信胜出（非「先到的赢」）
+	if facts[0].ActivityText != "通勤" || facts[0].StartedAt != "2026-08-20" || facts[0].Confidence != 0.9 {
+		t.Fatalf("通勤 8-20 应留高置信那条(conf .9): %+v", facts[0])
+	}
+	// 不同 activity 并存——证明 activity 参与判别键
+	if facts[1].ActivityText != "写代码" {
+		t.Fatalf("写代码应独立保留: %+v", facts[1])
+	}
+	// 同 activity 同 commute 不同 started_at 并存——证明 started_at 参与判别键（测点流：两次通勤不塌缩）
+	if facts[2].ActivityText != "通勤" || facts[2].StartedAt != "2026-08-19" {
+		t.Fatalf("通勤 8-19 应独立保留(started_at 判别): %+v", facts[2])
+	}
+}
+
 // TestExtractorInvalidBlockIndex 覆盖 factProvenance 越界兜底：block_index=0 或 >len
 // 时用整个窗口的 segment 并集回填（对照 memory 包同名用例）。
 func TestExtractorInvalidBlockIndex(t *testing.T) {

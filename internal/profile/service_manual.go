@@ -457,3 +457,76 @@ func (s *Service) ManualDeleteCycle(ctx context.Context, id ids.ID) error {
 	}
 	return tx.Commit()
 }
+
+// ---- activity 平面手动 CRUD（P4 生活轨迹，测点流语义）----
+
+// ManualAddActivity 手动加活动（active/manual conf=1.0 + create 审计）。activity trim 非空校验；
+// tool/location/commuteMode trim 空→nil（走 repo <=> NULL 匹配，同 LLM 路径 applyActivityFact）；
+// duration>0 才落（≤0 视为未给，不臆造 0 分钟）；startedAt 解析失败 → time.Now() 兜底：手动录入
+// 没有「对话发生时刻」可依，不知道时间就记当下（区别于 LLM 路径的 sessionTime——那里能用
+// session.created_at）。参数多，调用方为 API handler。
+func (s *Service) ManualAddActivity(ctx context.Context, personID ids.ID, activity, tool, location,
+	commuteMode, startedAt string, durationMin int) (*repo.PersonActivity, error) {
+
+	act := strings.TrimSpace(activity)
+	if act == "" {
+		return nil, fmt.Errorf("activity 不能为空")
+	}
+	at := time.Now()
+	if t, ok := parseEventAt(startedAt); ok {
+		at = t
+	}
+	row := &repo.PersonActivity{
+		PersonID: personID, Activity: act, StartedAt: at,
+		Tool:        trimToPtr(tool),
+		Location:    trimToPtr(location),
+		CommuteMode: trimToPtr(commuteMode),
+		Confidence:  1.0, EpistemicType: "observed", Source: "manual", Status: "active",
+	}
+	if durationMin > 0 {
+		dm := durationMin
+		row.DurationMin = &dm
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Activities.CreateExt(ctx, tx, row); err != nil {
+		return nil, err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "activity", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "user", NewValue: snap(row.Activity),
+		Confidence: fp(1.0),
+	}); err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualDeleteActivity 手动删活动 → dismissed + delete 审计。
+func (s *Service) ManualDeleteActivity(ctx context.Context, id ids.ID) error {
+	a, err := s.Activities.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if a == nil {
+		return ErrNotFound
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Activities.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
+		return err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: a.PersonID, EntityKind: "activity", EntityID: &id,
+		ChangeType: "delete", ChangedBy: "user", OldValue: snap(a.Activity),
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

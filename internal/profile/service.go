@@ -30,9 +30,10 @@ type Service struct {
 	Persons       *repo.PersonRepo
 	Attributes    *repo.PersonAttributeRepo
 	Relationships *repo.PersonRelationshipRepo
-	Events        *repo.PersonEventRepo  // event 平面（P2 大事记）
-	Metrics       *repo.PersonMetricRepo // metric 平面（P3 时序指标）
-	Cycles        *repo.PersonCycleRepo  // cycle 平面（P3 周期/日程，敏感）
+	Events        *repo.PersonEventRepo    // event 平面（P2 大事记）
+	Metrics       *repo.PersonMetricRepo   // metric 平面（P3 时序指标）
+	Cycles        *repo.PersonCycleRepo    // cycle 平面（P3 周期/日程，敏感）
+	Activities    *repo.PersonActivityRepo // activity 平面（P4 生活轨迹，测点流语义）
 	ChangeLogs    *repo.PersonChangeLogRepo
 
 	LLM           provider.LLMProvider // ExtractSession 用（Task 13）；手动 CRUD 不需要
@@ -124,6 +125,9 @@ func (s *Service) applyFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fa
 	}
 	if f.Plane == "metric" {
 		return s.applyMetricFact(ctx, tx, userID, f, personID, memID, prov, sessionTime, st)
+	}
+	if f.Plane == "activity" {
+		return s.applyActivityFact(ctx, tx, userID, f, personID, memID, prov, sessionTime, st)
 	}
 	if f.Plane == "cycle" {
 		return s.applyCycleFact(ctx, tx, userID, f, personID, memID, prov, st)
@@ -364,6 +368,64 @@ func (s *Service) applyMetricFact(ctx context.Context, tx *sqlx.Tx, userID int64
 		return err
 	}
 	if err := s.ChangeLogs.CreateExt(ctx, tx, createMetricLog(personID, row, memID, prov)); err != nil {
+		return err
+	}
+	if status == "active" {
+		st.Active++
+	} else {
+		st.Pending++
+	}
+	return nil
+}
+
+// ---- activity 平面（P4 生活轨迹）----
+
+// applyActivityFact 测点流语义（完全对齐 applyMetricFact）：每条活动独立一行，无当前值/无冲突/
+// 无佐证——纯置信闸门 + 自然键防重跑。started_at 解析链：parseEventAt(f.StartedAt) 成功用之，
+// 失败 → sessionTime（对话发生时即活动时刻，比留 NULL 更符合时间线语义——时间线按时间排布不能
+// 没有锚点，同 metric 的 measured_at）。三个可空串（tool/location/commute_mode）trim 后空串→nil
+// （对齐 cycle label 的 <=> NULL 约定，混用空串与 NULL 会破坏自然键幂等）；duration>0 才落，≤0
+// 视为 LLM 未给→nil（同 cycle period/duration「未给不设」）。
+func (s *Service) applyActivityFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
+	personID ids.ID, memID *ids.ID, prov Provenance, sessionTime time.Time, st *ApplyStats) error {
+
+	// started_at 先定（自然键成分）：解析失败落 sessionTime。
+	startedAt := sessionTime
+	if t, ok := parseEventAt(f.StartedAt); ok {
+		startedAt = t
+	}
+	// activity 恒非空（ParseFacts 已强制），仍取指针——与三个可空串统一走 repo 的 <=> 匹配。
+	activity := strings.TrimSpace(f.ActivityText)
+	tool := trimToPtr(f.Tool)
+	location := trimToPtr(f.Location)
+	commuteMode := trimToPtr(f.CommuteMode)
+	// duration>0 才落，≤0 视为未给（不臆造 0 分钟）。同为自然键成分，nil 走 <=> 命中 IS NULL。
+	var durationMin *int
+	if f.DurationMin > 0 {
+		dm := f.DurationMin
+		durationMin = &dm
+	}
+	dedup, err := s.Activities.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID,
+		&activity, tool, location, commuteMode, startedAt, durationMin)
+	if err != nil {
+		return err
+	}
+
+	dec := DecideActivity(f, dedup != nil, s.Gate)
+	if dec == DecisionSkip {
+		st.Skipped++
+		return nil
+	}
+	// 测点无冲突无佐证，Active/Pending 两路径只差 status（对齐 applyMetricFact 模式）。
+	status := "pending"
+	if dec == DecisionCreateActive {
+		status = "active"
+	}
+	row := activityRow(userID, personID, f, tool, location, commuteMode, durationMin, startedAt, status, memID, prov)
+	if err := s.Activities.CreateExt(ctx, tx, row); err != nil {
+		return err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, createActivityLog(personID, row, memID, prov)); err != nil {
 		return err
 	}
 	if status == "active" {
@@ -757,6 +819,37 @@ func createMetricLog(personID ids.ID, row *repo.PersonMetric, memID *ids.ID, pro
 	}
 }
 
+// ---- activity 平面行与审计构造（P4 生活轨迹，测点流语义，对齐 metricRow/createMetricLog）----
+
+// activityRow 构造一条 person_activity 行。tool/location/commuteMode/durationMin 由调用方
+// （applyActivityFact / ManualAddActivity）trim/判空后传入（空→nil，走 repo 的 <=> NULL 匹配），
+// 此处只负责组装——单点 trim、单点判空，避免散落两处漂移。activity 平面无 SupersedesID
+// （测点流无版本取代语义，见 repo.PersonActivity 顶部说明），故行里不设该字段。
+func activityRow(userID int64, personID ids.ID, f Fact, tool, location, commuteMode *string,
+	durationMin *int, startedAt time.Time, status string, memID *ids.ID, prov Provenance) *repo.PersonActivity {
+	return &repo.PersonActivity{
+		UserID: userID, PersonID: personID,
+		Activity:    strings.TrimSpace(f.ActivityText),
+		Tool:        tool,
+		Location:    location,
+		CommuteMode: commuteMode,
+		StartedAt:   startedAt,
+		DurationMin: durationMin,
+		Confidence:  f.Confidence, EpistemicType: f.EpistemicType,
+		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+}
+
+func createActivityLog(personID ids.ID, row *repo.PersonActivity, memID *ids.ID, prov Provenance) *repo.PersonChangeLog {
+	return &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "activity", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "llm", NewValue: snap(row.Activity),
+		Confidence: fp(row.Confidence), SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+}
+
 func createCycleLog(personID ids.ID, row *repo.PersonCycle, memID *ids.ID, prov Provenance, note string) *repo.PersonChangeLog {
 	l := &repo.PersonChangeLog{
 		PersonID: personID, EntityKind: "cycle", EntityID: &row.ID,
@@ -851,6 +944,16 @@ func snap(v any) *string {
 }
 
 func strPtr(s string) *string { return &s }
+
+// trimToPtr trim 后空串→nil，非空→指向 trim 结果的指针。activity 三个可空串列
+// （tool/location/commute_mode）的 <=> NULL 约定专用——空串与 NULL 混用会破坏自然键幂等，
+// 故统一「空即 NULL」（对齐 cycle label 的 trim→nil 处理）。手动路径 ManualAddActivity 也复用。
+func trimToPtr(s string) *string {
+	if t := strings.TrimSpace(s); t != "" {
+		return &t
+	}
+	return nil
+}
 
 func fp(f float64) *float64 { return &f }
 

@@ -3,6 +3,7 @@ package profile
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"zhiwei/internal/ids"
@@ -101,6 +102,7 @@ func factProvenance(win []memory.Block, idx int) []ids.ID {
 //	event        : subject + event_type + title
 //	metric       : subject + metric_key + metric_value + measured_at（测点流：同键多采样各自成行）
 //	cycle        : subject + cycle_type + cycle_label（镜像 DB 自然键，**不含 anchor**）
+//	activity     : subject + activity + tool + location + commute_mode + started_at + duration_min（测点流：同活动不同时刻各自成行）
 //
 // subjectKey 纳入 Kind/Name/Relation 三段：kind=relation 的指代身份藏在 Relation 里
 // （「我老婆」→ Relation=配偶，Name 空）。若只取 Kind+Name，「我老婆是老师」与「我妈是老师」
@@ -121,6 +123,9 @@ func factKey(f Fact) string {
 		return "metric\x00" + subj + "\x00" + f.MetricKey + "\x00" + f.MetricValue + "\x00" + f.MeasuredAt
 	case "cycle":
 		return "cycle\x00" + subj + "\x00" + f.CycleType + "\x00" + f.CycleLabel
+	case "activity":
+		return "activity\x00" + subj + "\x00" + f.ActivityText + "\x00" + f.Tool + "\x00" +
+			f.Location + "\x00" + f.CommuteMode + "\x00" + f.StartedAt + "\x00" + strconv.Itoa(f.DurationMin)
 	default:
 		return f.Plane + "\x00" + subj + "\x00" + f.AttrKey + f.Value + f.RelationType + f.Related.Name +
 			f.EventType + f.EventTitle + f.MetricKey + f.MetricValue + f.CycleType + f.CycleLabel

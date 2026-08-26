@@ -8,9 +8,9 @@ import (
 	"zhiwei/internal/repo"
 )
 
-// ConfirmPending 确认一条 pending（kind ∈ person|attribute|relationship|event|metric|cycle）：
+// ConfirmPending 确认一条 pending（kind ∈ person|attribute|relationship|event|metric|cycle|activity）：
 // pending → active；attribute/relationship/event/cycle 若带 supersedes_id，被指向的旧行 → superseded
-// （metric 无 supersedes，测点是独立采样、无版本取代语义）。每步变更记审计（changed_by=user）。
+// （metric/activity 无 supersedes，测点/活动是独立记录、无版本取代语义）。每步变更记审计（changed_by=user）。
 // 非 pending 行确认报错（幂等由前端/状态保证）。
 func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) error {
 	tx, err := s.DB.BeginTxx(ctx, nil)
@@ -207,8 +207,31 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 		}); err != nil {
 			return err
 		}
+	case "activity":
+		a, err := s.Activities.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		if a == nil {
+			return ErrNotFound
+		}
+		if a.Status != "pending" {
+			return fmt.Errorf("仅 pending 状态可确认（当前 %s）", a.Status)
+		}
+		// activity 无 supersedes_id（测点流是独立记录，无「新版本取代旧版本」语义，见 repo 说明）——
+		// 故无冲突分支，直接 pending → active + confirm 审计（对齐 metric case）。
+		if err := s.Activities.SetStatusExt(ctx, tx, id, "active"); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: a.PersonID, EntityKind: "activity", EntityID: &id,
+			ChangeType: "confirm", ChangedBy: "user", NewValue: snap(a.Activity),
+			Confidence: fp(a.Confidence),
+		}); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric|cycle）", kind)
+		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric|cycle|activity）", kind)
 	}
 	return tx.Commit()
 }
@@ -330,8 +353,25 @@ func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) er
 		}); err != nil {
 			return err
 		}
+	case "activity":
+		a, err := s.Activities.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		if a == nil {
+			return ErrNotFound
+		}
+		if err := s.Activities.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: a.PersonID, EntityKind: "activity", EntityID: &id,
+			ChangeType: "dismiss", ChangedBy: "user", OldValue: snap(a.Activity),
+		}); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric|cycle）", kind)
+		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric|cycle|activity）", kind)
 	}
 	return tx.Commit()
 }

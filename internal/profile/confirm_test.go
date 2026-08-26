@@ -418,3 +418,70 @@ func TestConfirmMetricCycle(t *testing.T) {
 		t.Fatal("非法 kind 应报错")
 	}
 }
+
+// TestConfirmActivity 覆盖 activity 平面的确认队列后端：造 pending（低置信 LLM 路径）→ 确认转
+// active（activity 无冲突现值、无 supersedes，测点流语义同 metric）；再造一条 → 放弃转 dismissed。
+// 跨包非自隔离：t.Cleanup 删掉 owner 的 person_activity 行 + 对应审计行。
+func TestConfirmActivity(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_activity WHERE person_id = ?", oid.Int64())
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'activity'", oid.Int64())
+	})
+
+	// 造 pending（低置信）→ 确认 → active
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "activity", Subject: Subject{Kind: "self"}, ActivityText: "确认活动测试-写代码",
+			Tool: "电脑", StartedAt: "2026-08-20", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pends, _ := svc.Activities.ListPending(ctx, 1)
+	var aID ids.ID
+	for _, a := range pends {
+		if a.Activity == "确认活动测试-写代码" {
+			aID = a.ID
+		}
+	}
+	if aID == 0 {
+		t.Fatal("pending activity 未生成")
+	}
+	if err := svc.ConfirmPending(ctx, "activity", aID); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := svc.Activities.Get(ctx, aID); a == nil || a.Status != "active" {
+		t.Fatalf("activity 确认后应 active: %+v", a)
+	}
+
+	// 放弃 → dismissed
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "activity", Subject: Subject{Kind: "self"}, ActivityText: "确认活动测试-打球",
+			StartedAt: "2026-08-21", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pends2, _ := svc.Activities.ListPending(ctx, 1)
+	var aID2 ids.ID
+	for _, a := range pends2 {
+		if a.Activity == "确认活动测试-打球" {
+			aID2 = a.ID
+		}
+	}
+	if aID2 == 0 {
+		t.Fatal("第二条 pending activity 未生成")
+	}
+	if err := svc.DismissPending(ctx, "activity", aID2); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := svc.Activities.Get(ctx, aID2); a == nil || a.Status != "dismissed" {
+		t.Fatalf("activity 放弃后应 dismissed: %+v", a)
+	}
+
+	// 非 pending 再确认 → 报错
+	if err := svc.ConfirmPending(ctx, "activity", aID); err == nil {
+		t.Fatal("非 pending activity 再确认应报错")
+	}
+}

@@ -167,3 +167,35 @@ func TestParseFactsCycle(t *testing.T) {
 		t.Fatalf("cycle fact1（空 label 应合法）错误: %+v", f1)
 	}
 }
+
+func TestParseFactsActivity(t *testing.T) {
+	// activity 字段的 json 标签是 "activity"（Go 字段 ActivityText）；location 复用 event 的
+	// json:"location"（Go 字段 Location），一条 fact 非 event 即 activity，不冲突（见 rawFact 注释）。
+	raw := `{"facts":[
+		{"plane":"activity","subject":{"kind":"self"},"activity":" 写代码 ","tool":" 电脑 ",
+		 "location":" 公司 ","started_at":" 2026-08-20 ","duration_min":120,
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"activity","subject":{"kind":"self"},"activity":"通勤","commute_mode":"地铁",
+		 "started_at":"2026-08-20","duration_min":40,"confidence":0.95,"block_index":1},
+		{"plane":"activity","subject":{"kind":"self"},"activity":"","tool":"手机","confidence":0.9}
+	]}`
+	facts, err := ParseFacts(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 空 activity 那条被丢（仅强制 activity 非空）；保留 2 条
+	if len(facts) != 2 {
+		t.Fatalf("应保留 2 条: %+v", facts)
+	}
+	// 全字段：activity/tool/location/started_at 前后空格应 TrimSpace；duration_min int 原样透传
+	f0 := facts[0]
+	if f0.Plane != "activity" || f0.ActivityText != "写代码" || f0.Tool != "电脑" ||
+		f0.Location != "公司" || f0.StartedAt != "2026-08-20" || f0.DurationMin != 120 {
+		t.Fatalf("activity fact0 错误（trim 应生效）: %+v", f0)
+	}
+	// 通勤：commute_mode 解析；tool/location 缺省允许为空；duration_min 透传
+	f1 := facts[1]
+	if f1.ActivityText != "通勤" || f1.CommuteMode != "地铁" || f1.Tool != "" || f1.Location != "" || f1.DurationMin != 40 {
+		t.Fatalf("activity fact1 错误（可空字段缺省合法）: %+v", f1)
+	}
+}

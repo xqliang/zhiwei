@@ -38,6 +38,7 @@ func newTestService(t *testing.T) *Service {
 		Events:        &repo.PersonEventRepo{DB: db},
 		Metrics:       &repo.PersonMetricRepo{DB: db},
 		Cycles:        &repo.PersonCycleRepo{DB: db},
+		Activities:    &repo.PersonActivityRepo{DB: db},
 		ChangeLogs:    &repo.PersonChangeLogRepo{DB: db},
 		Gate:          GateConfig{AutoConf: 0.75},
 	}
@@ -669,5 +670,151 @@ func TestApplyCycleFacts(t *testing.T) {
 	logs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "cycle", "")
 	if len(logs) < 5 {
 		t.Fatalf("cycle 审计不足: %d", len(logs))
+	}
+}
+
+func TestApplyActivityFacts(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+
+	// activity 平面把通勤/写代码/游泳活动写到共享 owner（user_id=1）。本包所有测试共用同一
+	// zhiwei_test 库、不逐个重置；这些行若留到下一次 -count=1 重跑会让活动计数/审计断言失真。收尾
+	// 删掉 owner 的 person_activity、owner 的 activity 审计条目、以及本用例造的 session。提前用
+	// t.Cleanup 注册，保证任一断言 t.Fatal 提前退出时也会清理（模式参照 TestApplyMetricFacts）。
+	var sessPK int64
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			ownerPK := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_activity WHERE person_id = ?`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'activity'`, ownerPK)
+		}
+		if sessPK != 0 {
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM audio_session WHERE id = ?`, sessPK)
+		}
+	})
+
+	// activity 的 started_at 兜底取 session.created_at（同 metric measured_at），故须造真实 session
+	// （不能用裸 ids.New()）：created_at 稳定才能保证「空 started_at」活动重跑时自然键命中而 skip
+	// （time.Now() 兜底会漂移）。
+	sess := &repo.AudioSession{ID: ids.New(), Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed"}
+	if err := svc.Sessions.Create(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	sessPK = sess.ID.Int64()
+	ss, err := svc.Sessions.Get(ctx, sess.ID) // 读回 DB 默认填充的 created_at
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	facts := []Fact{
+		// ① 通勤 高置信 → active；commute_mode=地铁，tool/location 空(NULL)，duration=40
+		{Plane: "activity", Subject: Subject{Kind: "self"}, ActivityText: "通勤",
+			CommuteMode: "地铁", StartedAt: "2026-08-20", DurationMin: 40,
+			Confidence: 0.9, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+		// ② 写代码 低置信 → pending；tool=电脑 location=公司，duration 未给(≤0→NULL)
+		{Plane: "activity", Subject: Subject{Kind: "self"}, ActivityText: "写代码",
+			Tool: "电脑", Location: "公司", StartedAt: "2026-08-20",
+			Confidence: 0.6, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+		// ③ StartedAt 空 → started_at 落 sessionTime（= session.created_at）；四个可空全空→NULL
+		{Plane: "activity", Subject: Subject{Kind: "self"}, ActivityText: "游泳",
+			Confidence: 0.9, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+	}
+	st, err := svc.ApplyFacts(ctx, sess.ID, 1, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ①③ active；② pending
+	if st.Active != 2 || st.Pending != 1 || st.Skipped != 0 {
+		t.Fatalf("统计错误: %+v", st)
+	}
+
+	acts, err := svc.Activities.ListByPerson(ctx, oid, nil, nil)
+	if err != nil || len(acts) != 3 {
+		t.Fatalf("应 3 条活动: %d %v", len(acts), err)
+	}
+	// 按 activity 取（不依赖顺序：ListByPerson 升序，但 session 兜底日期与 8-20 相对顺序随运行日变化）
+	var commute, coding, swim *repo.PersonActivity
+	for i := range acts {
+		switch acts[i].Activity {
+		case "通勤":
+			commute = &acts[i]
+		case "写代码":
+			coding = &acts[i]
+		case "游泳":
+			swim = &acts[i]
+		}
+	}
+	if commute == nil || coding == nil || swim == nil {
+		t.Fatalf("活动缺失: %+v", acts)
+	}
+	// ① 通勤：active/llm，commute_mode=地铁，tool/location NULL，duration=40，started_at=8-20
+	if commute.Status != "active" || commute.Source != "llm" {
+		t.Fatalf("通勤应 llm/active: %+v", commute)
+	}
+	if commute.CommuteMode == nil || *commute.CommuteMode != "地铁" {
+		t.Fatalf("commute_mode 应 地铁: %v", commute.CommuteMode)
+	}
+	if commute.Tool != nil || commute.Location != nil {
+		t.Fatalf("通勤 tool/location 应 NULL: tool=%v loc=%v", commute.Tool, commute.Location)
+	}
+	if commute.DurationMin == nil || *commute.DurationMin != 40 {
+		t.Fatalf("duration 应 40: %v", commute.DurationMin)
+	}
+	if commute.StartedAt.UTC().Format("2006-01-02") != "2026-08-20" {
+		t.Fatalf("started_at 应 2026-08-20，实得 %s", commute.StartedAt.UTC().Format("2006-01-02"))
+	}
+	// ② 写代码：pending，tool=电脑 location=公司，duration NULL（未给不臆造 0）
+	if coding.Status != "pending" || coding.Tool == nil || *coding.Tool != "电脑" ||
+		coding.Location == nil || *coding.Location != "公司" {
+		t.Fatalf("写代码 pending + tool/location 错误: %+v", coding)
+	}
+	if coding.DurationMin != nil {
+		t.Fatalf("未给 duration 应 NULL（不臆造 0）: %v", coding.DurationMin)
+	}
+	// ③ 空 started_at → 落 session.created_at 日期；四个可空全 NULL
+	if swim.Status != "active" || swim.Tool != nil || swim.Location != nil || swim.CommuteMode != nil || swim.DurationMin != nil {
+		t.Fatalf("游泳 active + 全可空 NULL 错误: %+v", swim)
+	}
+	if got, want := swim.StartedAt.UTC().Format("2006-01-02"), ss.CreatedAt.UTC().Format("2006-01-02"); got != want {
+		t.Fatalf("空 started_at 应落 session 时间 %s，实得 %s", want, got)
+	}
+
+	// 幂等：同 session 重跑全 skip。游泳那条 tool/location/commute/duration 全 NULL，仍被
+	// FindByNaturalKeyExt 的 <=> 命中而 skip——验证可空列 NULL 自然键幂等（started_at 稳定：
+	// 8-20 显式 + 游泳落 session.created_at 稳定）。
+	st2, err := svc.ApplyFacts(ctx, sess.ID, 1, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st2.Skipped != 3 || st2.Active != 0 || st2.Pending != 0 {
+		t.Fatalf("重跑应全 skip（可空 NULL 自然键命中）: %+v", st2)
+	}
+
+	// 手动加删（含可空串留空 → NULL；duration=30）
+	ma, err := svc.ManualAddActivity(ctx, oid, "打球", "", "健身房", "", "2026-08-21", 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ma.Status != "active" || ma.Source != "manual" || ma.Confidence != 1.0 {
+		t.Fatalf("手动活动应 manual/active/conf=1.0: %+v", ma)
+	}
+	if ma.Tool != nil {
+		t.Fatalf("手动空 tool 应 NULL: %v", ma.Tool)
+	}
+	if ma.Location == nil || *ma.Location != "健身房" || ma.DurationMin == nil || *ma.DurationMin != 30 {
+		t.Fatalf("手动 location/duration 错误: loc=%v dur=%v", ma.Location, ma.DurationMin)
+	}
+	if err := svc.ManualDeleteActivity(ctx, ma.ID); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := svc.Activities.Get(ctx, ma.ID); d == nil || d.Status != "dismissed" {
+		t.Fatalf("删除应 dismissed: %+v", d)
+	}
+	// 审计：activity 平面条目（llm create×3 + user create + delete = 5）
+	logs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "activity", "")
+	if len(logs) < 5 {
+		t.Fatalf("activity 审计不足: %d", len(logs))
 	}
 }

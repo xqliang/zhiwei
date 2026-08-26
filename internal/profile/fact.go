@@ -18,10 +18,10 @@ type Subject struct {
 	Relation string `json:"relation"` // kind=relation 时的关系类型（如 配偶）
 }
 
-// Fact 是 LLM 输出的一条画像事实（闸门前后通用载体）。P1-P3 五个平面：
-// attribute（属性）/ relationship（关系）/ event（大事记）/ metric（时序指标）/ cycle（周期日程）。
+// Fact 是 LLM 输出的一条画像事实（闸门前后通用载体）。P1-P4 六个平面：
+// attribute（属性）/ relationship（关系）/ event（大事记）/ metric（时序指标）/ cycle（周期日程）/ activity（生活轨迹）。
 type Fact struct {
-	Plane   string  // attribute|relationship|event|metric|cycle
+	Plane   string  // attribute|relationship|event|metric|cycle|activity
 	Subject Subject // 信息归属的人物指代
 
 	// ---- attribute 平面 ----
@@ -59,6 +59,14 @@ type Fact struct {
 	Dosage        string
 	FrequencyText string // 频次（'每日两次'）；rawFact 的 json 标签是 frequency（非 frequency_text），对齐 prompt 契约
 
+	// ---- activity 平面（P4 生活轨迹）----
+	ActivityText string // 做什么（开会/写代码/打球…）；Go 字段名 ActivityText，rawFact 的 json 标签是 activity（同 FrequencyText/frequency 桥接先例）
+	Tool         string // 什么工具（手机/电脑/健身房…）
+	Location     string // 与 event 平面 EventLocation 同风格的自由文本
+	CommuteMode  string // 通勤方式中文短串（地铁/开车/步行…；不做枚举强校验）
+	StartedAt    string // 原始日期串（YYYY-MM-DD/RFC3339），解析在 service 层 parseEventAt
+	DurationMin  int    // 持续分钟
+
 	// ---- 通用 ----
 	Confidence    float64
 	EpistemicType string // observed|inferred|predicted|suggested
@@ -68,7 +76,7 @@ type Fact struct {
 	SegmentIDs []ids.ID // provenance：来源块的 segment id
 }
 
-var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true, "metric": true, "cycle": true}
+var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true, "metric": true, "cycle": true, "activity": true}
 
 // validSubjectKinds 是人物指代 Subject.Kind（也用于 Related.Kind）的合法取值。
 // 非法或缺失的指代无法归属到具体人物，直接丢弃该条（宁少勿错）。
@@ -138,9 +146,17 @@ type rawFact struct {
 	DurationDays     int        `json:"duration_days"`
 	Dosage           string     `json:"dosage"`
 	FrequencyText    string     `json:"frequency"` // Go 字段 FrequencyText，json 标签 frequency——对齐 prompt v3 契约
-	Confidence       float64    `json:"confidence"`
-	EpistemicType    string     `json:"epistemic_type"`
-	BlockIndex       int        `json:"block_index"`
+	ActivityText     string     `json:"activity"`  // Go 字段 ActivityText，json 标签 activity——对齐 prompt 契约（同 FrequencyText/frequency 先例）
+	Tool             string     `json:"tool"`
+	// 注意 activity 的 location 复用上面 EventLocation 的 json:"location"——同一 json 键不能有两个 Go
+	// 字段（重复标签会让二者都被 encoding/json 忽略）；一条 fact 非 event 即 activity，ParseFacts 里
+	// activity 平面的 Location 从 rf.EventLocation 取值即可，故此处不再单列 Location 字段。
+	CommuteMode   string  `json:"commute_mode"`
+	StartedAt     string  `json:"started_at"`
+	DurationMin   int     `json:"duration_min"`
+	Confidence    float64 `json:"confidence"`
+	EpistemicType string  `json:"epistemic_type"`
+	BlockIndex    int     `json:"block_index"`
 }
 
 // ParseFacts 解析 LLM 输出。容错风格同 memory.ParseCandidates：截取首个 { 到末个 }，
@@ -190,6 +206,12 @@ func ParseFacts(raw string) ([]Fact, error) {
 			DurationDays:     rf.DurationDays, // int，不 trim
 			Dosage:           strings.TrimSpace(rf.Dosage),
 			FrequencyText:    strings.TrimSpace(rf.FrequencyText),
+			ActivityText:     strings.TrimSpace(rf.ActivityText),
+			Tool:             strings.TrimSpace(rf.Tool),
+			Location:         strings.TrimSpace(rf.EventLocation), // activity 复用 json:"location"（见 rawFact 注释）
+			CommuteMode:      strings.TrimSpace(rf.CommuteMode),
+			StartedAt:        strings.TrimSpace(rf.StartedAt),
+			DurationMin:      rf.DurationMin, // int，不 trim
 			Confidence:       clamp01(rf.Confidence),
 			EpistemicType:    strings.TrimSpace(rf.EpistemicType),
 			BlockIndex:       rf.BlockIndex,
@@ -229,6 +251,12 @@ func ParseFacts(raw string) ([]Fact, error) {
 		case "cycle":
 			// 周期记录：仅强制合法 cycle_type；label/anchor 可空（如纯随访、生理期无药名）。
 			if !ValidCycleTypes[f.CycleType] {
+				continue
+			}
+		case "activity":
+			// 活动流：仅强制 activity 非空（started_at 可空，service 落 session 时间；tool 等
+			// 全可空——「下午去游泳了」没说工具地点也是有效活动）。
+			if f.ActivityText == "" {
 				continue
 			}
 		}
