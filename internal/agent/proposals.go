@@ -266,6 +266,9 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if attrKey == "" || value == "" {
 			return nil, fmt.Errorf("profile_attr 缺 new.attr_key/value")
 		}
+		if !isKnownAttrKey(attrKey) { // 双保险：confirm 端也校验 catalog(propose 已校，但防未来别的提议源不 gate 就静默写入非法键)
+			return nil, fmt.Errorf("profile_attr 非法属性键: %s", attrKey)
+		}
 		row, err := d.Profile.ManualAddAttributeExt(ctx, tx, *p.TargetID, attrKey, value)
 		if err != nil {
 			return nil, err
