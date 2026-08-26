@@ -283,6 +283,22 @@
                 <template v-if="s.memory_count"> · {{ s.memory_count }} 条记忆</template>
                 <template v-if="s.todo_count"> · {{ s.todo_count }} 个待办</template>
               </div>
+              <!-- 整段声纹相似 top-3 + 判定（列表级，2026-08-26）：
+                   整段只有 1 个 ASR 说话人 → 用整段（全部段向量均值）比对；
+                   多人 → 用时长最长的一段比对（最能代表主要说话人）。
+                   判定两级规则：top1≥0.8 强命中 / ≥0.72 且领先第二名 ≥0.06 弱命中。
+                   存量会话（逐段向量落库前处理）无此行 -->
+              <div v-if="s.voice_top && (s.voice_top.matches||[]).length" class="muted"
+                   style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
+                   :title="'整段声纹与声纹库的相似度 top-3（' + (s.voice_top.basis === 'whole' ? '单人录音：整段音频比对' : '多人录音：时长最长的一段比对') + '）。判定：top1≥0.8，或 ≥0.72 且领先第二名 ≥0.06'">
+                <span>🎤 声纹{{ s.voice_top.basis === 'whole' ? '(整段)' : '(最长段)' }} ≈</span>
+                <span v-for="(m, mi) in s.voice_top.matches" :key="m.speaker_id"
+                      :style="(s.voice_top.matched && mi === 0) ? { color: 'var(--accent)', fontWeight: 600 } : {}">
+                  {{ mi > 0 ? '·' : '' }} {{ m.name }} {{ m.similarity.toFixed(2) }}
+                </span>
+                <span v-if="s.voice_top.matched" :style="{ color: 'var(--ok)', fontWeight: 600 }"
+                      title="两级规则判定命中：这个人">→ {{ s.voice_top.speaker_name }}{{ s.voice_top.rule === 'gap' ? '(弱)' : '' }}</span>
+              </div>
             </div>
             <div style="display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap" @click.stop>
               <span v-if="reextractingId !== s.id && reidentifyingId !== s.id" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
@@ -777,9 +793,11 @@
       </div>
     </div>
 
-    <!-- 名册卡片 -->
+    <!-- 名册卡片 + 就地展开的详情：template 包一层，让详情卡渲染在所点人物卡片正下方
+         （对齐时间线 session 的就地展开模式），而不是整个列表末尾——长名册时列表末尾的详情根本看不到 -->
     <div v-if="!persons.length" class="card empty">还没有人物。点「新建」，或上传录音后由画像抽取自动生成。</div>
-    <div class="card clickable" v-for="p in persons" :key="p.id" @click="togglePerson(p.id)">
+    <template v-for="p in persons" :key="p.id">
+    <div class="card clickable" @click="togglePerson(p.id)">
       <div class="kv">
         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
           <b>{{ p.display_name }}</b>
@@ -789,18 +807,18 @@
         </div>
         <div style="display:flex; gap:6px; align-items:center; flex-shrink:0" @click.stop>
           <span v-if="p.pending_count" class="chip" style="background:var(--warn-soft); color:var(--warn)" title="待确认的属性/关系数">{{ p.pending_count }} 待确认</span>
-          <template v-if="archivingPersonId === p.id">
-            <span class="muted">归档？</span>
-            <button class="btn mini danger" @click="confirmArchivePerson(p)">确认</button>
-            <button class="btn mini" @click="cancelArchivePerson()">取消</button>
+          <template v-if="deletingPersonId === p.id">
+            <span class="muted">删除？</span>
+            <button class="btn mini danger" @click="confirmDeletePerson(p)">确认</button>
+            <button class="btn mini" @click="cancelDeletePerson()">取消</button>
           </template>
-          <button v-else class="btn mini" @click="askArchivePerson(p)">归档</button>
+          <button v-else class="btn mini" @click="askDeletePerson(p)" title="软删（status=dismissed）+ 六平面级联；可在下方「已删除」区恢复">删除</button>
         </div>
       </div>
     </div>
 
-    <!-- 人物详情（就地展开在名册之后；Task 1 已定义 togglePerson/closePersonDetail 数据流） -->
-    <div class="card" v-if="personDetail" style="border-color:var(--accent)">
+    <!-- 人物详情（就地展开在所点人物卡片正下方；仅渲染匹配当前迭代 p 的那份；Task 1 已定义 togglePerson/closePersonDetail 数据流） -->
+    <div class="card" v-if="personDetail && personDetail.person.id === p.id" style="border-color:var(--accent)">
       <div class="kv" style="margin-bottom:12px">
         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
           <template v-if="!renamingPerson">
@@ -1266,6 +1284,28 @@
         <button class="btn mini" @click="toggleAddEvent">{{ showAddEvent ? '收起加大事记' : '＋ 加大事记' }}</button>
       </div>
     </div>
+    </template>
+
+    <!-- 已删除人物折叠区（dismissed 软删行，默认收起；对齐已忽略主题的交互）。
+         恢复=PATCH status=active：后端同一事务级联恢复删除时被连带清掉的六平面行
+         （手动删过的行无 pre_dismiss_status 标记，保持 dismissed 不被误恢复）。 -->
+    <template v-if="deletedPersons.length">
+      <div class="todo-group-title" style="cursor:pointer" @click="deletedCollapsed = !deletedCollapsed">
+        已删除（{{ deletedPersons.length }}）{{ deletedCollapsed ? ' ▸' : ' ▾' }}
+      </div>
+      <template v-if="!deletedCollapsed">
+        <div class="card" v-for="p in deletedPersons" :key="p.id" style="opacity:.62">
+          <div class="kv">
+            <div style="min-width:0">
+              <b><s>{{ p.display_name }}</s></b>
+              <span v-if="p.source === 'llm'" class="muted">自动识别</span>
+              <div class="muted" style="font-size:var(--fs-xs)">删除于 {{ fmtTime(p.updated_at) }} · 恢复将连带找回删除时被清掉的属性/关系等画像数据</div>
+            </div>
+            <button class="btn mini" @click="restorePerson(p)">恢复</button>
+          </div>
+        </div>
+      </template>
+    </template>
   </div>
 
   <!-- ============ 主题 ============ -->
@@ -1577,6 +1617,6 @@
   </div>
 </div>
 
-<script src="/app/app.b92292a9.js"></script>
+<script src="/app/app.a58a0498.js"></script>
 </body>
 </html>

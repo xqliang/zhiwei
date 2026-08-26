@@ -25,7 +25,9 @@ import (
 //
 // ASR 原生 diarization 已足够准，此处直接信任其说话人标签：不再用声纹在本地把不同 ASR 标签
 // 合并成同一人。是否同一人只由跨 session 1:N 判定——相似度 ≥ 阈值（默认 0.8）视为命中、复用该
-// speaker；否则登记为新声纹。
+// speaker；否则登记为新声纹。登记向量优先取「干净段」（见 pickCleanSegVec）：时长最长、
+// 与其他说话人段无时间交集且 ≥3s 的单段——聚合向量会被 diarization 切错/混入他人语音的段
+// 污染；无干净段才退回全组聚合（2026-08-26 需求）。
 func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *repo.Transcript) error {
 	segs, err := d.Transcripts.ListSegments(ctx, tr.ID)
 	if err != nil {
@@ -54,8 +56,11 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 	// 1) 逐组切片+提向，跳过已全部解析的组（幂等：reextract 不重复调 sidecar、不覆盖手动纠正）。
 	type groupRep struct {
 		label string
-		rep   []float32
-		vecN  int // 该组有效向量数（用于 sample_count）
+		rep   []float32 // 组代表声纹（全部段向量均值）——1:N 检索用
+		vecN  int       // 该组有效向量数（用于 sample_count）
+		// clean 登记优先向量：组内「时长最长、与其他说话人段无时间交集且 ≥3s」的单段向量。
+		// nil=无干净段（登记时退回 rep）。只影响**新声纹登记**，不影响上面 rep 的检索。
+		clean []float32
 	}
 	var reps []groupRep
 	// 逐段声纹向量 BLOB（segID→blob）：speaker stage 提取向量后落库，
@@ -74,7 +79,7 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		if allAssigned {
 			continue
 		}
-		vecs := make([][]float32, 0, len(members))
+		svs := make([]segVec, 0, len(members))
 		for _, s := range members {
 			slicePath := filepath.Join(sliceDir, fmt.Sprintf("seg-%d.wav", s.SequenceNo))
 			if err := sliceAudio(wavPath, slicePath, s.StartMS, s.EndMS); err != nil {
@@ -84,13 +89,20 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 			if err != nil || len(v) != 256 {
 				continue // 提向失败跳过
 			}
-			vecs = append(vecs, v)
+			svs = append(svs, segVec{seg: s, vec: v})
 			segEmbeds[s.ID] = float32Blob(v)
 		}
-		if len(vecs) == 0 {
+		if len(svs) == 0 {
 			continue
 		}
-		reps = append(reps, groupRep{label: label, rep: aggregateEmbeddings(vecs), vecN: len(vecs)})
+		vecs := make([][]float32, 0, len(svs))
+		for _, sv := range svs {
+			vecs = append(vecs, sv.vec)
+		}
+		reps = append(reps, groupRep{
+			label: label, rep: aggregateEmbeddings(vecs), vecN: len(vecs),
+			clean: pickCleanSegVec(svs, segs, label),
+		})
 	}
 	if len(reps) == 0 {
 		return nil
@@ -110,19 +122,25 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 			return fmt.Errorf("voiceprint search: %w", err)
 		}
 		// 同一人判定（两级规则，见 voiceprint.Matched）：强命中 sim≥阈值；
-		// 或区分性弱命中 sim≥0.72 且明显领先第二名（top1−top2≥0.6）——
+		// 或区分性弱命中 sim≥0.72 且明显领先第二名（top1−top2≥0.06）——
 		// 分数略低于阈值但明显是同一个人的也复用，减少真匹配被误登记成新声纹。
 		matched := res.Matched && voiceprint.Matched(res.Distance, res.SecondDistance, threshold)
 		var speakerID ids.ID
 		if matched {
 			speakerID = res.SpeakerID
 		} else {
-			// 自动登记：name=说话人{5位随机串}，向量 BLOB 灾备
-			sp := &repo.Speaker{Name: "说话人" + rand5(), Source: "auto", Embedding: float32Blob(g.rep), SampleCount: g.vecN}
+			// 自动登记：name=说话人{5位随机串}，向量 BLOB 灾备。
+			// 登记向量优先用干净段（pickCleanSegVec 的结果）：混入他人语音的段会污染
+			// 聚合向量，新声纹「出厂即脏」；无干净段才退回聚合代表。
+			embVec, sampleN := g.rep, g.vecN
+			if g.clean != nil {
+				embVec, sampleN = g.clean, 1
+			}
+			sp := &repo.Speaker{Name: "说话人" + rand5(), Source: "auto", Embedding: float32Blob(embVec), SampleCount: sampleN}
 			if err := d.Speakers.Create(ctx, sp); err != nil {
 				return fmt.Errorf("登记 speaker: %w", err)
 			}
-			if err := d.Voiceprint.Add(ctx, g.rep, sp.ID); err != nil {
+			if err := d.Voiceprint.Add(ctx, embVec, sp.ID); err != nil {
 				return fmt.Errorf("voiceprint add: %w", err)
 			}
 			speakerID = sp.ID
@@ -132,6 +150,52 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		}
 	}
 	return nil
+}
+
+// minCleanSegMS 干净段（登记声纹优先来源）的最短时长：3s——太短的段声纹特征不稳。
+const minCleanSegMS = 3000
+
+// segVec 一个 ASR 段与其声纹向量（干净段挑选的输入单元）。
+type segVec struct {
+	seg repo.TranscriptSegment
+	vec []float32
+}
+
+// pickCleanSegVec 从组内段向量中挑「干净段」向量：时长 ≥3s 且与本 session **其他标签**的
+// 段无时间交集（时间交集=音频上混有他人语音，diarization 切错的典型痕迹），取其中时长
+// 最长的一段。无满足条件的段返回 nil（调用方退回全组聚合）。
+// all 传本 session 全部段（含其他标签），用于交集判定。
+func pickCleanSegVec(svs []segVec, all []repo.TranscriptSegment, label string) []float32 {
+	var best []float32
+	var bestDur int64
+	for _, sv := range svs {
+		dur := sv.seg.EndMS - sv.seg.StartMS
+		if dur < minCleanSegMS {
+			continue
+		}
+		if overlapsOtherLabel(sv.seg, all, label) {
+			continue
+		}
+		if dur > bestDur {
+			best, bestDur = sv.vec, dur
+		}
+	}
+	return best
+}
+
+// overlapsOtherLabel 判断段是否与「其他 speaker_label」的任何段在时间上相交
+//（半开区间 [start,end) 判交：s1.start < s2.end && s2.start < s1.end）。
+// 空 label 的段也算「其他」——单人录音通常全空标签，此时组内即全体段、天然无交集判定对象。
+func overlapsOtherLabel(seg repo.TranscriptSegment, all []repo.TranscriptSegment, label string) bool {
+	for _, o := range all {
+		if o.SpeakerLabel == label {
+			continue
+		}
+		if seg.StartMS < o.EndMS && o.StartMS < seg.EndMS {
+			return true
+		}
+	}
+	return false
 }
 
 // stageSpeaker 是 pool 用的 Handler 包装。

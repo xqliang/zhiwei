@@ -675,7 +675,7 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Similarity > items[j].Similarity })
 	// 命中判定与 speaker stage 同一套两级规则（voiceprint.Matched）：强命中 top1≥阈值；
-	// 或区分性弱命中 top1≥0.72 且明显领先第二名（top1−top2≥0.6）。
+	// 或区分性弱命中 top1≥0.72 且明显领先第二名（top1−top2≥0.06）。
 	// 保证「试匹配」预览与实际识别结论一致，避免预览说未达阈值、实际处理却命中。
 	second := 0.0
 	if len(items) > 1 {

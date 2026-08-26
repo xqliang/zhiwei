@@ -184,6 +184,7 @@ func main() {
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,
 		SpeakerNameCandidates: nameCandidates,
+		VoiceprintThreshold:   cfg.VoiceprintThreshold, // timeline 列表「整段声纹」两级判定用
 	})
 	api.RegisterSpeaker(r, &api.SpeakerHandler{
 		Speakers: speakers, Transcripts: transcripts,

@@ -97,6 +97,16 @@ ORDER BY p.is_owner DESC, p.updated_at DESC`, userID)
 	return list, err
 }
 
+// ListDismissed 已删除人物（status=dismissed 软删行），供「已删除」折叠区展示 + 恢复入口。
+// 与 List/ListWithPending 互补：那两个只回非 dismissed，这个只回 dismissed。更新时间倒序。
+func (r *PersonRepo) ListDismissed(ctx context.Context, userID int64) ([]Person, error) {
+	var list []Person
+	err := r.DB.SelectContext(ctx, &list, `
+SELECT * FROM person WHERE user_id = ? AND status = 'dismissed'
+ORDER BY updated_at DESC`, userID)
+	return list, err
+}
+
 // GetOwnerExt 返回 is_owner=1 的「我」；不存在返回 (nil, nil)。可在事务连接上执行。
 func (r *PersonRepo) GetOwnerExt(ctx context.Context, ext QueryRowxContext, userID int64) (*Person, error) {
 	var p Person
