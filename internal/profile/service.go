@@ -380,7 +380,7 @@ func (s *Service) applyMetricFact(ctx context.Context, tx *sqlx.Tx, userID int64
 // applyCycleFact 单值语义（同 person+type+label 至多一条 active）：冲突 pending+supersedes
 // 绝不静默覆盖（对齐 attribute 单值模式）。next_predicted_at = anchor_date + period_days
 // （两者齐才算；纯估算非医疗建议，spec §9，算在 cycleRow→applyCycleParams 内）。
-// label 统一 trim 后空串→nil（repo <=> NULL 匹配；混用 ''/NULL 会产生重复 active）。
+// label 统一 trim 后空串→nil（repo <=> NULL 匹配；混用空串与 NULL 会产生重复 active）。
 func (s *Service) applyCycleFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
 	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
 
