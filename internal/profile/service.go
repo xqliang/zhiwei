@@ -94,11 +94,45 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 		}
 	}
 
-	for _, f := range facts {
+	// F2（spec §13）：两趟落库——relationship 平面先行。
+	//
+	// 背景：subject=relation:TYPE 的事实（如「我老婆是儿科医生」的属性、「陪我老婆去产检」的
+	// 活动）靠 resolveSubject→personByOwnerRelation 查 owner 的该类型 active 关系对端来解析归属，
+	// 依赖同批里先落的关系行（personByOwnerRelation 走 tx、能读到本事务内未提交的关系）。但 LLM
+	// 输出顺序不保证关系事实排在依赖它的事实之前；单趟循环遇乱序（属性在前、关系在后）时，属性会
+	// 因当时查不到关系对端被判「主体解析不到」→ st.Skipped（非破坏，但白丢一次抽取机会）。
+	//
+	// 故拆两趟：第一趟只落 relationship 平面（建立 owner↔对端 关系行），第二趟落其余全部平面
+	// （此时同批关系行已在 tx 内可见，relation:TYPE 归属可解析）。两趟共用同一 tx、不改事务边界，
+	// 任一趟任一条失败仍整体回滚，失败语义不变。
+	//
+	// 用两次独立 for 循环（各自按 plane 条件跳过）而非「先 append 成一个切片再遍历」——后者若
+	// 两子切片 append 到一起会踩共享底层数组的别名陷阱；两趟条件遍历零额外分配、零陷阱、且保留
+	// 各平面事实的原始相对顺序。
+	applyOne := func(f Fact) error {
 		prov := Provenance{SessionID: sessionID, SegmentIDs: f.SegmentIDs}
 		if err := s.applyFact(ctx, tx, userID, f, prov, memRows, sessionTime, &st); err != nil {
-			return st, fmt.Errorf("应用事实(plane=%s key=%s relation=%s subject=%s): %w",
+			return fmt.Errorf("应用事实(plane=%s key=%s relation=%s subject=%s): %w",
 				f.Plane, f.AttrKey, f.RelationType, f.Subject.Kind, err)
+		}
+		return nil
+	}
+	// 第一趟：只落 relationship 平面（供第二趟解析 relation:TYPE 归属）。
+	for _, f := range facts {
+		if f.Plane != "relationship" {
+			continue
+		}
+		if err := applyOne(f); err != nil {
+			return st, err
+		}
+	}
+	// 第二趟：落其余所有平面（attribute/event/metric/cycle/activity）。
+	for _, f := range facts {
+		if f.Plane == "relationship" {
+			continue
+		}
+		if err := applyOne(f); err != nil {
+			return st, err
 		}
 	}
 	if err := tx.Commit(); err != nil {

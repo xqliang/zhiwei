@@ -182,6 +182,64 @@ func TestApplyFactsGatePaths(t *testing.T) {
 	}
 }
 
+// TestApplyFactsRelationFirstOutOfOrder 是 F2（spec §13，两趟落库）的回归用例：
+// facts 故意乱序——依赖关系的属性（subject=relation:配偶）排在关系事实之前。改前单趟循环会
+// 先处理属性，此时 owner 尚无「配偶」active 关系 → resolveSubject 返回 0 → 属性被 Skipped；
+// 两趟落库（relationship 先行）后，第二趟处理属性时同批关系已在 tx 内可见，属性应成功落到
+// 关系对端 Alice 名下。
+func TestApplyFactsRelationFirstOutOfOrder(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	// 本用例造 pending 人物 Alice + owner→Alice 配偶关系 + Alice.occupation，同 TestApplyFactsGatePaths
+	// 一样写共享 owner（user_id=1）、不逐个重置库。收尾删掉 Alice（及其 attribute/审计——schema 无
+	// ON DELETE CASCADE，须显式删）、owner 的关系与审计，恢复干净基线。提前用 t.Cleanup 注册，保证
+	// 任一断言 t.Fatal 提前退出时也会清理（模式参照 TestApplyFactsGatePaths）。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if a, err := svc.Persons.FindByName(cctx, 1, "Alice"); err == nil && a != nil {
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_attribute WHERE person_id = ?`, a.ID.Int64())
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ?`, a.ID.Int64())
+		}
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person WHERE user_id = 1 AND display_name = 'Alice'`)
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			ownerPK := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_relationship WHERE person_id = ?`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ?`, ownerPK)
+		}
+	})
+
+	sess := ids.New()
+	// 乱序：属性在前（subject=relation:配偶，依赖关系），配偶关系在后。
+	facts := []Fact{
+		{Plane: "attribute", Subject: Subject{Kind: "relation", Relation: "配偶"},
+			AttrKey: "occupation", Value: "儿科医生", Confidence: 0.9, EpistemicType: "observed",
+			SegmentIDs: []ids.ID{1}},
+		{Plane: "relationship", Subject: Subject{Kind: "self"},
+			Related: Subject{Kind: "mentioned", Name: "Alice"}, RelationType: "配偶",
+			Label: "老婆", Confidence: 0.9, EpistemicType: "observed", SegmentIDs: []ids.ID{1}},
+	}
+	st, err := svc.ApplyFacts(ctx, sess, 1, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 两趟落库后：关系 active + 属性 active（均高置信），无 Skipped（改前属性会 Skipped=1）。
+	if st.Active != 2 || st.Skipped != 0 || st.Pending != 0 {
+		t.Fatalf("乱序两趟应全 active 无 skip（改前属性会 Skipped=1）: %+v", st)
+	}
+
+	// 断言属性成功落到关系对端 Alice 名下（而非被跳过）——这同时反证 relationship 先行已把
+	// owner→Alice 配偶关系落到 tx 内、供属性归属解析命中。
+	alice, _ := svc.Persons.FindByName(ctx, 1, "Alice")
+	if alice == nil {
+		t.Fatal("relationship 先行应自动新建 pending 人物 Alice")
+	}
+	ao, _ := svc.Attributes.FindActiveByKey(ctx, alice.ID, "occupation")
+	if ao == nil || ao.ValueText != "儿科医生" {
+		t.Fatalf("occupation 应落到 Alice 名下（儿科医生），实得: %+v", ao)
+	}
+}
+
 func TestApplyEventFacts(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
