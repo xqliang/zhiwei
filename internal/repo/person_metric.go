@@ -182,3 +182,13 @@ func (r *PersonMetricRepo) ListPending(ctx context.Context, userID int64) ([]Per
 SELECT * FROM person_metric WHERE user_id = ? AND status = 'pending' ORDER BY id`, userID)
 	return list, err
 }
+
+// CountPendingByPerson 统计某人物的 pending 测点数（供详情页/名册 pending 角标计数）。
+// 详情页不拉 metric 全量列表（时序数据量大、按需查询），故用轻量 COUNT 而非拉表过滤。
+// person_id 全局唯一（雪花 ID），无需再带 user_id 限定。
+func (r *PersonMetricRepo) CountPendingByPerson(ctx context.Context, personID ids.ID) (int, error) {
+	var n int
+	err := r.DB.GetContext(ctx, &n,
+		`SELECT COUNT(*) FROM person_metric WHERE person_id = ? AND status = 'pending'`, personID.Int64())
+	return n, err
+}

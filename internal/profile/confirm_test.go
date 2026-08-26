@@ -373,6 +373,43 @@ func TestConfirmMetricCycle(t *testing.T) {
 		t.Fatalf("cycle 放弃后应 dismissed: %+v", c)
 	}
 
+	// ---- cycle 冲突确认（区分 cycle 与 metric 的核心：cycle 带 supersedes，metric 不带）----
+	// 先手动建一条 active 周期（period=30），再 ApplyFacts 同 (type,label) 但不同参数（period=28）：
+	// 有 active 现值 + 参数不同 → 绕过同参佐证短路 → DecideCycle 返回 ConflictPending，
+	// pending 行带 SupersedesID 指向 active 行。确认后：旧行 superseded、新行 active。
+	act, err := svc.ManualAddCycle(ctx, oid, "medication", "supersede测试-降压药", "2026-08-01", "", "", 30, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "medication",
+			CycleLabel: "supersede测试-降压药", AnchorDate: "2026-08-01", PeriodDays: 28,
+			Confidence: 0.9, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	confPend, _ := svc.Cycles.ListPending(ctx, 1)
+	var conflictID ids.ID
+	for _, c := range confPend {
+		if c.Label != nil && *c.Label == "supersede测试-降压药" && c.SupersedesID != nil && *c.SupersedesID == act.ID {
+			conflictID = c.ID
+		}
+	}
+	if conflictID == 0 {
+		t.Fatalf("带 supersedes 的冲突 pending cycle 未生成: %+v", confPend)
+	}
+	if err := svc.ConfirmPending(ctx, "cycle", conflictID); err != nil {
+		t.Fatal(err)
+	}
+	// 新行 → active（且 SupersedesID 仍指向旧行）
+	if nc, _ := svc.Cycles.Get(ctx, conflictID); nc == nil || nc.Status != "active" || nc.SupersedesID == nil || *nc.SupersedesID != act.ID {
+		t.Fatalf("冲突确认后新行应 active 且 supersedes 旧行: %+v", nc)
+	}
+	// 旧 active 行 → superseded
+	if oc, _ := svc.Cycles.Get(ctx, act.ID); oc == nil || oc.Status != "superseded" {
+		t.Fatalf("冲突确认后旧行应 superseded: %+v", oc)
+	}
+
 	// 非 pending 再确认 → 报错；非法 kind → 报错
 	if err := svc.ConfirmPending(ctx, "metric", mID); err == nil {
 		t.Fatal("非 pending metric 再确认应报错")

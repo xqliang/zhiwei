@@ -553,14 +553,28 @@ func TestPersonMetricAPI(t *testing.T) {
 		Items []map[string]any `json:"items"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &pend)
-	var mItemID string
+	var mItemID, mOccurredAt string
 	for _, it := range pend.Items {
 		if it["kind"] == "metric" && it["value"] == "80.5" {
 			mItemID, _ = it["id"].(string)
+			mOccurredAt, _ = it["occurred_at"].(string)
 		}
 	}
 	if mItemID == "" {
 		t.Fatalf("队列缺 metric 条目: %+v", pend.Items)
+	}
+	// 队列条目补 measured_at（occurred_at 字段）——P3b 前端时间线依赖
+	if mOccurredAt == "" {
+		t.Fatalf("metric 队列条目应含 occurred_at: %+v", pend.Items)
+	}
+	// 详情 PendingCount 应含该 pending metric（此刻 owner 仅此一条 pending）
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String(), nil)
+	var detail struct {
+		PendingCount int `json:"pending_count"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail)
+	if detail.PendingCount < 1 {
+		t.Fatalf("详情 PendingCount 应含 pending metric: %d", detail.PendingCount)
 	}
 	if rec := doReq(t, h, "POST", "/api/profile/pending/metric/"+mItemID+"/confirm", nil); rec.Code != 200 {
 		t.Fatalf("测点确认失败: %d %s", rec.Code, rec.Body.String())
@@ -656,6 +670,15 @@ func TestPersonCycleAPI(t *testing.T) {
 	}
 	if cItemID == "" {
 		t.Fatalf("队列缺 cycle 条目: %+v", pend.Items)
+	}
+	// 详情 PendingCount 应含该 pending cycle（此刻 owner 仅此一条 pending）
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String(), nil)
+	var detail struct {
+		PendingCount int `json:"pending_count"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail)
+	if detail.PendingCount < 1 {
+		t.Fatalf("详情 PendingCount 应含 pending cycle: %d", detail.PendingCount)
 	}
 	if rec := doReq(t, h, "POST", "/api/profile/pending/cycle/"+cItemID+"/confirm", nil); rec.Code != 200 {
 		t.Fatalf("周期确认失败: %d %s", rec.Code, rec.Body.String())

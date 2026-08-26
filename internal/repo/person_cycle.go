@@ -174,3 +174,13 @@ func (r *PersonCycleRepo) ListPending(ctx context.Context, userID int64) ([]Pers
 SELECT * FROM person_cycle WHERE user_id = ? AND status = 'pending' ORDER BY id`, userID)
 	return list, err
 }
+
+// CountPendingByPerson 统计某人物的 pending 周期数（供详情页/名册 pending 角标计数）。
+// 与 metric 一致用轻量 COUNT（详情页 cycle 列表按需拉，计数不必拉全表）。
+// person_id 全局唯一（雪花 ID），无需再带 user_id 限定。
+func (r *PersonCycleRepo) CountPendingByPerson(ctx context.Context, personID ids.ID) (int, error) {
+	var n int
+	err := r.DB.GetContext(ctx, &n,
+		`SELECT COUNT(*) FROM person_cycle WHERE person_id = ? AND status = 'pending'`, personID.Int64())
+	return n, err
+}

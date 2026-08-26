@@ -210,6 +210,19 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 			pending++
 		}
 	}
+	// metric/cycle 平面的 pending 也计入详情页角标（确认队列已含这两类，名册/详情角标须一致）。
+	// 详情不展示 metric/cycle 列表（时序数据量大、按需查询），故用轻量 COUNT 而非拉全表过滤。
+	mp, err := h.Metrics.CountPendingByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	cp, err := h.Cycles.CountPendingByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	pending += mp + cp
 	writeJSON(w, personDetailResp{
 		Person: p, Groups: groups, Relationships: relShown, Events: evShown,
 		RecentSessionIDs: sids, PendingCount: pending,
@@ -863,9 +876,11 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 		if m.ValueText != nil {
 			v = *m.ValueText
 		}
+		// MeasuredAt 是值类型（time.Time NOT NULL），取址局部副本填 OccurredAt（队列展示测点时刻）。
+		mt := m.MeasuredAt
 		items = append(items, pendingItem{
 			Kind: "metric", ID: m.ID, PersonID: m.PersonID, PersonName: nameOf[m.PersonID],
-			MetricKey: m.MetricKey, Value: v,
+			MetricKey: m.MetricKey, Value: v, OccurredAt: &mt,
 			Confidence: m.Confidence, EpistemicType: m.EpistemicType,
 			SessionID: m.SessionID,
 		})
