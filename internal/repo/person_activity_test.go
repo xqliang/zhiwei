@@ -46,7 +46,7 @@ func TestPersonActivityQueries(t *testing.T) {
 	if err := activities.Create(ctx, a2); err != nil {
 		t.Fatal(err)
 	}
-	// a1：极简活动——仅 activity，四个可空列全 NULL（「下午去打球」没提工具地点也是有效活动）。
+	// a1：极简活动——仅 activity，四个可空列全 NULL（「早上通勤」没提工具地点也是有效活动）。
 	// 未显式给横切字段，用于校验零值兜底。
 	a1 := &PersonActivity{PersonID: p.ID, Activity: "通勤", StartedAt: ta1, SessionID: &sess}
 	if err := activities.Create(ctx, a1); err != nil {

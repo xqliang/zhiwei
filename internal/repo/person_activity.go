@@ -139,6 +139,7 @@ func (r *PersonActivityRepo) ListByPerson(ctx context.Context, personID ids.ID, 
 //   - tool/location/commute_mode 真正可空：传 nil 绑定 SQL NULL，命中「该列 IS NULL」的行
 //     （如「下午去游泳」没记工具地点的那条）；传非 nil 命中等值行。
 //     （普通 `= NULL` 恒为 UNKNOWN 永不命中，故对可空列必须用 `<=>`。）
+//
 // 抄 metric 的 vt any 中转技法：**每个可空参数各做一个 any 变量**，nil 时保持 any 的零值（绑定为 SQL NULL），
 // 非 nil 时装入解引用后的值——这样同一条 SQL 既能命中 NULL 行也能命中等值行。
 //
