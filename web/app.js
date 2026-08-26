@@ -1418,6 +1418,16 @@ const app = createApp({
     function cycleTypeLabel(k) { const t = CYCLE_TYPES.find(x => x.key === k); return t ? t.label : k; }
     // 日期仅显示 YYYY-MM-DD（DATE 列的 ISO 串截取）
     function fmtDateOnly(iso) { return iso ? String(iso).slice(0, 10) : '—'; }
+    // 取周期数据的唯一入口（toggleHealth/reloadCycles 共用，避免两处内联重复）。
+    // 敏感数据：await 前记下当前人物 id，回来时若已切人/已收起则丢弃响应，
+    // 防止「A 的在途响应晚于 B 返回」把 A 的生理期/用药渲染到 B 名下。
+    async function fetchCyclesInto() {
+      const pid = personDetail.value?.person?.id;
+      const d = await api('GET', '/api/persons/' + pid + '/cycles');
+      if (!healthOpen.value || personDetail.value?.person?.id !== pid) return;
+      cycles.value = d.cycles || [];
+      cyclesNote.value = d.note || '';
+    }
     // 敏感区懒加载：首次展开才拉数据（含免责 note）；再点收起并清列表
     async function toggleHealth() {
       if (healthOpen.value) {
@@ -1427,20 +1437,12 @@ const app = createApp({
       }
       healthOpen.value = true;
       cycleLoading.value = true;
-      try {
-        const d = await api('GET', '/api/persons/' + personDetail.value.person.id + '/cycles');
-        cycles.value = d.cycles || [];
-        cyclesNote.value = d.note || '';
-      } catch (e) { showError(e); }
+      try { await fetchCyclesInto(); } catch (e) { showError(e); }
       finally { cycleLoading.value = false; }
     }
     async function reloadCycles() {
       if (!healthOpen.value) return;
-      try {
-        const d = await api('GET', '/api/persons/' + personDetail.value.person.id + '/cycles');
-        cycles.value = d.cycles || [];
-        cyclesNote.value = d.note || '';
-      } catch (e) { showError(e); }
+      try { await fetchCyclesInto(); } catch (e) { showError(e); }
     }
     function resetAddCycleForm() {
       addCycleForm.cycle_type = ''; addCycleForm.label = ''; addCycleForm.anchor_date = '';
@@ -1851,7 +1853,7 @@ const app = createApp({
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
       EVENT_TYPES, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
       METRIC_KEYS, metricKey, metricRows, metricLoading, metricIsNumeric, metricDef, switchMetric, showAddMetric, addMetricForm, addingMetric, toggleAddMetric, submitAddMetric, deletingMetricId, askDeleteMetric, confirmDeleteMetric, metricChart, metricHover, onMetricChartMove, CHART_W, CHART_H, metricNumericRows, metricCategoryRows, showMetricList,
-      CYCLE_TYPES, healthOpen, cycles, cyclesNote, cycleLoading, toggleHealth, reloadCycles, showAddCycle, addCycleForm, addingCycle, toggleAddCycle, submitAddCycle, deletingCycleId, askDeleteCycle, confirmDeleteCycle, cycleTypeLabel, fmtDateOnly,
+      CYCLE_TYPES, healthOpen, cycles, cyclesNote, cycleLoading, toggleHealth, showAddCycle, addCycleForm, addingCycle, toggleAddCycle, submitAddCycle, deletingCycleId, askDeleteCycle, confirmDeleteCycle, cycleTypeLabel, fmtDateOnly,
       pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
       backfilling, backfillInfo, runBackfill,
     };

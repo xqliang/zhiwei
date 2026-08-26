@@ -1036,7 +1036,7 @@
               <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ cycleTypeLabel(c.cycle_type) }}</span>
               <div class="seg-text">
                 <div>
-                  <b>{{ c.label || cycleTypeLabel(c.cycle_type) }}</b>
+                  <b v-if="c.label">{{ c.label }}</b><!-- 无 label 时类型 chip 已表达身份，不再回退重复显示 -->
                   <span class="chip" :style="c.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ c.source === 'llm' ? 'AI' : '人工' }}</span>
                   <span v-if="c.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
                 </div>
@@ -1071,8 +1071,8 @@
               </select>
               <input class="txt" v-model="addCycleForm.label" placeholder="名称（药名等；生理期留空）" style="flex:1; min-width:120px">
               <input class="txt" v-model="addCycleForm.anchor_date" type="date" title="上次开始日" style="width:auto; min-width:130px">
-              <input class="txt" v-model="addCycleForm.period_days" type="number" placeholder="周期天数" style="width:auto; min-width:90px">
-              <input class="txt" v-model="addCycleForm.duration_days" type="number" placeholder="持续天数" style="width:auto; min-width:90px">
+              <input class="txt" v-model="addCycleForm.period_days" type="number" min="1" step="1" placeholder="周期天数" style="width:auto; min-width:90px">
+              <input class="txt" v-model="addCycleForm.duration_days" type="number" min="1" step="1" placeholder="持续天数" style="width:auto; min-width:90px">
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px">
               <input class="txt" v-model="addCycleForm.dosage" placeholder="剂量（如 1片）" style="flex:1; min-width:100px">
