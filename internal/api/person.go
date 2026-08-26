@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/profile"
 	"zhiwei/internal/repo"
@@ -67,7 +68,12 @@ var validPendingKinds = map[string]bool{
 // ---- 名册 ----
 
 func (h *PersonHandler) List(w http.ResponseWriter, r *http.Request) {
-	list, err := h.Persons.ListWithPending(r.Context(), 1)
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	list, err := h.Persons.ListWithPending(r.Context(), uid.Int64())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -76,6 +82,11 @@ func (h *PersonHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PersonHandler) Create(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	var req struct {
 		DisplayName string  `json:"display_name"`
 		SpeakerID   string  `json:"speaker_id"`
@@ -107,7 +118,7 @@ func (h *PersonHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	p, err := h.Service.ManualCreatePerson(r.Context(), name, speakerID, req.Summary)
+	p, err := h.Service.ManualCreatePerson(r.Context(), uid.Int64(), name, speakerID, req.Summary)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -152,12 +163,17 @@ type personDetailResp struct {
 }
 
 func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
 		return
 	}
-	p, err := h.Persons.Get(r.Context(), 1, id) // 阶段1：画像暂 user-1，阶段2 随登录用户
+	p, err := h.Persons.Get(r.Context(), uid.Int64(), id) // 按登录用户过滤：越权命中 0 行 → nil → 404
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -243,6 +259,11 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PersonHandler) Patch(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
@@ -258,7 +279,7 @@ func (h *PersonHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请求体非法", http.StatusBadRequest)
 		return
 	}
-	p, err := h.Persons.Get(r.Context(), 1, id) // 阶段1：画像暂 user-1，阶段2 随登录用户
+	p, err := h.Persons.Get(r.Context(), uid.Int64(), id) // 按登录用户过滤：越权命中 0 行 → nil → 404
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -272,7 +293,7 @@ func (h *PersonHandler) Patch(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "status 非法（active|pending|merged|dismissed）", http.StatusBadRequest)
 			return
 		}
-		if err := h.Service.ManualSetPersonStatus(r.Context(), id, req.Status); err != nil {
+		if err := h.Service.ManualSetPersonStatus(r.Context(), uid.Int64(), id, req.Status); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -318,7 +339,7 @@ func (h *PersonHandler) Patch(w http.ResponseWriter, r *http.Request) {
 			summary = req.Summary
 		}
 	}
-	if err := h.Service.ManualUpdatePerson(r.Context(), id, name, speakerID, summary); err != nil {
+	if err := h.Service.ManualUpdatePerson(r.Context(), uid.Int64(), id, name, speakerID, summary); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -326,19 +347,24 @@ func (h *PersonHandler) Patch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PersonHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
 		return
 	}
-	if p, err := h.Persons.Get(r.Context(), 1, id); err != nil { // 阶段1：画像暂 user-1，阶段2 随登录用户
+	if p, err := h.Persons.Get(r.Context(), uid.Int64(), id); err != nil { // 按登录用户过滤：越权命中 0 行 → nil → 404
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	} else if p == nil {
 		http.Error(w, "人物不存在", http.StatusNotFound)
 		return
 	}
-	if err := h.Service.ManualSetPersonStatus(r.Context(), id, "dismissed"); err != nil {
+	if err := h.Service.ManualSetPersonStatus(r.Context(), uid.Int64(), id, "dismissed"); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -348,6 +374,11 @@ func (h *PersonHandler) Delete(w http.ResponseWriter, r *http.Request) {
 // ---- 属性 ----
 
 func (h *PersonHandler) AddAttribute(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	pid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
@@ -367,8 +398,12 @@ func (h *PersonHandler) AddAttribute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "attr_key 与 value 必填", http.StatusBadRequest)
 		return
 	}
-	a, err := h.Service.ManualAddAttribute(r.Context(), pid, key, val)
+	a, err := h.Service.ManualAddAttribute(r.Context(), uid.Int64(), pid, key, val)
 	if err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "人物不存在", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -376,6 +411,11 @@ func (h *PersonHandler) AddAttribute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PersonHandler) PatchAttribute(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	pid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
@@ -416,8 +456,12 @@ func (h *PersonHandler) PatchAttribute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 手动改值 = 同 key 写新值（ManualAddAttribute 内部 supersede 旧 active 行）
-	na, err := h.Service.ManualAddAttribute(r.Context(), pid, a.AttrKey, val)
+	na, err := h.Service.ManualAddAttribute(r.Context(), uid.Int64(), pid, a.AttrKey, val)
 	if err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "属性不存在", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -425,12 +469,17 @@ func (h *PersonHandler) PatchAttribute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PersonHandler) DeleteAttribute(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	aid, err := ids.ParseID(chi.URLParam(r, "aid"))
 	if err != nil {
 		http.Error(w, "aid 非法", http.StatusBadRequest)
 		return
 	}
-	if err := h.Service.ManualDeleteAttribute(r.Context(), aid); err != nil {
+	if err := h.Service.ManualDeleteAttribute(r.Context(), uid.Int64(), aid); err != nil {
 		if errors.Is(err, profile.ErrNotFound) {
 			http.Error(w, "属性不存在", http.StatusNotFound)
 			return
@@ -444,6 +493,11 @@ func (h *PersonHandler) DeleteAttribute(w http.ResponseWriter, r *http.Request) 
 // ---- 关系 ----
 
 func (h *PersonHandler) AddRelationship(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	pid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
@@ -473,9 +527,13 @@ func (h *PersonHandler) AddRelationship(w http.ResponseWriter, r *http.Request) 
 		}
 		related = &rid
 	}
-	rel, err := h.Service.ManualAddRelationship(r.Context(), pid, req.RelationType,
+	rel, err := h.Service.ManualAddRelationship(r.Context(), uid.Int64(), pid, req.RelationType,
 		related, req.Direction, req.OrgName, req.Label)
 	if err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "人物不存在", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -483,12 +541,17 @@ func (h *PersonHandler) AddRelationship(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *PersonHandler) DeleteRelationship(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	rid, err := ids.ParseID(chi.URLParam(r, "rid"))
 	if err != nil {
 		http.Error(w, "rid 非法", http.StatusBadRequest)
 		return
 	}
-	if err := h.Service.ManualDeleteRelationship(r.Context(), rid); err != nil {
+	if err := h.Service.ManualDeleteRelationship(r.Context(), uid.Int64(), rid); err != nil {
 		if errors.Is(err, profile.ErrNotFound) {
 			http.Error(w, "关系不存在", http.StatusNotFound)
 			return
@@ -504,9 +567,22 @@ func (h *PersonHandler) DeleteRelationship(w http.ResponseWriter, r *http.Reques
 // ListEvents 人物大事记（全状态，时间倒序——repo ListByPerson 已排序）。
 // ?status=active 只看已生效（前端时间线默认态可过滤）。
 func (h *PersonHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	// 子表按 person_id 查询无 user 过滤，先确认 person 归属登录用户（越权 → 404）。
+	if p, err := h.Persons.Get(r.Context(), uid.Int64(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if p == nil {
+		http.Error(w, "人物不存在", http.StatusNotFound)
 		return
 	}
 	list, err := h.Events.ListByPerson(r.Context(), id)
@@ -529,6 +605,11 @@ func (h *PersonHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 // AddEvent 手动加大事记（走 Service：active/manual/conf=1.0 + 审计）。
 // event_type 9 枚举校验；occurred_at/endAt 原始串由 Service 的 parseEventAt 尽力解析。
 func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	pid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
@@ -564,9 +645,13 @@ func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 		}
 		related = &rid
 	}
-	e, err := h.Service.ManualAddEvent(r.Context(), pid, req.EventType, req.Title,
+	e, err := h.Service.ManualAddEvent(r.Context(), uid.Int64(), pid, req.EventType, req.Title,
 		req.Description, req.OccurredAt, req.EndAt, req.Location, related)
 	if err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "人物不存在", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -575,12 +660,17 @@ func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 
 // DeleteEvent 手动删事件 → dismissed + delete 审计。
 func (h *PersonHandler) DeleteEvent(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	eid, err := ids.ParseID(chi.URLParam(r, "eid"))
 	if err != nil {
 		http.Error(w, "eid 非法", http.StatusBadRequest)
 		return
 	}
-	if err := h.Service.ManualDeleteEvent(r.Context(), eid); err != nil {
+	if err := h.Service.ManualDeleteEvent(r.Context(), uid.Int64(), eid); err != nil {
 		if errors.Is(err, profile.ErrNotFound) {
 			http.Error(w, "事件不存在", http.StatusNotFound)
 			return
@@ -669,9 +759,22 @@ func parseMeasuredAt(s string) time.Time {
 // ListMetrics 人物时序指标（分组结构，每组按 measured_at 升序）。只返回 active+pending
 // （repo ListByPerson 已过滤）。?metric_key=weight 只看单一指标（可选）。
 func (h *PersonHandler) ListMetrics(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	// 子表按 person_id 查询无 user 过滤，先确认 person 归属登录用户（越权 → 404）。
+	if p, err := h.Persons.Get(r.Context(), uid.Int64(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if p == nil {
+		http.Error(w, "人物不存在", http.StatusNotFound)
 		return
 	}
 	list, err := h.Metrics.ListByPerson(r.Context(), id)
@@ -697,6 +800,11 @@ func (h *PersonHandler) ListMetrics(w http.ResponseWriter, r *http.Request) {
 // 类型校验（数值型必须有 value_num、类别型必须有 value_text）；measured_at 空 → 当前时间，
 // 否则 RFC3339 / "2006-01-02" 等尽力解析。
 func (h *PersonHandler) AddMetric(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	pid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
@@ -717,9 +825,13 @@ func (h *PersonHandler) AddMetric(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "metric_key 非法", http.StatusBadRequest)
 		return
 	}
-	m, err := h.Service.ManualAddMetric(r.Context(), pid, req.MetricKey,
+	m, err := h.Service.ManualAddMetric(r.Context(), uid.Int64(), pid, req.MetricKey,
 		req.ValueNum, req.ValueText, req.Unit, parseMeasuredAt(req.MeasuredAt))
 	if err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "人物不存在", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -728,12 +840,17 @@ func (h *PersonHandler) AddMetric(w http.ResponseWriter, r *http.Request) {
 
 // DeleteMetric 手动删测点 → dismissed + delete 审计。
 func (h *PersonHandler) DeleteMetric(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	mid, err := ids.ParseID(chi.URLParam(r, "mid"))
 	if err != nil {
 		http.Error(w, "mid 非法", http.StatusBadRequest)
 		return
 	}
-	if err := h.Service.ManualDeleteMetric(r.Context(), mid); err != nil {
+	if err := h.Service.ManualDeleteMetric(r.Context(), uid.Int64(), mid); err != nil {
 		if errors.Is(err, profile.ErrNotFound) {
 			http.Error(w, "测点不存在", http.StatusNotFound)
 			return
@@ -747,9 +864,22 @@ func (h *PersonHandler) DeleteMetric(w http.ResponseWriter, r *http.Request) {
 // ---- 修改历史 ----
 
 func (h *PersonHandler) History(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	// 变更历史按 person_id 查询无 user 过滤，先确认 person 归属登录用户（越权 → 404）。
+	if p, err := h.Persons.Get(r.Context(), uid.Int64(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if p == nil {
+		http.Error(w, "人物不存在", http.StatusNotFound)
 		return
 	}
 	logs, err := h.ChangeLogs.ListByPerson(r.Context(), id,
@@ -784,8 +914,13 @@ type pendingItem struct {
 }
 
 func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	ctx := r.Context()
-	persons, err := h.Persons.List(ctx, 1)
+	persons, err := h.Persons.List(ctx, uid.Int64())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -796,7 +931,7 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 	}
 	var items []pendingItem
 
-	attrs, err := h.Attributes.ListPending(ctx, 1)
+	attrs, err := h.Attributes.ListPending(ctx, uid.Int64())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -815,7 +950,7 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 		items = append(items, it)
 	}
 
-	rels, err := h.Relationships.ListPending(ctx, 1)
+	rels, err := h.Relationships.ListPending(ctx, uid.Int64())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -833,7 +968,7 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	events, err := h.Events.ListPending(ctx, 1)
+	events, err := h.Events.ListPending(ctx, uid.Int64())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -847,7 +982,7 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	metrics, err := h.Metrics.ListPending(ctx, 1)
+	metrics, err := h.Metrics.ListPending(ctx, uid.Int64())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -874,6 +1009,11 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	kind := chi.URLParam(r, "kind")
 	if !validPendingKinds[kind] {
 		http.Error(w, "kind 非法（person|attribute|relationship|event|metric）", http.StatusBadRequest)
@@ -884,7 +1024,7 @@ func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id 非法", http.StatusBadRequest)
 		return
 	}
-	if err := h.Service.ConfirmPending(r.Context(), kind, id); err != nil {
+	if err := h.Service.ConfirmPending(r.Context(), uid.Int64(), kind, id); err != nil {
 		writePendingErr(w, err)
 		return
 	}
@@ -892,6 +1032,11 @@ func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PersonHandler) DismissPending(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	kind := chi.URLParam(r, "kind")
 	if !validPendingKinds[kind] {
 		http.Error(w, "kind 非法（person|attribute|relationship|event|metric）", http.StatusBadRequest)
@@ -902,7 +1047,7 @@ func (h *PersonHandler) DismissPending(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id 非法", http.StatusBadRequest)
 		return
 	}
-	if err := h.Service.DismissPending(r.Context(), kind, id); err != nil {
+	if err := h.Service.DismissPending(r.Context(), uid.Int64(), kind, id); err != nil {
 		writePendingErr(w, err)
 		return
 	}
@@ -935,6 +1080,12 @@ type extractResult struct {
 // Extract 触发画像抽取：带 session_id 抽单个；不带则全量回填最近的 completed
 // session（上限 50，防单请求过久）。同步执行（MVP 规模）。
 func (h *PersonHandler) Extract(w http.ResponseWriter, r *http.Request) {
+	// 鉴权闸门（与其它 person/profile 端点一致）；ExtractSession 的 session 归属切换属 2B/后台
+	// 范畴（本阶段 pipeline 仍 user-1），故此处仅校验登录态、不改 ExtractSession 签名。
+	if _, ok := auth.UserID(r.Context()); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	var req struct {
 		SessionID string `json:"session_id"`
 	}

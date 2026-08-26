@@ -305,14 +305,14 @@ func TestApplyEventFacts(t *testing.T) {
 	}
 
 	// 手动加/删事件
-	me, err := svc.ManualAddEvent(ctx, oid, "健康", "确诊高血压", "长期服药", "2025-06-01", "", "北京协和", nil)
+	me, err := svc.ManualAddEvent(ctx, 1, oid, "健康", "确诊高血压", "长期服药", "2025-06-01", "", "北京协和", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if me.Status != "active" || me.Source != "manual" || me.OccurredAt == nil {
 		t.Fatalf("手动事件错误: %+v", me)
 	}
-	if err := svc.ManualDeleteEvent(ctx, me.ID); err != nil {
+	if err := svc.ManualDeleteEvent(ctx, 1, me.ID); err != nil {
 		t.Fatal(err)
 	}
 	if d, _ := svc.Events.Get(ctx, me.ID); d.Status != "dismissed" {

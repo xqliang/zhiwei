@@ -13,6 +13,7 @@ web/app.*.js
 /embed
 # 主服务 go build 落在仓库根的二进制，勿提交
 /zhiwei-server
+/zhiwei-adduser
 # 声纹 sidecar 的本地测试 venv（py3.14 + fastapi/numpy），勿提交
 services/voiceprint/.venv/
 # Python 字节码缓存（sidecar 引入 Python 后新增）

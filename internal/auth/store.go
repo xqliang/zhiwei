@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 
 	"zhiwei/internal/ids"
@@ -58,6 +60,34 @@ func (s *Store) GetUser(ctx context.Context, id ids.ID) (*User, error) {
 		return nil, err
 	}
 	return &u, nil
+}
+
+// CreateUser 建一个用户（username 唯一）：雪花生成 id 并返回。
+// 用户名冲突返回可辨中文错误——正常路径先 GetUserByUsername 查重命中即返回；
+// 并发下若查重与 INSERT 之间被抢插，DB 的 UNIQUE 约束会报 1062，这里同样归一成
+// 同一可辨错误（并发安全兜底，绝不会写入重复用户名）。passwordHash 空即建号但禁登。
+func (s *Store) CreateUser(ctx context.Context, username, passwordHash, displayName string) (ids.ID, error) {
+	existing, err := s.GetUserByUsername(ctx, username)
+	if err != nil {
+		return 0, err
+	}
+	if existing != nil {
+		return 0, fmt.Errorf("用户名已存在: %s", username)
+	}
+
+	id := ids.New()
+	_, err = s.DB.ExecContext(ctx,
+		`INSERT INTO app_user (id, username, password_hash, display_name) VALUES (?, ?, ?, ?)`,
+		id.Int64(), username, passwordHash, displayName)
+	if err != nil {
+		// MySQL error 1062 = 唯一键冲突（uk_user_username）：归一成可辨错误。
+		var myErr *mysql.MySQLError
+		if errors.As(err, &myErr) && myErr.Number == 1062 {
+			return 0, fmt.Errorf("用户名已存在: %s", username)
+		}
+		return 0, err
+	}
+	return id, nil
 }
 
 // SetPasswordHash 更新指定用户的口令哈希。传入空串即「清除密码」（禁登）。

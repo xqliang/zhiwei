@@ -283,7 +283,7 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if !isKnownAttrKey(attrKey) { // 双保险：confirm 端也校验 catalog(propose 已校，但防未来别的提议源不 gate 就静默写入非法键)
 			return nil, fmt.Errorf("profile_attr 非法属性键: %s", attrKey)
 		}
-		row, err := d.Profile.ManualAddAttributeExt(ctx, tx, *p.TargetID, attrKey, value)
+		row, err := d.Profile.ManualAddAttributeExt(ctx, tx, toolUserID, *p.TargetID, attrKey, value)
 		if err != nil {
 			return nil, err
 		}
@@ -297,7 +297,7 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		eventType := newStr("event_type")
 		title := newStr("title")
 		occurredAt := newStr("occurred_at")
-		row, err := d.Profile.ManualAddEventExt(ctx, tx, *p.TargetID, eventType, title, "", occurredAt, "", "", nil)
+		row, err := d.Profile.ManualAddEventExt(ctx, tx, toolUserID, *p.TargetID, eventType, title, "", occurredAt, "", "", nil)
 		if err != nil {
 			return nil, err
 		}
@@ -327,14 +327,14 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 				id := ex.ID
 				relID = &id
 			} else { // 未命中 → 在同事务内新建人物（active/manual），再用其 id 建关系
-				np, err := d.Profile.ManualCreatePersonExt(ctx, tx, name, nil, nil)
+				np, err := d.Profile.ManualCreatePersonExt(ctx, tx, toolUserID, name, nil, nil)
 				if err != nil {
 					return nil, err
 				}
 				relID = &np.ID
 			}
 		}
-		row, err := d.Profile.ManualAddRelationshipExt(ctx, tx, *p.TargetID, relationType, relID,
+		row, err := d.Profile.ManualAddRelationshipExt(ctx, tx, toolUserID, *p.TargetID, relationType, relID,
 			newStr("direction"), newStr("org_name"), newStr("label"))
 		if err != nil {
 			return nil, err
@@ -358,7 +358,7 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if t, ok := parseMetricMeasuredAt(newStr("measured_at")); ok {
 			measuredAt = t
 		}
-		row, err := d.Profile.ManualAddMetricExt(ctx, tx, *p.TargetID, metricKey,
+		row, err := d.Profile.ManualAddMetricExt(ctx, tx, toolUserID, *p.TargetID, metricKey,
 			newFloatPtr("value_num"), newStr("value_text"), newStr("unit"), measuredAt)
 		if err != nil {
 			return nil, err

@@ -86,6 +86,47 @@ func TestPersonLifecycle(t *testing.T) {
 	}
 }
 
+// TestEnsureOwnerForUser 验证为指定 user 幂等引导 owner「我」：
+// 首次创建（is_owner=1、DisplayName="我"、UserID 落在该域），二次为 no-op（仍是同一 owner）。
+func TestEnsureOwnerForUser(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	persons := &PersonRepo{DB: db}
+
+	// 独占一个大 user_id，避开 user_id=1 存量域；用例结束清理该域全部 person 行。
+	const uid int64 = 900000000000000001
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM person WHERE user_id = ?`, uid)
+	})
+
+	// 首次：无 owner → 创建。
+	if err := EnsureOwnerForUser(ctx, persons, uid); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := persons.GetOwner(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner == nil || !owner.IsOwner || owner.DisplayName != "我" || owner.UserID != uid {
+		t.Fatalf("owner 未按预期创建: %+v", owner)
+	}
+
+	// 二次：幂等 no-op，仍命中同一 owner（未重复创建）。
+	if err := EnsureOwnerForUser(ctx, persons, uid); err != nil {
+		t.Fatal(err)
+	}
+	owner2, err := persons.GetOwner(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner2 == nil || owner2.ID != owner.ID {
+		t.Fatalf("幂等失败：owner 被重复创建 first=%d second=%+v", owner.ID, owner2)
+	}
+}
+
 func TestPersonListWithPendingAndRecentSessions(t *testing.T) {
 	db, err := NewDB(TestDSN(t))
 	if err != nil {

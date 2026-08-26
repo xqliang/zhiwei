@@ -99,7 +99,9 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 	// s.now()（墙钟，仅测试/无 session 场景；生产 extract 恒有真 session）。
 	fallbackAt := s.now()
 	if s.Sessions != nil {
-		if sess, err := s.Sessions.Get(ctx, 1, sessionID); err == nil && sess != nil && !sess.CreatedAt.IsZero() { // 阶段1：暂 user-1
+		// 用 threaded userID（本次 ApplyFacts 的登录用户）读 session，与写归属一致：
+		// 越权读他人 session 命中 0 行 → 回退墙钟，不泄漏他人 created_at。
+		if sess, err := s.Sessions.Get(ctx, userID, sessionID); err == nil && sess != nil && !sess.CreatedAt.IsZero() {
 			fallbackAt = sess.CreatedAt
 		}
 	}
@@ -120,7 +122,7 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 func (s *Service) applyFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
 	prov Provenance, memRows []repo.MemoryRow, st *ApplyStats) error {
 
-	personID, err := s.resolveSubject(ctx, tx, f.Subject, prov)
+	personID, err := s.resolveSubject(ctx, tx, userID, f.Subject, prov)
 	if err != nil {
 		return err
 	}
@@ -216,7 +218,7 @@ func (s *Service) applyAttributeFact(ctx context.Context, tx *sqlx.Tx, userID in
 func (s *Service) applyRelationshipFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
 	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
 
-	relatedID, err := s.resolveSubject(ctx, tx, f.Related, prov)
+	relatedID, err := s.resolveSubject(ctx, tx, userID, f.Related, prov)
 	if err != nil {
 		return err
 	}
@@ -306,7 +308,7 @@ func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 		// related 解析（可选）：解析不到存空，不 skip 事件
 		var relatedIDs ids.List
 		if f.Related.Kind != "" {
-			if rid, err := s.resolveSubject(ctx, tx, f.Related, prov); err != nil {
+			if rid, err := s.resolveSubject(ctx, tx, userID, f.Related, prov); err != nil {
 				return err
 			} else if rid != 0 {
 				relatedIDs = ids.List{rid}
@@ -398,35 +400,35 @@ func (s *Service) applyMetricFact(ctx context.Context, tx *sqlx.Tx, userID int64
 //	mentioned:名 → 按名找，找不到新建 source=llm status=pending 人物（走确认防噪声）。
 //
 // 返回 0 表示解析不到（调用方跳过该事实）。
-func (s *Service) resolveSubject(ctx context.Context, tx *sqlx.Tx, subj Subject, prov Provenance) (ids.ID, error) {
+func (s *Service) resolveSubject(ctx context.Context, tx *sqlx.Tx, userID int64, subj Subject, prov Provenance) (ids.ID, error) {
 	switch subj.Kind {
 	case "self":
-		return s.ownerID(ctx, tx)
+		return s.ownerID(ctx, tx, userID)
 	case "speaker":
 		if pid, err := s.personBySpeakerName(ctx, tx, subj.Name); err != nil {
 			return 0, err
 		} else if pid != 0 {
 			return pid, nil
 		}
-		return s.resolveOrCreateByName(ctx, tx, subj.Name, prov)
+		return s.resolveOrCreateByName(ctx, tx, userID, subj.Name, prov)
 	case "relation":
-		if pid, err := s.personByOwnerRelation(ctx, tx, subj.Relation); err != nil {
+		if pid, err := s.personByOwnerRelation(ctx, tx, userID, subj.Relation); err != nil {
 			return 0, err
 		} else if pid != 0 {
 			return pid, nil
 		}
 		if subj.Name != "" {
-			return s.resolveOrCreateByName(ctx, tx, subj.Name, prov)
+			return s.resolveOrCreateByName(ctx, tx, userID, subj.Name, prov)
 		}
 		return 0, nil
 	case "mentioned":
-		return s.resolveOrCreateByName(ctx, tx, subj.Name, prov)
+		return s.resolveOrCreateByName(ctx, tx, userID, subj.Name, prov)
 	}
 	return 0, nil
 }
 
-func (s *Service) ownerID(ctx context.Context, tx *sqlx.Tx) (ids.ID, error) {
-	owner, err := s.Persons.GetOwnerExt(ctx, tx, 1)
+func (s *Service) ownerID(ctx context.Context, tx *sqlx.Tx, userID int64) (ids.ID, error) {
+	owner, err := s.Persons.GetOwnerExt(ctx, tx, userID)
 	if err != nil {
 		return 0, err
 	}
@@ -467,8 +469,8 @@ func (s *Service) personBySpeakerName(ctx context.Context, tx *sqlx.Tx, name str
 // 这类属性事实的主体（relation:配偶）依赖同批刚新建、尚未提交的配偶关系；非事务读看不到
 // 未提交行，会把该事实误判为「主体解析不到」而跳过。查询语义（取该类型、对端为具体 person、
 // active 的最老一条）下沉到 repo.FindActiveRelatedPersonIDExt——业务层不写裸 SQL（见 db.go）。
-func (s *Service) personByOwnerRelation(ctx context.Context, tx *sqlx.Tx, relationType string) (ids.ID, error) {
-	owner, err := s.Persons.GetOwnerExt(ctx, tx, 1)
+func (s *Service) personByOwnerRelation(ctx context.Context, tx *sqlx.Tx, userID int64, relationType string) (ids.ID, error) {
+	owner, err := s.Persons.GetOwnerExt(ctx, tx, userID)
 	if err != nil || owner == nil {
 		return 0, err
 	}
@@ -484,19 +486,19 @@ func (s *Service) personByOwnerRelation(ctx context.Context, tx *sqlx.Tx, relati
 
 // resolveOrCreateByName 按显示名找 active/pending 人物；找不到新建
 // source=llm status=pending 的人物并记审计（spec §2 决策 2：自动建档走确认）。
-func (s *Service) resolveOrCreateByName(ctx context.Context, tx *sqlx.Tx, name string, prov Provenance) (ids.ID, error) {
+func (s *Service) resolveOrCreateByName(ctx context.Context, tx *sqlx.Tx, userID int64, name string, prov Provenance) (ids.ID, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return 0, nil
 	}
-	p, err := s.Persons.FindByNameExt(ctx, tx, 1, name)
+	p, err := s.Persons.FindByNameExt(ctx, tx, userID, name)
 	if err != nil {
 		return 0, err
 	}
 	if p != nil {
 		return p.ID, nil
 	}
-	p = &repo.Person{DisplayName: name, Source: "llm", Status: "pending"}
+	p = &repo.Person{UserID: userID, DisplayName: name, Source: "llm", Status: "pending"}
 	if err := s.Persons.CreateExt(ctx, tx, p); err != nil {
 		return 0, err
 	}

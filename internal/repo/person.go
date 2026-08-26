@@ -197,18 +197,26 @@ SELECT session_id FROM (
 	return out, err
 }
 
-// EnsurePersonBootstrap 幂等回填（main.go 启动时调用，迁移 000005 之后）：
-// ① 无 is_owner=1 人物则建「我」；② 为每个未绑定的 active speaker 建人物
-// （display_name=声纹名）。查后再建，重跑无副作用。
-func EnsurePersonBootstrap(ctx context.Context, persons *PersonRepo, speakers *SpeakerRepo) error {
-	owner, err := persons.GetOwner(ctx, 1)
+// EnsureOwnerForUser 幂等：确保 userID 域下存在 owner「我」（is_owner=1）。
+// 已存在则 no-op；不存在则建 {UserID, DisplayName:"我", IsOwner:true}。
+// 供新用户创建引导（cmd/zhiwei-adduser）与启动 bootstrap（user-1）复用。
+func EnsureOwnerForUser(ctx context.Context, persons *PersonRepo, userID int64) error {
+	owner, err := persons.GetOwner(ctx, userID)
 	if err != nil {
 		return err
 	}
-	if owner == nil {
-		if err := persons.Create(ctx, &Person{DisplayName: "我", IsOwner: true}); err != nil {
-			return err
-		}
+	if owner != nil {
+		return nil
+	}
+	return persons.Create(ctx, &Person{UserID: userID, DisplayName: "我", IsOwner: true})
+}
+
+// EnsurePersonBootstrap 幂等回填（main.go 启动时调用，迁移 000005 之后）：
+// ① user-1 无 is_owner=1 人物则建「我」（复用 EnsureOwnerForUser）；② 为每个未绑定的
+// active speaker 建人物（display_name=声纹名，仍 user-1 域）。查后再建，重跑无副作用。
+func EnsurePersonBootstrap(ctx context.Context, persons *PersonRepo, speakers *SpeakerRepo) error {
+	if err := EnsureOwnerForUser(ctx, persons, 1); err != nil {
+		return err
 	}
 	list, err := speakers.List(ctx)
 	if err != nil {

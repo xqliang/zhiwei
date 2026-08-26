@@ -33,7 +33,7 @@ func TestManualAddAttributeExt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a1, err := svc.ManualAddAttributeExt(ctx, tx, oid, key, "v1EXT")
+	a1, err := svc.ManualAddAttributeExt(ctx, tx, 1, oid, key, "v1EXT")
 	if err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("ManualAddAttributeExt#1: %v", err)
@@ -59,7 +59,7 @@ func TestManualAddAttributeExt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a2, err := svc.ManualAddAttributeExt(ctx, tx2, oid, key, "v2EXT")
+	a2, err := svc.ManualAddAttributeExt(ctx, tx2, 1, oid, key, "v2EXT")
 	if err != nil {
 		_ = tx2.Rollback()
 		t.Fatalf("ManualAddAttributeExt#2: %v", err)
@@ -79,7 +79,7 @@ func TestManualAddAttributeExt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a3, err := svc.ManualAddAttributeExt(ctx, tx3, oid, key, "v2EXT")
+	a3, err := svc.ManualAddAttributeExt(ctx, tx3, 1, oid, key, "v2EXT")
 	if err != nil {
 		_ = tx3.Rollback()
 		t.Fatalf("ManualAddAttributeExt#3(no-op): %v", err)
@@ -119,7 +119,7 @@ func TestManualAddEventExt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e1, err := svc.ManualAddEventExt(ctx, tx, oid, "健康", title, "长期服药", "2025-06-01", "", "北京协和", nil)
+	e1, err := svc.ManualAddEventExt(ctx, tx, 1, oid, "健康", title, "长期服药", "2025-06-01", "", "北京协和", nil)
 	if err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("ManualAddEventExt: %v", err)
@@ -140,7 +140,7 @@ func TestManualAddEventExt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ManualAddEventExt(ctx, txBad, oid, "不存在的类型", "X", "", "", "", "", nil); err == nil {
+	if _, err := svc.ManualAddEventExt(ctx, txBad, 1, oid, "不存在的类型", "X", "", "", "", "", nil); err == nil {
 		_ = txBad.Rollback()
 		t.Fatalf("非法事件类型应报错")
 	}
@@ -166,7 +166,7 @@ func TestManualCreatePersonExt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := svc.ManualCreatePersonExt(ctx, tx, name, nil, nil)
+	p, err := svc.ManualCreatePersonExt(ctx, tx, 1, name, nil, nil)
 	if err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("ManualCreatePersonExt: %v", err)
@@ -211,7 +211,7 @@ func TestManualAddRelationshipExt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r1, err := svc.ManualAddRelationshipExt(ctx, tx, oid, "组织", nil, "upstream", "Ext测试公司ARX", label)
+	r1, err := svc.ManualAddRelationshipExt(ctx, tx, 1, oid, "组织", nil, "upstream", "Ext测试公司ARX", label)
 	if err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("ManualAddRelationshipExt: %v", err)
@@ -241,7 +241,7 @@ func TestManualAddRelationshipExt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ManualAddRelationshipExt(ctx, txBad, oid, "不存在的关系", nil, "", "X", label); err == nil {
+	if _, err := svc.ManualAddRelationshipExt(ctx, txBad, 1, oid, "不存在的关系", nil, "", "X", label); err == nil {
 		_ = txBad.Rollback()
 		t.Fatalf("非法 relation_type 应报错")
 	}

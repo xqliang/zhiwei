@@ -235,7 +235,7 @@ func TestManualMetric(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m1, err := svc.ManualAddMetricExt(ctx, tx, oid, "weight", fp(72.5), "", "", measuredAt)
+	m1, err := svc.ManualAddMetricExt(ctx, tx, 1, oid, "weight", fp(72.5), "", "", measuredAt)
 	if err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("ManualAddMetricExt: %v", err)
@@ -280,7 +280,7 @@ func TestManualMetric(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := svc.ManualAddMetricExt(ctx, txBad, oid, bc.key, bc.valueNum, bc.valueText, "", bc.measuredAt); err == nil {
+		if _, err := svc.ManualAddMetricExt(ctx, txBad, 1, oid, bc.key, bc.valueNum, bc.valueText, "", bc.measuredAt); err == nil {
 			_ = txBad.Rollback()
 			t.Fatalf("%s 应报错", bc.name)
 		}
@@ -288,7 +288,7 @@ func TestManualMetric(t *testing.T) {
 	}
 
 	// ③ ManualAddMetric 自持事务包装：类别型 diet=火锅（valueNum=nil），active/manual。
-	m2, err := svc.ManualAddMetric(ctx, oid, "diet", nil, "火锅", "", time.Date(2026, 8, 1, 19, 0, 0, 0, time.UTC))
+	m2, err := svc.ManualAddMetric(ctx, 1, oid, "diet", nil, "火锅", "", time.Date(2026, 8, 1, 19, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,14 +297,14 @@ func TestManualMetric(t *testing.T) {
 	}
 
 	// ④ ManualDeleteMetric → dismissed + delete 审计
-	if err := svc.ManualDeleteMetric(ctx, m1.ID); err != nil {
+	if err := svc.ManualDeleteMetric(ctx, 1, m1.ID); err != nil {
 		t.Fatal(err)
 	}
 	if d, _ := svc.Metrics.Get(ctx, m1.ID); d == nil || d.Status != "dismissed" {
 		t.Fatalf("删除应 dismissed: %+v", d)
 	}
 	// 删不存在的 → ErrNotFound
-	if err := svc.ManualDeleteMetric(ctx, ids.New()); err == nil {
+	if err := svc.ManualDeleteMetric(ctx, 1, ids.New()); err == nil {
 		t.Fatalf("删不存在测点应报错")
 	}
 }
@@ -344,14 +344,14 @@ func TestConfirmDismissMetric(t *testing.T) {
 	}
 
 	// 确认 68 → active
-	if err := svc.ConfirmPending(ctx, "metric", id68); err != nil {
+	if err := svc.ConfirmPending(ctx, 1, "metric", id68); err != nil {
 		t.Fatal(err)
 	}
 	if m, _ := svc.Metrics.Get(ctx, id68); m == nil || m.Status != "active" {
 		t.Fatalf("确认后应 active: %+v", m)
 	}
 	// 放弃 67 → dismissed
-	if err := svc.DismissPending(ctx, "metric", id67); err != nil {
+	if err := svc.DismissPending(ctx, 1, "metric", id67); err != nil {
 		t.Fatal(err)
 	}
 	if m, _ := svc.Metrics.Get(ctx, id67); m == nil || m.Status != "dismissed" {
@@ -359,10 +359,10 @@ func TestConfirmDismissMetric(t *testing.T) {
 	}
 
 	// 非 pending 再确认 → 报错；不存在 id → 报错
-	if err := svc.ConfirmPending(ctx, "metric", id68); err == nil {
+	if err := svc.ConfirmPending(ctx, 1, "metric", id68); err == nil {
 		t.Fatalf("非 pending 再确认应报错")
 	}
-	if err := svc.ConfirmPending(ctx, "metric", ids.New()); err == nil {
+	if err := svc.ConfirmPending(ctx, 1, "metric", ids.New()); err == nil {
 		t.Fatalf("不存在 id 应报错")
 	}
 }

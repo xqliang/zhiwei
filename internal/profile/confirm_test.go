@@ -30,7 +30,7 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	})
 
 	// ---- 手动建人物 + 手动加属性 ----
-	p, err := svc.ManualCreatePerson(ctx, "Bob", nil, nil)
+	p, err := svc.ManualCreatePerson(ctx, 1, "Bob", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestManualAndConfirmFlows(t *testing.T) {
 		t.Fatalf("手动人物应 active/manual: %+v", p)
 	}
 	// 手动加属性：单值 key 无现值 → active conf=1.0 source=manual
-	a1, err := svc.ManualAddAttribute(ctx, oid, "city", "北京")
+	a1, err := svc.ManualAddAttribute(ctx, 1, oid, "city", "北京")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestManualAndConfirmFlows(t *testing.T) {
 		t.Fatalf("手动属性错误: %+v", a1)
 	}
 	// 手动改值：旧行 superseded、新行 active 且 supersedes_id 指向旧行
-	a2, err := svc.ManualAddAttribute(ctx, oid, "city", "上海")
+	a2, err := svc.ManualAddAttribute(ctx, 1, oid, "city", "上海")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestManualAndConfirmFlows(t *testing.T) {
 		t.Fatalf("旧值应 superseded: %+v", old)
 	}
 	// 手动加关系
-	rel, err := svc.ManualAddRelationship(ctx, oid, "朋友", &p.ID, "", "", "老朋友")
+	rel, err := svc.ManualAddRelationship(ctx, 1, oid, "朋友", &p.ID, "", "", "老朋友")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	if cityPend == nil {
 		t.Fatal("city 深圳 pending 未生成")
 	}
-	if err := svc.ConfirmPending(ctx, "attribute", *cityPend); err != nil {
+	if err := svc.ConfirmPending(ctx, 1, "attribute", *cityPend); err != nil {
 		t.Fatal(err)
 	}
 	confirmed, _ := svc.Attributes.Get(ctx, *cityPend)
@@ -103,7 +103,7 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	}
 
 	// ---- 手动删属性 → dismissed（放最后：前面冲突流依赖 city 的 active 行）----
-	if err := svc.ManualDeleteAttribute(ctx, a2.ID); err != nil {
+	if err := svc.ManualDeleteAttribute(ctx, 1, a2.ID); err != nil {
 		t.Fatal(err)
 	}
 	if d, _ := svc.Attributes.Get(ctx, a2.ID); d.Status != "dismissed" {
@@ -120,7 +120,7 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	if len(pend2) == 0 {
 		t.Fatal("应有 pending")
 	}
-	if err := svc.DismissPending(ctx, "attribute", pend2[0].ID); err != nil {
+	if err := svc.DismissPending(ctx, 1, "attribute", pend2[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	if d, _ := svc.Attributes.Get(ctx, pend2[0].ID); d.Status != "dismissed" {
@@ -141,7 +141,7 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	if cand == nil || cand.Status != "pending" {
 		t.Fatalf("应为 pending 人物: %+v", cand)
 	}
-	if err := svc.ConfirmPending(ctx, "person", cand.ID); err != nil {
+	if err := svc.ConfirmPending(ctx, 1, "person", cand.ID); err != nil {
 		t.Fatal(err)
 	}
 	if c2, _ := svc.Persons.Get(ctx, 1, cand.ID); c2.Status != "active" {
@@ -154,7 +154,7 @@ func TestManualAndConfirmFlows(t *testing.T) {
 		t.Fatal("应有 pending 关系")
 	}
 	relPendID := relPend[0].ID
-	if err := svc.ConfirmPending(ctx, "relationship", relPendID); err != nil {
+	if err := svc.ConfirmPending(ctx, 1, "relationship", relPendID); err != nil {
 		t.Fatal(err)
 	}
 	if rc, _ := svc.Relationships.Get(ctx, relPendID); rc == nil || rc.Status != "active" {
@@ -162,19 +162,19 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	}
 
 	// ---- 手动编辑/归档人物 + 手动删关系（最小覆盖）----
-	if err := svc.ManualUpdatePerson(ctx, p.ID, "Bob2", nil, nil); err != nil {
+	if err := svc.ManualUpdatePerson(ctx, 1, p.ID, "Bob2", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := svc.Persons.Get(ctx, 1, p.ID); b == nil || b.DisplayName != "Bob2" {
 		t.Fatalf("改名后应为 Bob2: %+v", b)
 	}
-	if err := svc.ManualSetPersonStatus(ctx, p.ID, "dismissed"); err != nil {
+	if err := svc.ManualSetPersonStatus(ctx, 1, p.ID, "dismissed"); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := svc.Persons.Get(ctx, 1, p.ID); b == nil || b.Status != "dismissed" {
 		t.Fatalf("归档后应 dismissed: %+v", b)
 	}
-	if err := svc.ManualDeleteRelationship(ctx, rel.ID); err != nil {
+	if err := svc.ManualDeleteRelationship(ctx, 1, rel.ID); err != nil {
 		t.Fatal(err)
 	}
 	if r, _ := svc.Relationships.Get(ctx, rel.ID); r == nil || r.Status != "dismissed" {
@@ -182,10 +182,10 @@ func TestManualAndConfirmFlows(t *testing.T) {
 	}
 
 	// ---- 不存在/状态非法 → 错误 ----
-	if err := svc.ConfirmPending(ctx, "attribute", ids.New()); err == nil {
+	if err := svc.ConfirmPending(ctx, 1, "attribute", ids.New()); err == nil {
 		t.Fatal("不存在的 id 应报错")
 	}
-	if err := svc.ConfirmPending(ctx, "bogus", a1.ID); err == nil {
+	if err := svc.ConfirmPending(ctx, 1, "bogus", a1.ID); err == nil {
 		t.Fatal("非法 kind 应报错")
 	}
 }
@@ -220,7 +220,7 @@ func TestConfirmEvent(t *testing.T) {
 	}
 
 	// 确认 → active + confirm 审计
-	if err := svc.ConfirmPending(ctx, "event", evID); err != nil {
+	if err := svc.ConfirmPending(ctx, 1, "event", evID); err != nil {
 		t.Fatal(err)
 	}
 	e, _ := svc.Events.Get(ctx, evID)
@@ -245,7 +245,7 @@ func TestConfirmEvent(t *testing.T) {
 	if evID2 == 0 {
 		t.Fatal("第二条 pending 事件未生成")
 	}
-	if err := svc.DismissPending(ctx, "event", evID2); err != nil {
+	if err := svc.DismissPending(ctx, 1, "event", evID2); err != nil {
 		t.Fatal(err)
 	}
 	if d, _ := svc.Events.Get(ctx, evID2); d.Status != "dismissed" {
@@ -253,10 +253,10 @@ func TestConfirmEvent(t *testing.T) {
 	}
 
 	// 非 pending 再确认 → 报错；非法 kind → 报错
-	if err := svc.ConfirmPending(ctx, "event", evID); err == nil {
+	if err := svc.ConfirmPending(ctx, 1, "event", evID); err == nil {
 		t.Fatal("非 pending 再确认应报错")
 	}
-	if err := svc.ConfirmPending(ctx, "bogus", evID); err == nil {
+	if err := svc.ConfirmPending(ctx, 1, "bogus", evID); err == nil {
 		t.Fatal("非法 kind 应报错")
 	}
 }

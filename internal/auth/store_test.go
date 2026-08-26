@@ -81,6 +81,41 @@ func TestGetUser(t *testing.T) {
 	}
 }
 
+// TestCreateUser 验证建号后可按用户名取回、id 非零、字段落库正确，且重名返回可辨错误。
+// 新建用户由 testStore 的 Cleanup 统一清理（DELETE FROM app_user WHERE id <> 1）。
+func TestCreateUser(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	hash, err := HashPassword("pw")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	uid, err := s.CreateUser(ctx, "alice-2c", hash, "爱丽丝")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if uid == 0 {
+		t.Fatal("CreateUser 返回的 id 不应为零")
+	}
+
+	got, err := s.GetUserByUsername(ctx, "alice-2c")
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if got == nil {
+		t.Fatal("建号后按用户名应命中，实际为 nil")
+	}
+	if got.ID != uid || got.DisplayName != "爱丽丝" || got.PasswordHash != hash {
+		t.Fatalf("建号后取回字段不符: %+v (want id=%d)", got, uid)
+	}
+
+	// 重名 → 返回错误（不静默成功）。
+	if _, err := s.CreateUser(ctx, "alice-2c", hash, "另一个爱丽丝"); err == nil {
+		t.Fatal("重名用户应返回错误")
+	}
+}
+
 // TestSetPasswordHash 验证写入后可读回。
 func TestSetPasswordHash(t *testing.T) {
 	s := testStore(t)

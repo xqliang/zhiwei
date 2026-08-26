@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
 	"zhiwei/internal/ids"
 	"zhiwei/internal/profile"
 	"zhiwei/internal/provider"
@@ -53,7 +51,7 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 	if err := repo.EnsurePersonBootstrap(context.Background(), svc.Persons, svc.Speakers); err != nil {
 		t.Fatal(err)
 	}
-	r := chi.NewRouter()
+	r := newAuthedRouter() // 注入登录用户 1（handler 现要求 auth.UserID，否则 401）
 	RegisterPerson(r, &PersonHandler{
 		Persons: svc.Persons, Attributes: svc.Attributes,
 		Relationships: svc.Relationships, ChangeLogs: svc.ChangeLogs,

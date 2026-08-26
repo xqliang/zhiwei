@@ -36,7 +36,11 @@ type ExtractResult struct {
 //     session 时可安全跳过这类 session，不因个别缺转写而整批失败）。
 func (s *Service) ExtractSession(ctx context.Context, sessionID ids.ID) (ExtractResult, error) {
 	var res ExtractResult
-	ss, err := s.Sessions.Get(ctx, 1, sessionID) // 阶段1：后台抽取暂 user-1，阶段2 随登录用户
+	// 引导读：ExtractSession 无 caller 传入的 userID，取到 ss 前无法用 ss.UserID 反查自己，
+	// 故这一步按 user-1 引导（2A：后台抽取/pipeline 仍 user-1；session 归属切换属 2B）。
+	// 取到 ss 后下游一律用 ss.UserID：人物名单 List(ss.UserID)、落库 ApplyFacts(…, ss.UserID, …)
+	//（后者再把 ss.UserID 下推到写行归属与 fallbackAt 的按用户读 session）。
+	ss, err := s.Sessions.Get(ctx, 1, sessionID)
 	if err != nil {
 		// SessionRepo.Get 用 sqlx GetContext，行不存在返回 sql.ErrNoRows。
 		if errors.Is(err, sql.ErrNoRows) {

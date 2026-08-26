@@ -12,7 +12,7 @@ import (
 // pending → active；attribute/relationship/event 若带 supersedes_id，被指向的旧行 → superseded。
 // metric 平面 append-only 无冲突路径，仅置 active。
 // 每步变更记审计（changed_by=user）。非 pending 行确认报错（幂等由前端/状态保证）。
-func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) error {
+func (s *Service) ConfirmPending(ctx context.Context, userID int64, kind string, id ids.ID) error {
 	tx, err := s.DB.BeginTxx(ctx, nil)
 	if err != nil {
 		return err
@@ -21,7 +21,7 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 
 	switch kind {
 	case "person":
-		p, err := s.Persons.Get(ctx, 1, id) // 阶段1：画像暂 user-1，阶段2 随登录用户
+		p, err := s.Persons.Get(ctx, userID, id) // 按登录用户过滤：越权命中 0 行 → nil → ErrNotFound
 		if err != nil {
 			return err
 		}
@@ -48,6 +48,9 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 		}
 		if a == nil {
 			return ErrNotFound
+		}
+		if err := s.assertPersonOwner(ctx, userID, a.PersonID); err != nil {
+			return err
 		}
 		if a.Status != "pending" {
 			return fmt.Errorf("仅 pending 状态可确认（当前 %s）", a.Status)
@@ -83,6 +86,9 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 		if rel == nil {
 			return ErrNotFound
 		}
+		if err := s.assertPersonOwner(ctx, userID, rel.PersonID); err != nil {
+			return err
+		}
 		if rel.Status != "pending" {
 			return fmt.Errorf("仅 pending 状态可确认（当前 %s）", rel.Status)
 		}
@@ -115,6 +121,9 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 		}
 		if e == nil {
 			return ErrNotFound
+		}
+		if err := s.assertPersonOwner(ctx, userID, e.PersonID); err != nil {
+			return err
 		}
 		if e.Status != "pending" {
 			return fmt.Errorf("仅 pending 状态可确认（当前 %s）", e.Status)
@@ -152,6 +161,9 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 		if m == nil {
 			return ErrNotFound
 		}
+		if err := s.assertPersonOwner(ctx, userID, m.PersonID); err != nil {
+			return err
+		}
 		if m.Status != "pending" {
 			return fmt.Errorf("仅 pending 状态可确认（当前 %s）", m.Status)
 		}
@@ -174,7 +186,7 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 }
 
 // DismissPending 放弃一条 pending（或手动 dismiss 任意行）→ dismissed + 审计。
-func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) error {
+func (s *Service) DismissPending(ctx context.Context, userID int64, kind string, id ids.ID) error {
 	tx, err := s.DB.BeginTxx(ctx, nil)
 	if err != nil {
 		return err
@@ -183,7 +195,7 @@ func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) er
 
 	switch kind {
 	case "person":
-		p, err := s.Persons.Get(ctx, 1, id) // 阶段1：画像暂 user-1，阶段2 随登录用户
+		p, err := s.Persons.Get(ctx, userID, id) // 按登录用户过滤：越权命中 0 行 → nil → ErrNotFound
 		if err != nil {
 			return err
 		}
@@ -208,6 +220,9 @@ func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) er
 		if a == nil {
 			return ErrNotFound
 		}
+		if err := s.assertPersonOwner(ctx, userID, a.PersonID); err != nil {
+			return err
+		}
 		if err := s.Attributes.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
 			return err
 		}
@@ -226,6 +241,9 @@ func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) er
 		if rel == nil {
 			return ErrNotFound
 		}
+		if err := s.assertPersonOwner(ctx, userID, rel.PersonID); err != nil {
+			return err
+		}
 		if err := s.Relationships.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
 			return err
 		}
@@ -242,6 +260,9 @@ func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) er
 		}
 		if e == nil {
 			return ErrNotFound
+		}
+		if err := s.assertPersonOwner(ctx, userID, e.PersonID); err != nil {
+			return err
 		}
 		if err := s.Events.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
 			return err
@@ -260,6 +281,9 @@ func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) er
 		if m == nil {
 			return ErrNotFound
 		}
+		if err := s.assertPersonOwner(ctx, userID, m.PersonID); err != nil {
+			return err
+		}
 		if err := s.Metrics.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
 			return err
 		}
@@ -273,4 +297,18 @@ func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) er
 		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric）", kind)
 	}
 	return tx.Commit()
+}
+
+// assertPersonOwner 堵子表 IDOR：子表行（attribute/relationship/event/metric）的 Get 无
+// user 过滤，故 confirm/dismiss 前先按行的 person_id 反查 person 是否归属登录用户——越权
+// 命中 0 行 → nil → ErrNotFound（API 层转 404，不泄漏他人行的存在性）。
+func (s *Service) assertPersonOwner(ctx context.Context, userID int64, personID ids.ID) error {
+	p, err := s.Persons.Get(ctx, userID, personID)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return ErrNotFound
+	}
+	return nil
 }
