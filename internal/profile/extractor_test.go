@@ -157,6 +157,35 @@ func TestExtractorEventNoCollapse(t *testing.T) {
 	}
 }
 
+// TestExtractorEventNormalizedTitleCollapse 是 P2a③ 在批内去重侧的护栏：同一窗口内同主体、
+// 同 event_type 的两条事实，标题仅差标点/空格/大小写——factKey 用 repo.NormalizeTitle 归一化后
+// 判别键相同 → 塌缩成 1 条（保高置信）。须与 DB 自然键同步归一化：否则近重复标题在批内不塌缩、
+// 到 Service 又被归一化 reaffirm 吞掉，Extract 统计口径与实际落库漂移（P3a 教训）。
+func TestExtractorEventNormalizedTitleCollapse(t *testing.T) {
+	blocks := []memory.Block{
+		{SpeakerLabel: "我", Text: "上个月去云南旅游，去云南旅游！", SegmentIDs: []ids.ID{511}},
+	}
+	// 两条 self event，同类型(旅行)、标题仅差全角标点/空格 → 归一化后同键：应塌缩成 1，高置信(.9)胜出。
+	resp := `{"facts":[
+		{"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去云南旅游",
+		 "confidence":0.6,"epistemic_type":"observed","block_index":1},
+		{"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去 云南 旅游！",
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1}
+	]}`
+	ex := &Extractor{LLM: &fakeLLM{resps: []string{resp}}, Model: "m", Prompt: "s", Window: 10}
+	facts, err := ex.Extract(context.Background(), blocks, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("近重复标题(仅差标点/空格)归一化后应塌缩成 1 条: %+v", facts)
+	}
+	// 塌缩后保留高置信那条（对齐 TestExtractorDedupAcrossWindows 的「高置信胜出」语义）
+	if facts[0].Confidence != 0.9 {
+		t.Fatalf("塌缩应保留高置信(.9)那条: %v", facts[0].Confidence)
+	}
+}
+
 // TestExtractorMetricNoCollapse 是 metric 平面 factKey 判别的回归测试（对齐
 // TestExtractorEventNoCollapse 先例）：同一窗口内多条 self metric——主体全是 self、
 // attr/relation/event 字段全空，仅靠 metric_key/metric_value/measured_at 区分。

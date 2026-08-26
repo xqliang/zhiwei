@@ -9,6 +9,7 @@ import (
 	"zhiwei/internal/ids"
 	"zhiwei/internal/memory"
 	"zhiwei/internal/provider"
+	"zhiwei/internal/repo"
 )
 
 // ExtractStats 是一次 Extract 的调用统计（写 job.trace 用）。
@@ -99,7 +100,7 @@ func factProvenance(win []memory.Block, idx int) []ids.ID {
 //
 //	attribute    : subject + attr_key + value
 //	relationship : subject + related(subject) + relation_type
-//	event        : subject + event_type + title
+//	event        : subject + event_type + NormalizeTitle(title)（P2a③：与 DB 自然键同步归一化）
 //	metric       : subject + metric_key + metric_value + measured_at（测点流：同键多采样各自成行）
 //	cycle        : subject + cycle_type + cycle_label（镜像 DB 自然键，**不含 anchor**）
 //	activity     : subject + activity + tool + location + commute_mode + started_at + duration_min（测点流：同活动不同时刻各自成行）
@@ -118,7 +119,11 @@ func factKey(f Fact) string {
 	case "relationship":
 		return "relationship\x00" + subj + "\x00" + subjectKey(f.Related) + "\x00" + f.RelationType
 	case "event":
-		return "event\x00" + subj + "\x00" + f.EventType + "\x00" + f.EventTitle
+		// P2a③：title 归一化后入键——须与 DB 自然键同步归一化（Service.applyEventFact 用
+		// FindActiveByNormalizedTitleExt 按归一化标题判佐证）。若此处用原始 title 而 DB 用归一化，
+		// 跨窗口字面近重复标题（「去云南旅游」/「去云南旅游！」）在批内不塌缩、到 Service 又被归一化
+		// reaffirm 吞掉，统计口径漂移（P3a「factKey 镜像 DB 自然键」教训）。
+		return "event\x00" + subj + "\x00" + f.EventType + "\x00" + repo.NormalizeTitle(f.EventTitle)
 	case "metric":
 		return "metric\x00" + subj + "\x00" + f.MetricKey + "\x00" + f.MetricValue + "\x00" + f.MeasuredAt
 	case "cycle":

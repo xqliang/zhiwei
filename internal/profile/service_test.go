@@ -349,14 +349,14 @@ func TestApplyEventFacts(t *testing.T) {
 	if st5.Active != 2 {
 		t.Fatalf("扩展格式两条应 active: %+v", st5)
 	}
-	rev, _ := svc.Events.FindActiveByKeyExt(ctx, svc.DB, oid, "会议", "季度评审会")
+	rev, _ := svc.Events.FindActiveByNormalizedTitleExt(ctx, svc.DB, oid, "会议", "季度评审会")
 	if rev == nil || rev.OccurredAt == nil {
 		t.Fatalf("会议事件应有 occurred_at: %+v", rev)
 	}
 	if got := rev.OccurredAt.UTC().Format("2006-01-02"); got != "2026-07-20" {
 		t.Fatalf("M1 时区截断回归：+08:00 凌晨应落库 2026-07-20，实得 %s", got)
 	}
-	party, _ := svc.Events.FindActiveByKeyExt(ctx, svc.DB, oid, "聚会", "老友饭局")
+	party, _ := svc.Events.FindActiveByNormalizedTitleExt(ctx, svc.DB, oid, "聚会", "老友饭局")
 	if party == nil || party.OccurredAt == nil {
 		t.Fatalf("M2 斜杠日期应解析成功（非 NULL）: %+v", party)
 	}
@@ -382,6 +382,94 @@ func TestApplyEventFacts(t *testing.T) {
 	logs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "event", "")
 	if len(logs) < 5 {
 		t.Fatalf("event 审计不足: %d", len(logs))
+	}
+}
+
+// TestApplyEventFactsNormalizedTitle 覆盖 P2a③：跨 session 的字面近重复事件标题走归一化佐证
+// （reaffirm）而非重复建 active；同 session 精确重跑仍走精确自然键 Skip（幂等未被改坏）。
+func TestApplyEventFactsNormalizedTitle(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+
+	// 共享 owner（user_id=1）：收尾删净本用例写入的事件与其 event 审计，避免污染其他用例基线
+	// （模式参照 TestApplyEventFacts）。提前注册，任一断言 t.Fatal 提前退出也会清理。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			ownerPK := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_event WHERE person_id = ?`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'`, ownerPK)
+		}
+	})
+
+	// 基线：清掉 owner 既有事件与 event 审计，保证行数/审计断言从 0 起（不依赖前序用例收尾时序）。
+	_, _ = svc.DB.ExecContext(ctx, `DELETE FROM person_event WHERE person_id = ?`, oid.Int64())
+	_, _ = svc.DB.ExecContext(ctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'`, oid.Int64())
+
+	trip := Fact{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "旅行",
+		EventTitle: "去云南旅游", Confidence: 0.9, EpistemicType: "observed"}
+
+	// ① session A：高置信旅行事件 → active（1 行）
+	sessA := ids.New()
+	stA, err := svc.ApplyFacts(ctx, sessA, 1, []Fact{trip})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stA.Active != 1 || stA.Reaffirmed != 0 || stA.Skipped != 0 {
+		t.Fatalf("① 应 1 条 active: %+v", stA)
+	}
+
+	// ② session A 精确重跑同一条 → 精确自然键 Skip（P2a③ 未把同 session 幂等改坏）
+	stARerun, err := svc.ApplyFacts(ctx, sessA, 1, []Fact{trip})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stARerun.Skipped != 1 || stARerun.Active != 0 || stARerun.Reaffirmed != 0 {
+		t.Fatalf("② 同 session 精确重跑应 Skip: %+v", stARerun)
+	}
+
+	// ③ session B：字面近重复标题「去云南旅游！」(全角标点) → 归一化命中同一 active → Reaffirm，不新建
+	sessB := ids.New()
+	stB, err := svc.ApplyFacts(ctx, sessB, 1, []Fact{
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "旅行",
+			EventTitle: "去云南旅游！", Confidence: 0.9, EpistemicType: "observed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stB.Reaffirmed != 1 || stB.Active != 0 || stB.Pending != 0 {
+		t.Fatalf("③ 近重复标题(不同 session)应 Reaffirm 不新建: %+v", stB)
+	}
+
+	// 结果核对：owner 名下「旅行」active 事件仍只有 1 条，且标题保持原值（reaffirm 不改写 title）
+	evs, err := svc.Events.ListByPerson(ctx, oid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeTrips := 0
+	for _, e := range evs {
+		if e.EventType == "旅行" && e.Status == "active" {
+			activeTrips++
+			if e.Title != "去云南旅游" {
+				t.Fatalf("reaffirm 不应改写 title，实得 %q", e.Title)
+			}
+		}
+	}
+	if activeTrips != 1 {
+		t.Fatalf("近重复标题应佐证而非重复建行，active 旅行 事件应为 1，实得 %d", activeTrips)
+	}
+
+	// 审计：应恰有 1 条 event reaffirm（③ 归一化佐证的唯一持久化效果；① 为 create、② Skip 无审计）
+	elogs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "event", "")
+	reaffirms := 0
+	for _, l := range elogs {
+		if l.ChangeType == "reaffirm" {
+			reaffirms++
+		}
+	}
+	if reaffirms != 1 {
+		t.Fatalf("应恰有 1 条 event reaffirm 审计，实得 %d（全部 event 审计 %d 条）", reaffirms, len(elogs))
 	}
 }
 

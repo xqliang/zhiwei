@@ -114,24 +114,37 @@ SELECT * FROM person_event WHERE person_id = ? ORDER BY occurred_at DESC, id DES
 	return list, err
 }
 
-// FindActiveByKeyExt 事件的「当前 active 行」查询：按（主体, 类型, 标题）定位。
-// 事件的当前身份是 event_type + title（如「旅行 / 去云南旅游」），同一身份至多一条 active，
-// 供 Task 6 事务内判定「这条事件是否已有 active 版本」（有则走冲突/更新，无则新增）。
-// 无命中返回 (nil, nil)。只提供 Ext 版本：消费方（ApplyFacts）全程在事务内，
-// 与 person_relationship 的 FindActiveByTypeExt 保持一致，故不额外包非事务版。
-func (r *PersonEventRepo) FindActiveByKeyExt(ctx context.Context, ext QueryRowxContext, personID ids.ID, eventType, title string) (*PersonEvent, error) {
-	var e PersonEvent
-	err := ext.QueryRowxContext(ctx, `
+// FindActiveByNormalizedTitleExt 事件的「当前 active 行」查询（P2a③：标题归一化匹配）：
+// 按（主体, 类型, status='active'）拉候选行，Go 侧用 NormalizeTitle 归一化标题后逐条比较，
+// 命中返回该行；无命中返回 (nil, nil)。供 ApplyFacts 事务内判定「这条事件是否已有 active 版本」
+// （有则走佐证 reaffirm，无则新增）。只提供 Ext 版本：消费方全程在事务内，与
+// person_relationship 的 FindActiveByTypeExt 一致，故不额外包非事务版。
+//
+// 为何在 Go 侧归一化而非 SQL 内比较：NormalizeTitle 的语义（转小写 + 仅保留字母/数字/汉字、
+// 去标点空格）与 MySQL 的 LOWER/正则并不等价，若下推 SQL 会两处各写一套、易漂移；单人物单
+// 类型的 active 事件行数很小（通常个位数），全量拉回内存比较零性能顾虑。这也与 attribute 平面
+// 「Go 侧 NormalizeTitle 比较 reaffirm」（gate.go DecideAttribute）语义单点一致。
+//
+// 与原精确版（(person,type,title) 全等匹配）的关系：本查询是其超集——精确相等必然归一化相等，
+// 故一次查询两用：既承担幂等去重的「已有 active 版本」判定，又让字面近重复标题（「去云南旅游」/
+// 「去云南旅游！」/「去 云南 旅游」）走佐证而非重复建行（P2a③）。候选按 id 倒序遍历，
+// 同一归一化标题存在多条 active 时取 id 最大（最新）一条，与原精确版 ORDER BY id DESC 行为一致。
+func (r *PersonEventRepo) FindActiveByNormalizedTitleExt(ctx context.Context, ext QueryerContext, personID ids.ID, eventType, title string) (*PersonEvent, error) {
+	var list []PersonEvent
+	err := ext.SelectContext(ctx, &list, `
 SELECT * FROM person_event
-WHERE person_id = ? AND event_type = ? AND title = ? AND status = 'active'
-ORDER BY id DESC LIMIT 1`, personID.Int64(), eventType, title).StructScan(&e)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+WHERE person_id = ? AND event_type = ? AND status = 'active'
+ORDER BY id DESC`, personID.Int64(), eventType)
 	if err != nil {
 		return nil, err
 	}
-	return &e, nil
+	norm := NormalizeTitle(title)
+	for i := range list {
+		if NormalizeTitle(list[i].Title) == norm {
+			return &list[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // FindByNaturalKeyExt 幂等去重：同 session 同（主体, 类型, 标题）任意 status 的行。

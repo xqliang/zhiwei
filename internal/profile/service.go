@@ -315,14 +315,20 @@ func (s *Service) applyRelationshipFact(ctx context.Context, tx *sqlx.Tx, userID
 // applyEventFact 事件落库：闸门（同键佐证/新键按置信度）+ 单事务 + 审计。
 // related 为可选增强（解析不到存空 RelatedPersonIDs，不阻断事件创建——见 fact.go 注释）。
 //
-// 已知限制：自然键 / 同键查询（FindActiveByKeyExt、FindByNaturalKeyExt）对 title 是原始
-// 精确匹配（不归一化）——LLM 标题字面近重复（「去云南旅游」vs「云南旅游」）会各建一条 active
-// 而非互相佐证；与关系平面 org_name 不入自然键（见 applyRelationshipFact）同类，属 P2 已知
-// 取舍，后续如需再对 title 归一化后纳入键。
+// P2a③ 标题归一化去重：两个查询职责不同、刻意用不同的匹配口径——
+//   - dedup（FindByNaturalKeyExt）：**精确**标题的同 session 自然键，防同一 session 重跑重复建行。
+//     刻意不归一化——同 session 严格幂等只认精确重复；归一化留给跨 session 的字面近重复。
+//   - existing（FindActiveByNormalizedTitleExt）：**归一化**标题的当前 active 行匹配。
+//     使 LLM 跨 session 出的字面近重复标题（「去云南旅游」/「去云南旅游！」/「去 云南 旅游」）
+//     命中同一 active 事件走佐证（reaffirm），而非各建一条 active。镜像 attribute 平面
+//     「Go 侧 NormalizeTitle 比较 reaffirm」（gate.go DecideAttribute）的既有模式。
+//
+// 决策顺序由 DecideEvent 保证：dedupHit 优先 Skip（精确幂等）→ existing 非空 Reaffirm（归一化佐证）
+// → 否则按置信度新建。归一化匹配是精确匹配的超集，故只需一次归一化查询即两用（既判去重又判佐证）。
 func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
 	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
 
-	existing, err := s.Events.FindActiveByKeyExt(ctx, tx, personID, f.EventType, f.EventTitle)
+	existing, err := s.Events.FindActiveByNormalizedTitleExt(ctx, tx, personID, f.EventType, f.EventTitle)
 	if err != nil {
 		return err
 	}
