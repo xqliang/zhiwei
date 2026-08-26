@@ -920,9 +920,10 @@
         <div v-if="metricLoading" class="muted">加载中…</div>
         <template v-else>
           <!-- 数值型：折线图（单序列无图例；端点直标；hover 最近点） -->
-          <div v-if="metricIsNumeric && metricChart">
-            <!-- SVG-only 相对定位容器：tooltip 用视框百分比锚定，须只包 SVG（下方计数/管理列表不算进高度） -->
-            <div style="position:relative">
+          <div v-if="metricIsNumeric">
+            <!-- 图表仅 ≥2 点时绘制；计数行/管理入口独立于此条件（在下方），故 1 个点也能删（I1） -->
+            <div v-if="metricChart" style="position:relative">
+              <!-- SVG-only 相对定位容器：tooltip 用视框百分比锚定，须只包 SVG（下方计数/管理列表不算进高度） -->
               <svg :viewBox="'0 0 ' + CHART_W + ' ' + CHART_H" style="width:100%; height:auto; display:block"
                    @mousemove="onMetricChartMove" @mouseleave="metricHover = null">
                 <!-- hairline 网格（recessive）：x 为常量，直接写 34/560（CHART_PAD.l / CHART_W） -->
@@ -943,6 +944,7 @@
                   {{ metricChart.pts[metricChart.pts.length-1].v }}{{ metricChart.unit }}
                 </text>
                 <!-- hover 十字线 + 提示点（v-if 直接落在 SVG 原生元素上，避免 <template> 在 SVG 外来内容里的解析坑） -->
+                <!-- 12/140 = CHART_PAD.t / CHART_H-CHART_PAD.b，与 app.js 常量同源 -->
                 <line v-if="metricHover" :x1="metricHover.x" :x2="metricHover.x" y1="12" y2="140" stroke="var(--border-strong)" stroke-width="1"/>
                 <circle v-if="metricHover" :cx="metricHover.x" :cy="metricHover.y" r="5" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>
               </svg>
@@ -953,7 +955,8 @@
                 {{ metricHover.text }}
               </div>
             </div>
-            <!-- 测点计数 + 「管理」toggle（hover 删除太隐晦，展开显式列表做 2 步删除） -->
+            <div v-else class="muted" style="font-size:var(--fs-xs)">数值型指标至少 2 个测点才画曲线。</div>
+            <!-- 测点计数 + 「管理」toggle（hover 删除太隐晦，展开显式列表做 2 步删除；脱离图表条件——单点/删到剩 1 个仍可删） -->
             <div class="kv" style="align-items:center">
               <span class="muted" style="font-size:var(--fs-xs)">{{ metricNumericRows.length }} 个测点（含待确认）</span>
               <button class="btn mini" @click="showMetricList = !showMetricList">{{ showMetricList ? '收起管理' : '管理' }}</button>
@@ -980,7 +983,6 @@
               </div>
             </div>
           </div>
-          <div v-else-if="metricIsNumeric" class="muted" style="font-size:var(--fs-xs)">数值型指标至少 2 个测点才画曲线。</div>
           <!-- 类别型：时间线列表（去掉行首 chip——seg-text 内已显示值，避免重复） -->
           <div v-else>
             <div v-for="m in metricCategoryRows" :key="m.id" class="seg">

@@ -1324,7 +1324,7 @@ const app = createApp({
       } catch (e) { showError(e); }
       finally { metricLoading.value = false; }
     }
-    function switchMetric(k) { metricKey.value = k; loadMetrics(); }
+    function switchMetric(k) { metricKey.value = k; deletingMetricId.value = null; showMetricList.value = false; loadMetrics(); }
     function resetAddMetricForm() { addMetricForm.value = ''; addMetricForm.unit = ''; addMetricForm.measured_at = ''; }
     function toggleAddMetric() {
       if (showAddMetric.value) { showAddMetric.value = false; resetAddMetricForm(); return; }
@@ -1333,7 +1333,7 @@ const app = createApp({
     async function submitAddMetric() {
       if (addingMetric.value) return;
       const v = addMetricForm.value.trim();
-      if (!v) { toast.value = '请输入数值'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      if (!v) { toast.value = metricIsNumeric.value ? '请输入数值' : '请输入内容'; setTimeout(() => { toast.value = ''; }, 2000); return; }
       addingMetric.value = true;
       try {
         const body = { metric_key: metricKey.value, value: v };
