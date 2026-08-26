@@ -907,6 +907,118 @@
         </div>
       </div>
 
+      <!-- 状态&健康：指标图表（数值型折线 / 类别型时间线）+ 手动录入（P3b） -->
+      <div style="margin-bottom:12px">
+        <div class="kv" style="margin-bottom:8px">
+          <div class="muted" style="font-weight:600">状态&健康</div>
+          <div style="display:flex; gap:4px; flex-wrap:wrap">
+            <button v-for="mk in METRIC_KEYS" :key="mk.key" class="btn mini"
+                    :style="metricKey === mk.key ? { background:'var(--accent)', color:'#fff', borderColor:'var(--accent)' } : {}"
+                    @click="switchMetric(mk.key)">{{ mk.label }}</button>
+          </div>
+        </div>
+        <div v-if="metricLoading" class="muted">加载中…</div>
+        <template v-else>
+          <!-- 数值型：折线图（单序列无图例；端点直标；hover 最近点） -->
+          <div v-if="metricIsNumeric && metricChart">
+            <!-- SVG-only 相对定位容器：tooltip 用视框百分比锚定，须只包 SVG（下方计数/管理列表不算进高度） -->
+            <div style="position:relative">
+              <svg :viewBox="'0 0 ' + CHART_W + ' ' + CHART_H" style="width:100%; height:auto; display:block"
+                   @mousemove="onMetricChartMove" @mouseleave="metricHover = null">
+                <!-- hairline 网格（recessive）：x 为常量，直接写 34/560（CHART_PAD.l / CHART_W） -->
+                <line v-for="t in metricChart.ticks" :key="t.y" x1="34" x2="560" :y1="t.y" :y2="t.y"
+                      stroke="var(--border)" stroke-width="1"/>
+                <text v-for="t in metricChart.ticks" :key="'l'+t.y" x="28" :y="t.y + 4"
+                      text-anchor="end" font-size="11" fill="var(--muted)">{{ t.label }}</text>
+                <!-- 2px 线圆角连接 -->
+                <path :d="metricChart.path" fill="none" stroke="var(--accent)" stroke-width="2"
+                      stroke-linejoin="round" stroke-linecap="round"/>
+                <!-- 数据点：r=4 实心 + 2px surface 环 -->
+                <circle v-for="p in metricChart.pts" :key="p.id" :cx="p.x" :cy="p.y" r="4"
+                        fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>
+                <!-- 端点值直标（唯一标签，text token 色） -->
+                <text :x="metricChart.pts[metricChart.pts.length-1].x + 8"
+                      :y="metricChart.pts[metricChart.pts.length-1].y + 4"
+                      font-size="12" fill="var(--text-2)" font-weight="600">
+                  {{ metricChart.pts[metricChart.pts.length-1].v }}{{ metricChart.unit }}
+                </text>
+                <!-- hover 十字线 + 提示点（v-if 直接落在 SVG 原生元素上，避免 <template> 在 SVG 外来内容里的解析坑） -->
+                <line v-if="metricHover" :x1="metricHover.x" :x2="metricHover.x" y1="12" y2="140" stroke="var(--border-strong)" stroke-width="1"/>
+                <circle v-if="metricHover" :cx="metricHover.x" :cy="metricHover.y" r="5" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>
+              </svg>
+              <!-- tooltip：left/top 均用视框百分比（SVG 响应式缩放），translate 让其居中悬于点上方 -->
+              <div v-if="metricHover" class="chip"
+                   style="position:absolute; pointer-events:none; white-space:nowrap; transform:translate(-50%, calc(-100% - 8px))"
+                   :style="{ left: (metricHover.x / CHART_W * 100) + '%', top: (metricHover.y / CHART_H * 100) + '%' }">
+                {{ metricHover.text }}
+              </div>
+            </div>
+            <!-- 测点计数 + 「管理」toggle（hover 删除太隐晦，展开显式列表做 2 步删除） -->
+            <div class="kv" style="align-items:center">
+              <span class="muted" style="font-size:var(--fs-xs)">{{ metricNumericRows.length }} 个测点（含待确认）</span>
+              <button class="btn mini" @click="showMetricList = !showMetricList">{{ showMetricList ? '收起管理' : '管理' }}</button>
+            </div>
+            <!-- 管理列表：复用类别型 .seg 行（值+单位 / 来源徽标 / pending 徽标 / 日期 / 删除 2 步） -->
+            <div v-if="showMetricList" style="margin-top:4px">
+              <div v-for="m in metricNumericRows" :key="m.id" class="seg">
+                <div class="seg-text">
+                  <div>
+                    {{ m.value_text }}<span v-if="m.unit"> {{ m.unit }}</span>
+                    <span class="chip" :style="m.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ m.source === 'llm' ? 'AI' : '人工' }}</span>
+                    <span v-if="m.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+                  </div>
+                  <div class="muted" style="font-size:var(--fs-xs)">{{ fmtEventDate(m.measured_at, true) }}</div>
+                </div>
+                <div style="display:flex; gap:4px; flex-shrink:0">
+                  <template v-if="deletingMetricId === m.id">
+                    <span class="muted">删除？</span>
+                    <button class="btn mini danger" @click="confirmDeleteMetric">确认</button>
+                    <button class="btn mini" @click="deletingMetricId=null">取消</button>
+                  </template>
+                  <button v-else class="btn mini danger" @click="askDeleteMetric(m)">🗑</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="metricIsNumeric" class="muted" style="font-size:var(--fs-xs)">数值型指标至少 2 个测点才画曲线。</div>
+          <!-- 类别型：时间线列表（去掉行首 chip——seg-text 内已显示值，避免重复） -->
+          <div v-else>
+            <div v-for="m in metricCategoryRows" :key="m.id" class="seg">
+              <div class="seg-text">
+                <div>
+                  {{ m.value_text }}
+                  <span class="chip" :style="m.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ m.source === 'llm' ? 'AI' : '人工' }}</span>
+                  <span v-if="m.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+                </div>
+                <div class="muted" style="font-size:var(--fs-xs)">{{ fmtEventDate(m.measured_at, true) }}</div>
+              </div>
+              <div style="display:flex; gap:4px; flex-shrink:0">
+                <template v-if="deletingMetricId === m.id">
+                  <span class="muted">删除？</span>
+                  <button class="btn mini danger" @click="confirmDeleteMetric">确认</button>
+                  <button class="btn mini" @click="deletingMetricId=null">取消</button>
+                </template>
+                <button v-else class="btn mini danger" @click="askDeleteMetric(m)">🗑</button>
+              </div>
+            </div>
+            <div v-if="!metricCategoryRows.length" class="muted" style="font-size:var(--fs-xs)">暂无记录。从对话自动抽取或手动添加。</div>
+          </div>
+        </template>
+        <!-- 手动录入（表单折叠） -->
+        <div class="edit-actions" style="margin-top:6px">
+          <button class="btn mini" @click="toggleAddMetric">{{ showAddMetric ? '收起录入' : '＋ 记一笔' }}</button>
+        </div>
+        <div class="card sunken" v-if="showAddMetric" style="margin-top:8px">
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+            <input class="txt" v-model="addMetricForm.value" :placeholder="metricIsNumeric ? '数值（如 72.5）' : '状态（如 焦虑）'" style="flex:1; min-width:120px">
+            <input v-if="metricIsNumeric" class="txt" v-model="addMetricForm.unit" placeholder="单位（kg，可空）" style="width:auto; min-width:90px">
+            <input class="txt" v-model="addMetricForm.measured_at" type="date" style="width:auto; min-width:130px">
+            <button class="btn primary" :disabled="addingMetric" @click="submitAddMetric">{{ addingMetric ? '保存中…' : '保存' }}</button>
+          </div>
+          <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">录入当前指标「{{ metricDef(metricKey).label }}」；日期可空（默认今天）。</div>
+        </div>
+      </div>
+
       <!-- 加事件表单 -->
       <div class="card sunken" v-if="showAddEvent" style="margin-bottom:10px">
         <div class="kv" style="margin-bottom:8px"><b>加大事记</b><button class="btn-link" @click="toggleAddEvent">✕</button></div>

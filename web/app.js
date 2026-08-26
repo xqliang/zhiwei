@@ -1027,7 +1027,10 @@ const app = createApp({
     async function togglePerson(id) {
       if (personDetail.value && personDetail.value.person.id === id) { closePersonDetail(); return; }
       closePersonDetail(); // 切换前清旧人物的临时态（历史抽屉/加属性草稿/编辑删除态），防跨人泄漏
-      try { personDetail.value = await api('GET', '/api/persons/' + id); }
+      try {
+        personDetail.value = await api('GET', '/api/persons/' + id);
+        await loadMetrics(); // 详情拉取成功后加载「状态&健康」测点（对齐 loadPending 的挂接方式）
+      }
       catch (e) { showError(e); }
     }
     function closePersonDetail() {
@@ -1041,6 +1044,8 @@ const app = createApp({
       showAddRel.value = false; resetAddRelForm(); deletingRelId.value = null;
       // 大事记临时态（P2b Task 1）：加事件表单(含草稿) / 删除确认一并清空
       showAddEvent.value = false; resetAddEventForm(); deletingEventId.value = null;
+      // 状态&健康临时态（P3b Task 1）：录入表单(含草稿) / 删除确认 / hover / 管理列表一并清空
+      showAddMetric.value = false; resetAddMetricForm(); deletingMetricId.value = null; metricHover.value = null; showMetricList.value = false;
     }
     async function reloadPersonDetail() {
       if (!personDetail.value) return;
@@ -1283,6 +1288,113 @@ const app = createApp({
         deletingEventId.value = null;
         await reloadPersonDetail(); await loadPersons(); // pending 计数可能变化
       } catch (e) { showError(e); }
+    }
+
+    // ---------- 状态&健康（metric 平面，P3） ----------
+    // 指标类型：数值型（weight）画折线；类别型（emotion 等）列时间线——类别画连续线是撒谎。
+    const METRIC_KEYS = [
+      { key: 'weight', label: '体重', numeric: true },
+      { key: 'emotion', label: '情绪', numeric: false },
+      { key: 'state', label: '状态', numeric: false },
+      { key: 'diet', label: '饮食', numeric: false },
+      { key: 'sleep_late', label: '熬夜', numeric: false },
+      { key: 'health', label: '健康', numeric: false },
+    ];
+    const metricKey = ref('weight');          // 当前选中指标
+    const metricRows = ref([]);               // 当前指标的全状态测点（升序）
+    const metricLoading = ref(false);
+    const showAddMetric = ref(false);
+    const addMetricForm = reactive({ value: '', unit: '', measured_at: '' });
+    const addingMetric = ref(false);
+    const deletingMetricId = ref(null);
+    const metricHover = ref(null);            // {x, y, text} 折线 hover 最近点
+    const showMetricList = ref(false);        // 数值型「管理测点」列表开合（hover 删除太隐晦，改显式列表）
+
+    function metricDef(k) { return METRIC_KEYS.find(m => m.key === k) || { key: k, label: k, numeric: false }; }
+    const metricIsNumeric = computed(() => metricDef(metricKey.value).numeric);
+
+    async function loadMetrics() {
+      if (!personDetail.value) return;
+      metricLoading.value = true;
+      try {
+        const d = await api('GET', '/api/persons/' + personDetail.value.person.id +
+          '/metrics?metric_key=' + metricKey.value);
+        metricRows.value = d.metrics || [];
+        metricHover.value = null;
+      } catch (e) { showError(e); }
+      finally { metricLoading.value = false; }
+    }
+    function switchMetric(k) { metricKey.value = k; loadMetrics(); }
+    function resetAddMetricForm() { addMetricForm.value = ''; addMetricForm.unit = ''; addMetricForm.measured_at = ''; }
+    function toggleAddMetric() {
+      if (showAddMetric.value) { showAddMetric.value = false; resetAddMetricForm(); return; }
+      showAddMetric.value = true;
+    }
+    async function submitAddMetric() {
+      if (addingMetric.value) return;
+      const v = addMetricForm.value.trim();
+      if (!v) { toast.value = '请输入数值'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingMetric.value = true;
+      try {
+        const body = { metric_key: metricKey.value, value: v };
+        if (addMetricForm.unit.trim()) body.unit = addMetricForm.unit.trim();
+        if (addMetricForm.measured_at) body.measured_at = addMetricForm.measured_at;
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/metrics', body);
+        showAddMetric.value = false;
+        resetAddMetricForm();
+        await loadMetrics(); await loadPersons(); // 名册角标可能变
+      } catch (e) { showError(e); }
+      finally { addingMetric.value = false; }
+    }
+    function askDeleteMetric(m) { deletingMetricId.value = m.id; }
+    async function confirmDeleteMetric() {
+      const id = deletingMetricId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/metrics/' + id);
+        deletingMetricId.value = null;
+        await loadMetrics(); await loadPersons();
+      } catch (e) { showError(e); }
+    }
+
+    // ---- 折线图几何（纯函数，无 SVG 依赖，可测）----
+    // 数值型测点 → 折线 SVG 的坐标/路径。padding 留出轴与端点标签；y 轴 clean ticks。
+    const CHART_W = 560, CHART_H = 160, CHART_PAD = { l: 34, r: 46, t: 12, b: 20 };
+    // 展示视图：排除 dismissed（软删）。后端 ListMetrics 不过滤 status（详情 events 是服务端过滤
+    // active+pending），故这里前端各留一份过滤视图——数值型再要求 value_num 非空。
+    const metricNumericRows = computed(() => metricRows.value.filter(m => m.value_num != null && m.status !== 'dismissed'));
+    const metricCategoryRows = computed(() => metricRows.value.filter(m => m.status !== 'dismissed'));
+    const metricChart = computed(() => {
+      const rows = metricNumericRows.value;
+      if (rows.length < 2) return null; // 少于 2 点不画线（单点/空 → 文案兜底）
+      const vals = rows.map(r => r.value_num);
+      let lo = Math.min(...vals), hi = Math.max(...vals);
+      if (lo === hi) { lo -= 1; hi += 1; } // 平线也让 y 有量程
+      const span = hi - lo;
+      const iw = CHART_W - CHART_PAD.l - CHART_PAD.r, ih = CHART_H - CHART_PAD.t - CHART_PAD.b;
+      const t0 = new Date(rows[0].measured_at).getTime();
+      const t1 = new Date(rows[rows.length - 1].measured_at).getTime();
+      const tSpan = (t1 - t0) || 1;
+      const x = i => CHART_PAD.l + (new Date(rows[i].measured_at).getTime() - t0) / tSpan * iw;
+      const y = v => CHART_PAD.t + (hi - v) / span * ih;
+      const pts = rows.map((r, i) => ({ x: x(i), y: y(r.value_num), v: r.value_num, at: r.measured_at, id: r.id }));
+      const path = pts.map((p, i) => (i ? 'L' : 'M') + p.x.toFixed(1) + ' ' + p.y.toFixed(1)).join(' ');
+      // y 轴 3 档 clean ticks（粗粒度即可——具体值靠端点标签与 hover）
+      const ticks = [0, 0.5, 1].map(f => ({ y: y(lo + f * span), label: Math.round((lo + f * span) * 10) / 10 }));
+      return { pts, path, ticks, unit: rows[rows.length - 1].unit || '' };
+    });
+    // hover：mousemove 找最近点（x 距离），tooltip 显示日期+值
+    function onMetricChartMove(e) {
+      const c = metricChart.value;
+      if (!c) return;
+      const svg = e.currentTarget.getBoundingClientRect();
+      const mx = (e.clientX - svg.left) * (CHART_W / svg.width);
+      let best = null, bd = Infinity;
+      for (const p of c.pts) {
+        const d = Math.abs(p.x - mx);
+        if (d < bd) { bd = d; best = p; }
+      }
+      if (best) metricHover.value = { x: best.x, y: best.y, text: fmtEventDate(best.at, true) + ' · ' + best.v + (c.unit || '') };
     }
 
     // ---------- 确认队列（跨平面 pending 并集；与名册/详情独立刷新） ----------
@@ -1652,6 +1764,7 @@ const app = createApp({
       ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
       EVENT_TYPES, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
+      METRIC_KEYS, metricKey, metricRows, metricLoading, metricIsNumeric, metricDef, switchMetric, showAddMetric, addMetricForm, addingMetric, toggleAddMetric, submitAddMetric, deletingMetricId, askDeleteMetric, confirmDeleteMetric, metricChart, metricHover, onMetricChartMove, CHART_W, CHART_H, metricNumericRows, metricCategoryRows, showMetricList,
       pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
       backfilling, backfillInfo, runBackfill,
     };
