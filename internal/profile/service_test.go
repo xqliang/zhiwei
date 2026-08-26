@@ -542,6 +542,33 @@ func TestApplyCycleFacts(t *testing.T) {
 		t.Fatalf("重跑应全 skip: %+v", st2)
 	}
 
+	// 同参重提：另一 session、同 anchor/period/dosage/frequency（参数没变）→ Reaffirm（仅审计、
+	// 不加行、不进队列），防「还在吃降压药」每 session 造一条冲突 pending 的确认疲劳（review Important）。
+	sessSame := ids.New()
+	st3a, err := svc.ApplyFacts(ctx, sessSame, 1, []Fact{
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "medication",
+			CycleLabel: "降压药", AnchorDate: "2026-08-01", PeriodDays: 30,
+			Dosage: "5mg", FrequencyText: "每日一次",
+			Confidence: 0.9, EpistemicType: "observed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st3a.Reaffirmed != 1 || st3a.Active != 0 || st3a.Pending != 0 || st3a.Conflicts != 0 {
+		t.Fatalf("同参重提应 Reaffirm 不加行: %+v", st3a)
+	}
+	// 不加行：medication 仍只有 sess1 那条 active
+	csa, _ := svc.Cycles.ListByPerson(ctx, oid)
+	nMed := 0
+	for _, c := range csa {
+		if c.CycleType == "medication" {
+			nMed++
+		}
+	}
+	if nMed != 1 {
+		t.Fatalf("同参佐证不应加行，medication 应仍 1 条，实得 %d", nMed)
+	}
+
 	// 冲突：另一 session 同 (type,label) 不同参数 → ConflictPending + supersedes 指向 active 行
 	sess2 := ids.New()
 	st3, err := svc.ApplyFacts(ctx, sess2, 1, []Fact{
@@ -563,6 +590,38 @@ func TestApplyCycleFacts(t *testing.T) {
 		t.Fatalf("冲突 pending 应指向 active 现值行: pend=%+v 期望 supersedes=%d", pend, medID)
 	}
 
+	// 纯低置信 pending（新 cycle 无 existing、无冲突）+ partial 参数（仅 period 无 anchor →
+	// next_predicted nil）——两条不同 (type,label) 一批落库。
+	sessMisc := ids.New()
+	st4, err := svc.ApplyFacts(ctx, sessMisc, 1, []Fact{
+		// 低置信 → pending（injection 无现值，非冲突路径）
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "injection",
+			CycleLabel: "胰岛素", Confidence: 0.5, EpistemicType: "observed"},
+		// partial：仅 period 无 anchor，高置信 → active，next_predicted 应 nil
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "followup",
+			CycleLabel: "复查", PeriodDays: 90, Confidence: 0.9, EpistemicType: "observed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st4.Pending != 1 || st4.Active != 1 || st4.Conflicts != 0 {
+		t.Fatalf("低置信 pending + partial active 统计错误: %+v", st4)
+	}
+	inj, _ := svc.Cycles.FindByNaturalKeyExt(ctx, svc.DB, sessMisc, oid, "injection", strPtr("胰岛素"))
+	if inj == nil || inj.Status != "pending" {
+		t.Fatalf("低置信应 pending: %+v", inj)
+	}
+	fu, _ := svc.Cycles.FindByNaturalKeyExt(ctx, svc.DB, sessMisc, oid, "followup", strPtr("复查"))
+	if fu == nil || fu.Status != "active" {
+		t.Fatalf("partial 高置信应 active: %+v", fu)
+	}
+	if fu.PeriodDays == nil || *fu.PeriodDays != 90 {
+		t.Fatalf("partial period 应 90: %v", fu.PeriodDays)
+	}
+	if fu.NextPredictedAt != nil {
+		t.Fatalf("partial（仅 period 无 anchor）不应有 next_predicted: %v", fu.NextPredictedAt)
+	}
+
 	// 手动加删（period 0 无 next_predicted）
 	mc, err := svc.ManualAddCycle(ctx, oid, "followup", "复诊", "", "每月一次", "", 0, 0)
 	if err != nil {
@@ -580,7 +639,7 @@ func TestApplyCycleFacts(t *testing.T) {
 	if d, _ := svc.Cycles.Get(ctx, mc.ID); d == nil || d.Status != "dismissed" {
 		t.Fatalf("删除应 dismissed: %+v", d)
 	}
-	// 审计：cycle 平面条目（llm create×2 + 冲突 create + user create + delete = 5）
+	// 审计：cycle 平面条目（llm create×5 + reaffirm + user create + delete = 8）
 	logs, _ := svc.ChangeLogs.ListByPerson(ctx, oid, "cycle", "")
 	if len(logs) < 5 {
 		t.Fatalf("cycle 审计不足: %d", len(logs))

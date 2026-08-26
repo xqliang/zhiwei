@@ -344,8 +344,7 @@ func (s *Service) applyMetricFact(ctx context.Context, tx *sqlx.Tx, userID int64
 		valueNum = &vn
 		valueText = formatMetricValue(n)
 	}
-	vt := valueText
-	dedup, err := s.Metrics.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, f.MetricKey, &vt, measuredAt)
+	dedup, err := s.Metrics.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, f.MetricKey, &valueText, measuredAt)
 	if err != nil {
 		return err
 	}
@@ -395,6 +394,24 @@ func (s *Service) applyCycleFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 	dedup, err := s.Cycles.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, f.CycleType, label)
 	if err != nil {
 		return err
+	}
+
+	// 同参短路（对齐 attribute 的「同值→佐证」语义）：existing 的关键参数与新事实完全一致时
+	// 视为佐证（仅审计，不加行不进队列）——否则后续 session 每次重提同一周期（「还在吃降压药」，
+	// 参数没变）都会造一条冲突 pending，造成确认疲劳。放在 dedup 判断之后：同 session 重跑由
+	// 自然键 Skip 优先（纯幂等），仅跨 session 未命中自然键但同参时才走佐证（统计上归 Reaffirmed）。
+	if dedup == nil && existing != nil && cycleParamsEqual(existing, f) {
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: personID, EntityKind: "cycle", EntityID: &existing.ID,
+			ChangeType: "reaffirm", ChangedBy: "llm", NewValue: snap(existing.CycleType),
+			SessionID: &prov.SessionID, MemoryID: memID,
+			TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+			Note:                 strPtr("同参佐证：周期未变化"),
+		}); err != nil {
+			return err
+		}
+		st.Reaffirmed++
+		return nil
 	}
 
 	dec := DecideCycle(f, existing, dedup != nil, s.Gate)
@@ -703,6 +720,35 @@ func applyCycleParams(row *repo.PersonCycle, anchorDate string, periodDays, dura
 	}
 }
 
+// cycleParamsEqual 判断已存在 active 周期的关键参数与新事实是否一致（anchor/period/duration/
+// dosage/frequency；label 已由 FindActiveByKey 的自然键保证一致）。nil 安全逐字段比较：anchor
+// 走 parseEventAt 后 .Equal 比时刻（两侧均 UTC 午夜），period/duration/dosage/frequency 解指针
+// 与 Fact 的零值/trim 值比。供 applyCycleFact 的「同参佐证短路」用（防确认疲劳）。
+func cycleParamsEqual(e *repo.PersonCycle, f Fact) bool {
+	// anchor：先比「有无」是否一致，再比日期
+	if (e.AnchorDate == nil) != (strings.TrimSpace(f.AnchorDate) == "") {
+		return false
+	}
+	if e.AnchorDate != nil {
+		if t, ok := parseEventAt(f.AnchorDate); !ok || !t.Equal(*e.AnchorDate) {
+			return false
+		}
+	}
+	if derefInt(e.PeriodDays) != f.PeriodDays {
+		return false
+	}
+	if derefInt(e.DurationDays) != f.DurationDays {
+		return false
+	}
+	if derefStr(e.Dosage) != strings.TrimSpace(f.Dosage) {
+		return false
+	}
+	if derefStr(e.FrequencyText) != strings.TrimSpace(f.FrequencyText) {
+		return false
+	}
+	return true
+}
+
 func createMetricLog(personID ids.ID, row *repo.PersonMetric, memID *ids.ID, prov Provenance) *repo.PersonChangeLog {
 	return &repo.PersonChangeLog{
 		PersonID: personID, EntityKind: "metric", EntityID: &row.ID,
@@ -808,6 +854,21 @@ func snap(v any) *string {
 func strPtr(s string) *string { return &s }
 
 func fp(f float64) *float64 { return &f }
+
+// derefInt / derefStr 解指针取值，nil → 零值（周期同参比较用，见 cycleParamsEqual）。
+func derefInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
 
 // formatMetricValue 数值型测点的规范字符串形态——value_num 与 value_text 的唯一格式化点
 // （双存约定：自然键去重按 value_text 字符串比较，两列必须同源，散落 fmt 会漂移破坏幂等）。
