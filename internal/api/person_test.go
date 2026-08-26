@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -45,8 +46,8 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 		Memories: &repo.MemoryRepo{DB: db}, Speakers: &repo.SpeakerRepo{DB: db},
 		Persons: &repo.PersonRepo{DB: db}, Attributes: &repo.PersonAttributeRepo{DB: db},
 		Relationships: &repo.PersonRelationshipRepo{DB: db}, ChangeLogs: &repo.PersonChangeLogRepo{DB: db},
-		Events: &repo.PersonEventRepo{DB: db},
-		LLM:    &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
+		Events: &repo.PersonEventRepo{DB: db}, Metrics: &repo.PersonMetricRepo{DB: db},
+		LLM: &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
 		Gate: profile.GateConfig{AutoConf: 0.75},
 	}
 	if err := repo.EnsurePersonBootstrap(context.Background(), svc.Persons, svc.Speakers); err != nil {
@@ -56,7 +57,7 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 	RegisterPerson(r, &PersonHandler{
 		Persons: svc.Persons, Attributes: svc.Attributes,
 		Relationships: svc.Relationships, ChangeLogs: svc.ChangeLogs,
-		Events: svc.Events, Service: svc,
+		Events: svc.Events, Metrics: svc.Metrics, Service: svc,
 	})
 	return r, svc
 }
@@ -478,5 +479,181 @@ func TestPersonEventAPI(t *testing.T) {
 	}
 	if d, _ := svc.Events.Get(ctx, ev.ID); d.Status != "dismissed" {
 		t.Fatalf("删除后应 dismissed: %+v", d)
+	}
+}
+
+// tMetricPoint / tMetricGroup / metricListResp 解析 GET /metrics 与详情内嵌 metrics 的
+// 分组结构（测试局部形状，只取断言所需字段）。
+type tMetricPoint struct {
+	ValueNum  *float64 `json:"value_num"`
+	ValueText string   `json:"value_text"`
+	Status    string   `json:"status"`
+}
+
+type tMetricGroup struct {
+	Key     string         `json:"key"`
+	Label   string         `json:"label"`
+	Unit    string         `json:"unit"`
+	Numeric bool           `json:"numeric"`
+	Points  []tMetricPoint `json:"points"`
+}
+
+type metricListResp struct {
+	Metrics      []tMetricGroup `json:"metrics"`
+	PendingCount int            `json:"pending_count"`
+}
+
+// findMetricGroup 在分组结果里按 key 找一组（未命中返回 nil），避免依赖 metric_key 的字典序。
+func findMetricGroup(r metricListResp, key string) *tMetricGroup {
+	for i := range r.Metrics {
+		if r.Metrics[i].Key == key {
+			return &r.Metrics[i]
+		}
+	}
+	return nil
+}
+
+// TestPersonMetricAPI 覆盖 metric 平面（画像第 5 平面）API 全链路：手动加数值测点（weight，
+// value_num+unit）与类别测点（diet，value_text）、metric_key 枚举校验、列表分组 + ?metric_key
+// 过滤、详情内嵌 metrics 分组（Numeric/points）+ pending 计数、删除转 dismissed、确认队列含
+// metric 条目并 HTTP 确认为 active。跨包非自隔离：t.Cleanup 删掉 owner 的 person_metric 行 +
+// entity_kind='metric' 审计行，防污染 profile 包同库断言（模式同 TestPersonEventAPI）。
+func TestPersonMetricAPI(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+	base := "/api/persons/" + owner.ID.String()
+	t.Cleanup(func() {
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_metric WHERE person_id = ?", owner.ID.Int64())
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'metric'", owner.ID.Int64())
+	})
+
+	// 手动加数值测点：weight=70kg（measured_at 纯日期串）
+	rec := doReq(t, h, "POST", base+"/metrics",
+		map[string]any{"metric_key": "weight", "value_num": 70, "unit": "kg", "measured_at": "2026-08-01"})
+	if rec.Code != 200 {
+		t.Fatalf("加数值测点失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var m repo.PersonMetric
+	_ = json.Unmarshal(rec.Body.Bytes(), &m)
+	if m.Status != "active" || m.Source != "manual" || m.ValueNum == nil || *m.ValueNum != 70 {
+		t.Fatalf("手动数值测点错误: %+v", m)
+	}
+
+	// 非法 metric_key → 400（目录外键，handler 层校验）
+	if rec := doReq(t, h, "POST", base+"/metrics",
+		map[string]any{"metric_key": "bogus", "value_num": 1}); rec.Code != 400 {
+		t.Fatalf("非法 metric_key 应 400: %d %s", rec.Code, rec.Body.String())
+	}
+	// measured_at 缺省 → time.Now()（不应 500，Service 不会撞 measured_at 零值）
+	rec = doReq(t, h, "POST", base+"/metrics",
+		map[string]any{"metric_key": "weight", "value_num": 71})
+	if rec.Code != 200 {
+		t.Fatalf("measured_at 缺省应 200: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 手动加类别测点：diet=火锅（value_text，Numeric=false）
+	rec = doReq(t, h, "POST", base+"/metrics",
+		map[string]any{"metric_key": "diet", "value_text": "火锅"})
+	if rec.Code != 200 {
+		t.Fatalf("加类别测点失败: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// GET /metrics 列表：应含 weight 组（Numeric=true，2 个点）与 diet 组（Numeric=false）
+	rec = doReq(t, h, "GET", base+"/metrics", nil)
+	if rec.Code != 200 {
+		t.Fatalf("指标列表失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var listR metricListResp
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	wg := findMetricGroup(listR, "weight")
+	if wg == nil || !wg.Numeric || wg.Unit != "kg" || len(wg.Points) != 2 {
+		t.Fatalf("weight 组错误: %+v", wg)
+	}
+	if wg.Points[0].ValueNum == nil || *wg.Points[0].ValueNum != 70 {
+		t.Fatalf("weight 首点应 70: %+v", wg.Points[0])
+	}
+	dg := findMetricGroup(listR, "diet")
+	if dg == nil || dg.Numeric || len(dg.Points) != 1 || dg.Points[0].ValueText != "火锅" {
+		t.Fatalf("diet 组错误: %+v", dg)
+	}
+
+	// ?metric_key=weight 过滤：只剩 weight 组
+	rec = doReq(t, h, "GET", base+"/metrics?metric_key=weight", nil)
+	var filtered metricListResp
+	_ = json.Unmarshal(rec.Body.Bytes(), &filtered)
+	if len(filtered.Metrics) != 1 || filtered.Metrics[0].Key != "weight" {
+		t.Fatalf("metric_key 过滤应只剩 weight: %+v", filtered.Metrics)
+	}
+
+	// 详情内嵌 metrics（同分组结构）：weight 组 Numeric=true、diet 组 point.ValueText=火锅
+	rec = doReq(t, h, "GET", base, nil)
+	var detail metricListResp
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail)
+	if g := findMetricGroup(detail, "weight"); g == nil || !g.Numeric {
+		t.Fatalf("详情缺 weight 组或 Numeric 错误: %+v", g)
+	}
+	if g := findMetricGroup(detail, "diet"); g == nil || g.Numeric || len(g.Points) != 1 || g.Points[0].ValueText != "火锅" {
+		t.Fatalf("详情 diet 组错误: %+v", g)
+	}
+
+	// 删除数值测点 → dismissed（详情不再含 weight 组，diet 仍在）
+	if rec := doReq(t, h, "DELETE", base+"/metrics/"+m.ID.String(), nil); rec.Code != 200 {
+		t.Fatalf("删除测点失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if d, _ := svc.Metrics.Get(ctx, m.ID); d == nil || d.Status != "dismissed" {
+		t.Fatalf("删除后应 dismissed: %+v", d)
+	}
+	// 删不存在的测点（合法 id、库中无行）→ 404
+	if rec := doReq(t, h, "DELETE", base+"/metrics/"+ids.New().String(), nil); rec.Code != 404 {
+		t.Fatalf("删不存在测点应 404: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 造一条 pending 测点（直接走 repo，status=pending），验证进确认队列 + HTTP 确认为 active
+	valence := -0.5
+	pm := &repo.PersonMetric{
+		PersonID: owner.ID, MetricKey: "emotion", ValueNum: &valence,
+		MeasuredAt: time.Now(), Confidence: 0.5, EpistemicType: "observed",
+		Source: "extract", Status: "pending",
+	}
+	if err := svc.Metrics.Create(ctx, pm); err != nil {
+		t.Fatal(err)
+	}
+	// 详情 pending 计数应含该测点，且 emotion 组的点 status=pending
+	rec = doReq(t, h, "GET", base, nil)
+	var detail2 metricListResp
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail2)
+	if detail2.PendingCount < 1 {
+		t.Fatalf("详情 pending 计数应含 metric: %d", detail2.PendingCount)
+	}
+	if g := findMetricGroup(detail2, "emotion"); g == nil || len(g.Points) != 1 || g.Points[0].Status != "pending" {
+		t.Fatalf("详情 emotion 组应含 1 个 pending 点: %+v", g)
+	}
+
+	// 确认队列含 metric 条目（kind=metric）
+	rec = doReq(t, h, "GET", "/api/profile/pending", nil)
+	if rec.Code != 200 {
+		t.Fatalf("队列失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var pend struct {
+		Items []map[string]any `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pend)
+	var mItemID string
+	for _, it := range pend.Items {
+		if it["kind"] == "metric" && it["metric_key"] == "emotion" {
+			mItemID, _ = it["id"].(string)
+		}
+	}
+	if mItemID == "" {
+		t.Fatalf("队列缺 metric 条目: %+v", pend.Items)
+	}
+
+	// HTTP 确认 → active
+	if rec := doReq(t, h, "POST", "/api/profile/pending/metric/"+mItemID+"/confirm", nil); rec.Code != 200 {
+		t.Fatalf("metric 确认失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if d, _ := svc.Metrics.Get(ctx, pm.ID); d == nil || d.Status != "active" {
+		t.Fatalf("确认后应 active: %+v", d)
 	}
 }

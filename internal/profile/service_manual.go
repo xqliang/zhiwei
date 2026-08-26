@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -375,6 +376,106 @@ func (s *Service) ManualDeleteEvent(ctx context.Context, id ids.ID) error {
 	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
 		PersonID: e.PersonID, EntityKind: "event", EntityID: &id,
 		ChangeType: "delete", ChangedBy: "user", OldValue: snap(e.Title),
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ---- metric 平面手动 CRUD（P3 时序个人指标）----
+
+// ManualAddMetric 手动加一个测点（active/manual conf=1.0 + create 审计）。
+// valueNum 可空（类别型指标传 nil）；valueText/unit 可空；measuredAt 必须非零（列 NOT NULL）。
+// 自持事务：BeginTxx → ManualAddMetricExt → Commit（行为/签名与 event 平面手动入口一致）。
+func (s *Service) ManualAddMetric(ctx context.Context, personID ids.ID, metricKey string,
+	valueNum *float64, valueText, unit string, measuredAt time.Time) (*repo.PersonMetric, error) {
+
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }() // Commit 后为 no-op
+	row, err := s.ManualAddMetricExt(ctx, tx, personID, metricKey, valueNum, valueText, unit, measuredAt)
+	if err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualAddMetricExt 是 ManualAddMetric 的事务版：全部写走传入的 tx，不自开/自提事务，
+// 供调用方把「测点写 + 其它写」原子并进同一事务（对齐 event 平面的 ManualAddEventExt）。
+//
+// 校验（对齐 metric 硬约束）：
+//   - metric_key 必须在目录内（ValidMetricKey），否则报错；
+//   - Numeric 指标必须给 valueNum（否则报错）；非 Numeric 指标必须给 valueText（否则报错）；
+//   - measuredAt 零值报错（measured_at 列 NOT NULL，硬约束 4）。
+//
+// 落库：confidence=1.0 / epistemic=observed / source=manual / status=active（手动即定，spec §5.1）；
+// unit 空则回退目录单位；value_text/unit 空存 NULL（textPtr）；审计 changed_by=user、
+// new_value=值摘要（metricSummary）。append-only：手动加点同样不 supersede（硬约束 1）。
+func (s *Service) ManualAddMetricExt(ctx context.Context, tx *sqlx.Tx, personID ids.ID, metricKey string,
+	valueNum *float64, valueText, unit string, measuredAt time.Time) (*repo.PersonMetric, error) {
+
+	if !ValidMetricKey(metricKey) {
+		return nil, fmt.Errorf("非法指标键: %s", metricKey)
+	}
+	valueText = strings.TrimSpace(valueText)
+	// Numeric 指标要有 value_num（曲线可画，硬约束 6）；类别指标要有 value_text。
+	if MetricDefOf(metricKey).Numeric {
+		if valueNum == nil {
+			return nil, fmt.Errorf("数值指标 %s 必须提供 value_num", metricKey)
+		}
+	} else if valueText == "" {
+		return nil, fmt.Errorf("类别指标 %s 必须提供 value_text", metricKey)
+	}
+	if measuredAt.IsZero() {
+		return nil, fmt.Errorf("measured_at 不能为零值（列 NOT NULL）")
+	}
+
+	if strings.TrimSpace(unit) == "" {
+		unit = MetricDefOf(metricKey).Unit
+	}
+	row := &repo.PersonMetric{
+		PersonID: personID, MetricKey: metricKey,
+		ValueNum: valueNum, ValueText: textPtr(valueText), Unit: textPtr(strings.TrimSpace(unit)),
+		MeasuredAt: measuredAt,
+		Confidence: 1.0, EpistemicType: "observed", Source: "manual", Status: "active",
+	}
+	if err := s.Metrics.CreateExt(ctx, tx, row); err != nil {
+		return nil, err
+	}
+	// 手动路径无 session/溯源：change_log 不带 session_id（nil→NULL），故不复用 createMetricLog。
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "metric", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "user", NewValue: snap(metricSummary(row)),
+		Confidence: fp(1.0), EpistemicType: strPtr("observed"),
+	}); err != nil {
+		return nil, err
+	}
+	return row, nil
+}
+
+// ManualDeleteMetric 手动删测点 → dismissed + delete 审计（对齐 ManualDeleteEvent；
+// append-only 表不真删行，置 dismissed 即从 ListByPerson/FindByPointExt 隐去）。
+func (s *Service) ManualDeleteMetric(ctx context.Context, id ids.ID) error {
+	m, err := s.Metrics.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if m == nil {
+		return ErrNotFound
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Metrics.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
+		return err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: m.PersonID, EntityKind: "metric", EntityID: &id,
+		ChangeType: "delete", ChangedBy: "user", OldValue: snap(metricSummary(m)),
 	}); err != nil {
 		return err
 	}

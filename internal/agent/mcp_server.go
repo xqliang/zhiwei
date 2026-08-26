@@ -30,6 +30,10 @@ type MCPDeps struct {
 	Persons          *repo.PersonRepo
 	PersonAttributes *repo.PersonAttributeRepo
 	PersonEvents     *repo.PersonEventRepo
+	// PersonMetrics 是画像第 5 平面（person_metric，时序个人指标）读工具 get_metrics 的依赖；
+	// propose_profile_metric 同样只 Create pending 提议、绝不写此表，落库在 confirm 单事务里经
+	// profile.Service.ManualAddMetricExt 完成（见 proposals.go 的 profile_metric case）。
+	PersonMetrics *repo.PersonMetricRepo
 	// Retrieve 语义检索（可选）：非 nil 且 query 非空时 search_memory 走「向量+关键词」混合，
 	// 否则退回 Memory.Search 关键词。装配见 main.go（ARK_AUDIO_API_KEY 未配则 nil，降级）。
 	Retrieve *retrieve.Retriever

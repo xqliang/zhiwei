@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,8 @@ type Service struct {
 	Persons       *repo.PersonRepo
 	Attributes    *repo.PersonAttributeRepo
 	Relationships *repo.PersonRelationshipRepo
-	Events        *repo.PersonEventRepo // event 平面（P2 大事记）
+	Events        *repo.PersonEventRepo  // event 平面（P2 大事记）
+	Metrics       *repo.PersonMetricRepo // metric 平面（P3 时序个人指标）
 	ChangeLogs    *repo.PersonChangeLogRepo
 
 	LLM           provider.LLMProvider // ExtractSession 用（Task 13）；手动 CRUD 不需要
@@ -38,12 +40,29 @@ type Service struct {
 	PromptVersion string
 	Window        int
 	Gate          GateConfig
+
+	// Now 注入「当前时间」（测试可固定），供 metric 平面 measured_at 缺省时回退。
+	// nil 时用 time.Now（见 now()）——measured_at 列 NOT NULL，回退保证非零。
+	Now func() time.Time
+}
+
+// now 返回当前时间：优先注入的 s.Now（测试可固定），否则 time.Now。
+// 供 applyMetricFact 在 measured_at 缺省/解析失败时提供非零 fallback（硬约束 4：列 NOT NULL）。
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // Provenance 一条事实的溯源信息。
 type Provenance struct {
 	SessionID  ids.ID
 	SegmentIDs []ids.ID
+	// FallbackAt 是 metric 平面 measured_at 缺省/解析失败时的回退时间。必须「同 session 重跑
+	// 稳定」（用本 session 的 created_at），否则 metric 自然键(含 measured_at)每次重跑都变 →
+	// FindByPointExt 不命中 → 重复插测点（评审 C1）。session 不存在时才退墙钟 s.now()。
+	FallbackAt time.Time
 }
 
 // ApplyStats 一次 ApplyFacts 的决策统计（trace 与日志用）。
@@ -75,8 +94,18 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 		return st, fmt.Errorf("读 session memories: %w", err)
 	}
 
+	// metric 平面 measured_at 缺省时的稳定回退：优先本 session 的 created_at（同 session
+	// 重跑得同一时间 → FindByPointExt 命中、幂等不重复插；评审 C1）。session 读不到才退
+	// s.now()（墙钟，仅测试/无 session 场景；生产 extract 恒有真 session）。
+	fallbackAt := s.now()
+	if s.Sessions != nil {
+		if sess, err := s.Sessions.Get(ctx, sessionID); err == nil && sess != nil && !sess.CreatedAt.IsZero() {
+			fallbackAt = sess.CreatedAt
+		}
+	}
+
 	for _, f := range facts {
-		prov := Provenance{SessionID: sessionID, SegmentIDs: f.SegmentIDs}
+		prov := Provenance{SessionID: sessionID, SegmentIDs: f.SegmentIDs, FallbackAt: fallbackAt}
 		if err := s.applyFact(ctx, tx, userID, f, prov, memRows, &st); err != nil {
 			return st, fmt.Errorf("应用事实(plane=%s key=%s relation=%s subject=%s): %w",
 				f.Plane, f.AttrKey, f.RelationType, f.Subject.Kind, err)
@@ -103,6 +132,9 @@ func (s *Service) applyFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fa
 
 	if f.Plane == "event" {
 		return s.applyEventFact(ctx, tx, userID, f, personID, memID, prov, st)
+	}
+	if f.Plane == "metric" {
+		return s.applyMetricFact(ctx, tx, userID, f, personID, memID, prov, st)
 	}
 	if f.Plane == "relationship" {
 		return s.applyRelationshipFact(ctx, tx, userID, f, personID, memID, prov, st)
@@ -292,6 +324,67 @@ func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 		} else {
 			st.Pending++
 		}
+	}
+	return nil
+}
+
+// ---- 指标平面（P3 时序个人指标）----
+
+// applyMetricFact 时序指标落库（硬约束 1-6）：与 applyEventFact 同签名（带 provenance），
+// 但语义为「连续测点」，与单值属性/事件都不同：
+//   - append-only：绝不 supersede 旧行，每个测点一行（硬约束 1）；
+//   - 恒 create、无 reaffirm/conflict：命中完全同点（自然键含 measured_at + 值）则幂等跳过，
+//     否则按闸门建行（硬约束 3）；
+//   - measured_at 保留时刻精度（parseMetricAt，不复用抹平到当天零点的 parseEventAt），
+//     缺省时回退 s.now()，保证列 NOT NULL 非零（硬约束 4）；
+//   - confidence 存抽取确定性，value_num/value_text 才是主载荷；repo 不给 confidence 兜底，
+//     故建行必显式设 confidence（硬约束 5）。
+func (s *Service) applyMetricFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
+	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
+
+	// measured_at：保留时刻精度；解析失败/缺省回退 prov.FallbackAt（本 session created_at，
+	// 同 session 重跑稳定 → 幂等命中，评审 C1）。
+	measuredAt := parseMetricAt(f.MeasuredAt, prov.FallbackAt)
+
+	// 幂等（硬约束 2/3）：自然键含 measured_at + 值，命中完全同点则直接跳过（no-op），
+	// 绝不像单值属性那样 supersede 旧行。value_text 空存 nil，交给 <=> NULL 安全比较。
+	ex, err := s.Metrics.FindByPointExt(ctx, tx, personID, f.MetricKey, measuredAt, f.ValueNum, textPtr(f.MetricValueText))
+	if err != nil {
+		return err
+	}
+	if ex != nil {
+		st.Skipped++
+		return nil
+	}
+
+	// 闸门：无冲突/现值分支，只 active/pending（硬约束 3）。
+	status := DecideMetric(f.Confidence, f.EpistemicType, s.Gate)
+
+	// 单位：事实未给则回退目录单位（体重→kg、睡眠→h；情绪/精力/饮食/健康无量纲→nil）。
+	unit := f.Unit
+	if unit == "" {
+		unit = MetricDefOf(f.MetricKey).Unit
+	}
+
+	row := &repo.PersonMetric{
+		UserID: userID, PersonID: personID, MetricKey: f.MetricKey,
+		ValueNum: f.ValueNum, ValueText: textPtr(f.MetricValueText), Unit: textPtr(unit),
+		MeasuredAt:    measuredAt,
+		Confidence:    f.Confidence, // 硬约束 5：显式设 confidence（repo 不兜底）
+		EpistemicType: f.EpistemicType, Source: "extract", Status: status,
+		SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+	if err := s.Metrics.CreateExt(ctx, tx, row); err != nil {
+		return err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, createMetricLog(personID, row, memID, prov, "llm")); err != nil {
+		return err
+	}
+	if status == "active" {
+		st.Active++
+	} else {
+		st.Pending++
 	}
 	return nil
 }
@@ -499,6 +592,19 @@ func reaffirmEventLog(personID ids.ID, row *repo.PersonEvent, memID *ids.ID, pro
 	}
 }
 
+// createMetricLog 指标测点创建审计。changedBy 区分抽取（"llm"）与手动（"user"）路径。
+// new_value 为「metric_key + 值摘要」（如 "weight=70kg"、"emotion=-0.6/焦虑"，见 metricSummary），
+// 便于确认队列/变更历史直读。metric 平面 append-only，无 reaffirm/supersede，故仅此一个 create 构造。
+func createMetricLog(personID ids.ID, row *repo.PersonMetric, memID *ids.ID, prov Provenance, changedBy string) *repo.PersonChangeLog {
+	return &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "metric", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: changedBy, NewValue: snap(metricSummary(row)),
+		Confidence: fp(row.Confidence), EpistemicType: strPtr(row.EpistemicType),
+		SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+}
+
 func createAttrLog(personID ids.ID, row *repo.PersonAttribute, memID *ids.ID, prov Provenance, note string) *repo.PersonChangeLog {
 	l := &repo.PersonChangeLog{
 		PersonID: personID, EntityKind: "attribute", EntityID: &row.ID,
@@ -616,4 +722,60 @@ func parseEventAt(s string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// parseMetricAt 解析测点时间，**保留时刻精度**（与 parseEventAt 刻意不同——后者抹平到 UTC
+// 当天零点，丢弃时刻；而 metric 是连续时序，同一天多次测量要靠时刻区分，硬约束 4）。
+// 依次尝试 RFC3339（带时区/时刻）、"2006-01-02 15:04"（日期+时分）、"2006-01-02"（纯日期）；
+// 全部失败返回 fallback（调用方传 s.now()，保证 measured_at 列 NOT NULL 非零）。
+//
+// 说明：DSN 未配 loc，驱动写库按 UTC 转换——带时区的 RFC3339 会转成对应 UTC 瞬时存储，
+// 瞬时语义正确（metric 关心的是「何时测的」这个时间点，而非日历日）；纯日期串按 UTC 零点存。
+func parseMetricAt(s string, fallback time.Time) time.Time {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return fallback
+}
+
+// textPtr 把字符串转指针：空串 → nil（存 SQL NULL），非空 → 指向该串。
+// 供 metric 平面 value_text/unit 落库（空值存 NULL，而非空字符串）——与 strPtr（恒返回指针）不同。
+func textPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// metricSummary 生成测点值摘要（change_log new_value 用）：
+//
+//	纯数值：weight=70kg（带单位）/ mood_energy=0.8（无量纲）
+//	纯文本：diet=火锅
+//	数值+文本兼有：emotion=-0.6/焦虑
+//
+// 数值用最短十进制表示（strconv -1 精度），避免 70 打成 70.000。
+func metricSummary(m *repo.PersonMetric) string {
+	b := m.MetricKey + "="
+	if m.ValueNum != nil {
+		b += strconv.FormatFloat(*m.ValueNum, 'f', -1, 64)
+		if m.Unit != nil {
+			b += *m.Unit
+		}
+	}
+	if m.ValueText != nil {
+		if m.ValueNum != nil {
+			b += "/"
+		}
+		b += *m.ValueText
+	}
+	return b
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ type PersonHandler struct {
 	Attributes    *repo.PersonAttributeRepo
 	Relationships *repo.PersonRelationshipRepo
 	Events        *repo.PersonEventRepo
+	Metrics       *repo.PersonMetricRepo
 	ChangeLogs    *repo.PersonChangeLogRepo
 	Service       *profile.Service
 }
@@ -41,6 +43,9 @@ func RegisterPerson(r chi.Router, h *PersonHandler) {
 	r.Get("/api/persons/{id}/events", h.ListEvents)
 	r.Post("/api/persons/{id}/events", h.AddEvent)
 	r.Delete("/api/persons/{id}/events/{eid}", h.DeleteEvent)
+	r.Get("/api/persons/{id}/metrics", h.ListMetrics)
+	r.Post("/api/persons/{id}/metrics", h.AddMetric)
+	r.Delete("/api/persons/{id}/metrics/{mid}", h.DeleteMetric)
 	r.Get("/api/persons/{id}/history", h.History)
 
 	r.Get("/api/profile/pending", h.ListPending)
@@ -56,7 +61,7 @@ var validPersonStatuses = map[string]bool{
 
 // validPendingKinds 是确认队列 kind 的合法取值（confirm/dismiss 端点白名单）。
 var validPendingKinds = map[string]bool{
-	"person": true, "attribute": true, "relationship": true, "event": true,
+	"person": true, "attribute": true, "relationship": true, "event": true, "metric": true,
 }
 
 // ---- 名册 ----
@@ -116,11 +121,32 @@ type attrGroup struct {
 	Attrs []repo.PersonAttribute `json:"attrs"`
 }
 
+// metricGroup 详情页/指标列表按 metric_key 聚合的一组测点（时序曲线的一条线）。
+// Label/Unit/Numeric 取自指标目录（profile.MetricDefOf）；Points 按 measured_at 升序。
+type metricGroup struct {
+	Key     string        `json:"key"`
+	Label   string        `json:"label"`
+	Unit    string        `json:"unit"`
+	Numeric bool          `json:"numeric"`
+	Points  []metricPoint `json:"points"` // 按 measured_at 升序
+}
+
+// metricPoint 单个测点（曲线上的一个点）。ValueText/Unit 在 repo 里是 *string，
+// 这里转成 string（nil→""），前端拿到稳定的字符串而非 null。
+type metricPoint struct {
+	ID         ids.ID    `json:"id"` // 测点行 id，供前端 DELETE /metrics/{mid}
+	MeasuredAt time.Time `json:"measured_at"`
+	ValueNum   *float64  `json:"value_num,omitempty"`
+	ValueText  string    `json:"value_text,omitempty"`
+	Status     string    `json:"status"`
+}
+
 type personDetailResp struct {
 	Person           *repo.Person              `json:"person"`
 	Groups           []attrGroup               `json:"groups"`
 	Relationships    []repo.PersonRelationship `json:"relationships"`
 	Events           []repo.PersonEvent        `json:"events"`
+	Metrics          []metricGroup             `json:"metrics"`
 	RecentSessionIDs []ids.ID                  `json:"recent_session_ids"`
 	PendingCount     int                       `json:"pending_count"`
 }
@@ -201,9 +227,18 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 			pending++
 		}
 	}
+	// 时序指标（metric 平面）：只展示 active+pending，按 metric_key 分组、组内 measured_at
+	// 升序（ListByPerson 已排序）；pending 测点也计入详情页的 pending 计数。
+	metrics, err := h.Metrics.ListByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	metricGroups, metricPending := buildMetricGroups(metrics)
+	pending += metricPending
 	writeJSON(w, personDetailResp{
 		Person: p, Groups: groups, Relationships: relShown, Events: evShown,
-		RecentSessionIDs: sids, PendingCount: pending,
+		Metrics: metricGroups, RecentSessionIDs: sids, PendingCount: pending,
 	})
 }
 
@@ -556,6 +591,159 @@ func (h *PersonHandler) DeleteEvent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// ---- 时序指标（metric 平面）----
+
+// buildMetricGroups 把测点序列按 metric_key 分组：ListByPerson 已按 (metric_key, measured_at)
+// 排序，故顺序遍历、遇到 key 变化就新开一组即可（无需 map）。每组的 Label/Unit/Numeric 取自
+// 指标目录（profile.MetricDefOf）。返回分组结果 + pending 测点数（供详情页并入 pending 计数）。
+// 防御性再过滤一次 active+pending（ListByPerson 已保证，双保险）。
+func buildMetricGroups(metrics []repo.PersonMetric) ([]metricGroup, int) {
+	groups := make([]metricGroup, 0)
+	pending := 0
+	idx := -1 // 当前分组在 groups 中的下标；用下标而非指针，避免 append 扩容后指针失效
+	for _, m := range metrics {
+		if m.Status != "active" && m.Status != "pending" {
+			continue
+		}
+		if m.Status == "pending" {
+			pending++
+		}
+		if idx < 0 || groups[idx].Key != m.MetricKey {
+			def := profile.MetricDefOf(m.MetricKey)
+			groups = append(groups, metricGroup{
+				Key: m.MetricKey, Label: def.Label, Unit: def.Unit, Numeric: def.Numeric,
+				Points: []metricPoint{},
+			})
+			idx = len(groups) - 1
+		}
+		vt := ""
+		if m.ValueText != nil {
+			vt = *m.ValueText
+		}
+		groups[idx].Points = append(groups[idx].Points, metricPoint{
+			ID: m.ID, MeasuredAt: m.MeasuredAt, ValueNum: m.ValueNum, ValueText: vt, Status: m.Status,
+		})
+	}
+	return groups, pending
+}
+
+// metricValueText 生成测点值的展示串（确认队列 Value 用）：数值型取 value_num（带单位，
+// 如 70kg / 0.8），类别型取 value_text（如 火锅）；两者都空时返回 ""。数值用最短十进制
+// 表示（strconv -1 精度，避免 70 打成 70.000），与 profile.metricSummary 的数值格式一致。
+func metricValueText(m *repo.PersonMetric) string {
+	if m.ValueNum != nil {
+		s := strconv.FormatFloat(*m.ValueNum, 'f', -1, 64)
+		if m.Unit != nil {
+			s += *m.Unit
+		}
+		return s
+	}
+	if m.ValueText != nil {
+		return *m.ValueText
+	}
+	return ""
+}
+
+// parseMeasuredAt 解析测点时间串，保留时刻精度（对齐 profile.parseMetricAt 的意图——metric 是
+// 连续时序，同一天多次测量靠时刻区分，勿抹平到当天零点）。空串或全部解析失败 → time.Now()
+// （保证 measured_at 列 NOT NULL 非零，Service 侧也会拒绝零值）。
+func parseMeasuredAt(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Now()
+	}
+	for _, layout := range []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Now()
+}
+
+// ListMetrics 人物时序指标（分组结构，每组按 measured_at 升序）。只返回 active+pending
+// （repo ListByPerson 已过滤）。?metric_key=weight 只看单一指标（可选）。
+func (h *PersonHandler) ListMetrics(w http.ResponseWriter, r *http.Request) {
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	list, err := h.Metrics.ListByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if key := r.URL.Query().Get("metric_key"); key != "" {
+		filtered := make([]repo.PersonMetric, 0, len(list))
+		for _, m := range list {
+			if m.MetricKey == key {
+				filtered = append(filtered, m)
+			}
+		}
+		list = filtered
+	}
+	groups, _ := buildMetricGroups(list)
+	writeJSON(w, map[string]any{"metrics": groups})
+}
+
+// AddMetric 手动加一个测点（走 Service：active/manual/conf=1.0 + 审计）。
+// metric_key 目录校验先行（→400）；value_num 缺省（body 不带）→ nil，交由 Service 按指标
+// 类型校验（数值型必须有 value_num、类别型必须有 value_text）；measured_at 空 → 当前时间，
+// 否则 RFC3339 / "2006-01-02" 等尽力解析。
+func (h *PersonHandler) AddMetric(w http.ResponseWriter, r *http.Request) {
+	pid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		MetricKey  string   `json:"metric_key"`
+		ValueNum   *float64 `json:"value_num"`
+		ValueText  string   `json:"value_text"`
+		Unit       string   `json:"unit"`
+		MeasuredAt string   `json:"measured_at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	if !profile.ValidMetricKey(req.MetricKey) {
+		http.Error(w, "metric_key 非法", http.StatusBadRequest)
+		return
+	}
+	m, err := h.Service.ManualAddMetric(r.Context(), pid, req.MetricKey,
+		req.ValueNum, req.ValueText, req.Unit, parseMeasuredAt(req.MeasuredAt))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, m)
+}
+
+// DeleteMetric 手动删测点 → dismissed + delete 审计。
+func (h *PersonHandler) DeleteMetric(w http.ResponseWriter, r *http.Request) {
+	mid, err := ids.ParseID(chi.URLParam(r, "mid"))
+	if err != nil {
+		http.Error(w, "mid 非法", http.StatusBadRequest)
+		return
+	}
+	if err := h.Service.ManualDeleteMetric(r.Context(), mid); err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "测点不存在", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 // ---- 修改历史 ----
 
 func (h *PersonHandler) History(w http.ResponseWriter, r *http.Request) {
@@ -576,16 +764,18 @@ func (h *PersonHandler) History(w http.ResponseWriter, r *http.Request) {
 // ---- 确认队列（跨平面 pending 并集）----
 
 type pendingItem struct {
-	Kind          string     `json:"kind"` // attribute|relationship|person|event
+	Kind          string     `json:"kind"` // attribute|relationship|person|event|metric
 	ID            ids.ID     `json:"id"`
 	PersonID      ids.ID     `json:"person_id"`
 	PersonName    string     `json:"person_name"`
 	AttrKey       string     `json:"attr_key,omitempty"`
-	Value         string     `json:"value,omitempty"`         // attribute:建议值 / relationship:类型 / person:名字
+	Value         string     `json:"value,omitempty"`         // attribute:建议值 / relationship:类型 / person:名字 / metric:值
 	CurrentValue  string     `json:"current_value,omitempty"` // 冲突时的现值（supersedes 行）
 	RelationType  string     `json:"relation_type,omitempty"`
 	EventType     string     `json:"event_type,omitempty"`
+	MetricKey     string     `json:"metric_key,omitempty"`
 	OccurredAt    *time.Time `json:"occurred_at,omitempty"`
+	MeasuredAt    *time.Time `json:"measured_at,omitempty"`
 	Label         string     `json:"label,omitempty"`
 	Confidence    float64    `json:"confidence"`
 	EpistemicType string     `json:"epistemic_type"`
@@ -657,6 +847,21 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	metrics, err := h.Metrics.ListPending(ctx, 1)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, m := range metrics {
+		measuredAt := m.MeasuredAt // 取地址前先拷贝到迭代内局部变量，指针稳定
+		items = append(items, pendingItem{
+			Kind: "metric", ID: m.ID, PersonID: m.PersonID, PersonName: nameOf[m.PersonID],
+			MetricKey: m.MetricKey, Value: metricValueText(&m), MeasuredAt: &measuredAt,
+			Confidence: m.Confidence, EpistemicType: m.EpistemicType,
+			SessionID: m.SessionID, SupersedesID: m.SupersedesID,
+		})
+	}
+
 	for _, p := range persons {
 		if p.Status == "pending" {
 			items = append(items, pendingItem{
@@ -671,7 +876,7 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
 	kind := chi.URLParam(r, "kind")
 	if !validPendingKinds[kind] {
-		http.Error(w, "kind 非法（person|attribute|relationship|event）", http.StatusBadRequest)
+		http.Error(w, "kind 非法（person|attribute|relationship|event|metric）", http.StatusBadRequest)
 		return
 	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
@@ -689,7 +894,7 @@ func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
 func (h *PersonHandler) DismissPending(w http.ResponseWriter, r *http.Request) {
 	kind := chi.URLParam(r, "kind")
 	if !validPendingKinds[kind] {
-		http.Error(w, "kind 非法（person|attribute|relationship|event）", http.StatusBadRequest)
+		http.Error(w, "kind 非法（person|attribute|relationship|event|metric）", http.StatusBadRequest)
 		return
 	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))

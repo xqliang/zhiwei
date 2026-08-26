@@ -18,10 +18,10 @@ type Subject struct {
 	Relation string `json:"relation"` // kind=relation 时的关系类型（如 配偶）
 }
 
-// Fact 是 LLM 输出的一条画像事实（闸门前后通用载体）。P1-P2 三个平面：
-// attribute（属性）/ relationship（关系）/ event（大事记）。P2+ 续扩 metric/cycle/activity。
+// Fact 是 LLM 输出的一条画像事实（闸门前后通用载体）。四个平面：
+// attribute（属性）/ relationship（关系）/ event（大事记）/ metric（时序个人指标）。
 type Fact struct {
-	Plane   string  // attribute|relationship|event
+	Plane   string  // attribute|relationship|event|metric
 	Subject Subject // 信息归属的人物指代
 
 	// ---- attribute 平面 ----
@@ -44,6 +44,15 @@ type Fact struct {
 	EndAt            string
 	EventLocation    string
 
+	// ---- metric 平面（P3 时序个人指标）----
+	// 注意：value_text 字段名刻意用 MetricValueText，与 attribute 平面的 Value 区分
+	//（两者语义不同：Value 是属性值，MetricValueText 是测点的类别描述读数）。
+	MetricKey       string   // 指标键（emotion|weight|sleep|mood_energy|diet|health，见 MetricCatalog）
+	ValueNum        *float64 // 数值读数（可空；Numeric 指标必填，曲线只画非空者）
+	MetricValueText string   // 类别描述读数（可空；非 Numeric 指标必填）
+	Unit            string   // 单位（可空；空时落库回退 MetricDefOf(key).Unit）
+	MeasuredAt      string   // 原始测点时间字符串（RFC3339/"2006-01-02 15:04"/"2006-01-02"），解析放 service 层（parseMetricAt，保留时刻）
+
 	// ---- 通用 ----
 	Confidence    float64
 	EpistemicType string // observed|inferred|predicted|suggested
@@ -53,7 +62,7 @@ type Fact struct {
 	SegmentIDs []ids.ID // provenance：来源块的 segment id
 }
 
-var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true}
+var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true, "metric": true}
 
 // validSubjectKinds 是人物指代 Subject.Kind（也用于 Related.Kind）的合法取值。
 // 非法或缺失的指代无法归属到具体人物，直接丢弃该条（宁少勿错）。
@@ -101,9 +110,16 @@ type rawFact struct {
 	OccurredAt       string     `json:"occurred_at"`
 	EndAt            string     `json:"end_at"`
 	EventLocation    string     `json:"location"`
-	Confidence       float64    `json:"confidence"`
-	EpistemicType    string     `json:"epistemic_type"`
-	BlockIndex       int        `json:"block_index"`
+	// ---- metric 平面 ----（value_text 为 metric 专用 json key，与 attribute 的 value、event 的 title 不冲突）
+	MetricKey       string   `json:"metric_key"`
+	ValueNum        *float64 `json:"value_num"`
+	MetricValueText string   `json:"value_text"`
+	Unit            string   `json:"unit"`
+	MeasuredAt      string   `json:"measured_at"`
+
+	Confidence    float64 `json:"confidence"`
+	EpistemicType string  `json:"epistemic_type"`
+	BlockIndex    int     `json:"block_index"`
 }
 
 // ParseFacts 解析 LLM 输出。容错风格同 memory.ParseCandidates：截取首个 { 到末个 }，
@@ -142,6 +158,11 @@ func ParseFacts(raw string) ([]Fact, error) {
 			OccurredAt:       strings.TrimSpace(rf.OccurredAt),
 			EndAt:            strings.TrimSpace(rf.EndAt),
 			EventLocation:    strings.TrimSpace(rf.EventLocation),
+			MetricKey:        strings.TrimSpace(rf.MetricKey),
+			ValueNum:         rf.ValueNum,
+			MetricValueText:  strings.TrimSpace(rf.MetricValueText),
+			Unit:             strings.TrimSpace(rf.Unit),
+			MeasuredAt:       strings.TrimSpace(rf.MeasuredAt),
 			Confidence:       clamp01(rf.Confidence),
 			EpistemicType:    strings.TrimSpace(rf.EpistemicType),
 			BlockIndex:       rf.BlockIndex,
@@ -172,6 +193,21 @@ func ParseFacts(raw string) ([]Fact, error) {
 			// related 为可选增强信息，service 层解析容错（解析不到存空），此处不校验——与 relationship 平面强制校验 Related.Kind 不同。
 			if !ValidEventTypes[f.EventType] || f.EventTitle == "" {
 				continue // 非法事件类型或空标题：无法落库
+			}
+		case "metric":
+			// 指标键必须在目录内（时序曲线的键须收敛，目录外一律丢）。
+			if !ValidMetricKey(f.MetricKey) {
+				continue
+			}
+			// 载荷校验（硬约束 6：Numeric 键要有 value_num，曲线才能画）：
+			//   Numeric 指标 → 必须给 value_num；非 Numeric 指标 → 必须给 value_text。
+			// measured_at 允许空——service 层 applyMetricFact 用 fallback 回退（保证 NOT NULL）。
+			if MetricDefOf(f.MetricKey).Numeric {
+				if f.ValueNum == nil {
+					continue
+				}
+			} else if f.MetricValueText == "" {
+				continue
 			}
 		}
 		facts = append(facts, f)

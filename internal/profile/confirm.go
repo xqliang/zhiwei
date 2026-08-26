@@ -8,8 +8,9 @@ import (
 	"zhiwei/internal/repo"
 )
 
-// ConfirmPending 确认一条 pending（kind ∈ person|attribute|relationship|event）：
+// ConfirmPending 确认一条 pending（kind ∈ person|attribute|relationship|event|metric）：
 // pending → active；attribute/relationship/event 若带 supersedes_id，被指向的旧行 → superseded。
+// metric 平面 append-only 无冲突路径，仅置 active。
 // 每步变更记审计（changed_by=user）。非 pending 行确认报错（幂等由前端/状态保证）。
 func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) error {
 	tx, err := s.DB.BeginTxx(ctx, nil)
@@ -143,8 +144,31 @@ func (s *Service) ConfirmPending(ctx context.Context, kind string, id ids.ID) er
 		}); err != nil {
 			return err
 		}
+	case "metric":
+		m, err := s.Metrics.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		if m == nil {
+			return ErrNotFound
+		}
+		if m.Status != "pending" {
+			return fmt.Errorf("仅 pending 状态可确认（当前 %s）", m.Status)
+		}
+		// metric 平面 append-only、无冲突路径（DecideMetric 只有 active/pending，不置 supersedes_id），
+		// 故确认即直接置 active，无需像 attribute/event 那样处理被替换的旧行。
+		if err := s.Metrics.SetStatusExt(ctx, tx, id, "active"); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: m.PersonID, EntityKind: "metric", EntityID: &id,
+			ChangeType: "confirm", ChangedBy: "user", NewValue: snap(metricSummary(m)),
+			Confidence: fp(m.Confidence),
+		}); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event）", kind)
+		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric）", kind)
 	}
 	return tx.Commit()
 }
@@ -228,8 +252,25 @@ func (s *Service) DismissPending(ctx context.Context, kind string, id ids.ID) er
 		}); err != nil {
 			return err
 		}
+	case "metric":
+		m, err := s.Metrics.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		if m == nil {
+			return ErrNotFound
+		}
+		if err := s.Metrics.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: m.PersonID, EntityKind: "metric", EntityID: &id,
+			ChangeType: "dismiss", ChangedBy: "user", OldValue: snap(metricSummary(m)),
+		}); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event）", kind)
+		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric）", kind)
 	}
 	return tx.Commit()
 }

@@ -1041,6 +1041,8 @@ const app = createApp({
       showAddRel.value = false; resetAddRelForm(); deletingRelId.value = null;
       // 大事记临时态（P2b Task 1）：加事件表单(含草稿) / 删除确认一并清空
       showAddEvent.value = false; resetAddEventForm(); deletingEventId.value = null;
+      // 指标临时态（P2 metric）：加指标表单(含草稿) / 删除确认一并清空
+      showAddMetric.value = false; resetAddMetricForm(); deletingMetricId.value = null;
     }
     async function reloadPersonDetail() {
       if (!personDetail.value) return;
@@ -1285,6 +1287,102 @@ const app = createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 指标（metric 平面，第 5 平面 person_metric，P2） ----------
+    // 前端指标目录：与后端 6 键一致（profile.MetricDefOf / catalog）。numeric=true 的指标可画趋势曲线。
+    const METRIC_CATALOG = [
+      { key: 'emotion', label: '情绪', unit: '', numeric: true },
+      { key: 'weight', label: '体重', unit: 'kg', numeric: true },
+      { key: 'sleep', label: '睡眠时长', unit: 'h', numeric: true },
+      { key: 'mood_energy', label: '精力', unit: '', numeric: true },
+      { key: 'diet', label: '饮食', unit: '', numeric: false },
+      { key: 'health', label: '健康', unit: '', numeric: false },
+    ];
+    // metric_key → 中文标签（确认队列摘要用；目录外键原样返回，不出空标签）
+    function metricLabel(key) { const d = METRIC_CATALOG.find(m => m.key === key); return d ? d.label : (key || ''); }
+
+    const showAddMetric = ref(false);
+    // value_num 用字符串承载 <input type=number> 的值，提交时按所选指标 numeric 决定是否 Number()。
+    const addMetricForm = reactive({ metric_key: '', value_num: '', value_text: '', unit: '', measured_at: '' });
+    const addingMetric = ref(false);
+    const deletingMetricId = ref(null);  // 2 步删除确认（测点 id）
+
+    // 当前所选指标键的目录定义（决定表单填 value_num 还是 value_text、默认单位）
+    const addMetricDef = computed(() => METRIC_CATALOG.find(m => m.key === addMetricForm.metric_key) || null);
+
+    // 各数值型指标组的趋势曲线几何：只对 numeric 组且「≥2 个含 value_num 的测点」预算好坐标
+    //（模板只读，不在模板里算）。返回 { [metric_key]: chartGeom 结果 }；1 点或类别组不产出，
+    // 模板据此决定是否画线（对齐周报 weeklyCharts 的 chartGeom 用法）。points 已按 measured_at 升序。
+    const metricCharts = computed(() => {
+      const out = {};
+      if (!personDetail.value || !personDetail.value.metrics) return out;
+      for (const g of personDetail.value.metrics) {
+        if (!g.numeric) continue;
+        const pts = (g.points || []).filter(p => p.value_num != null);
+        if (pts.length < 2) continue; // 单点不画线，仅列表展示
+        out[g.key] = chartGeom(pts.map(p => p.value_num), pts.map(p => p.measured_at));
+      }
+      return out;
+    });
+    // 测点值展示串：数值型取 value_num（带单位，如 70kg / 0.8），类别型取 value_text（如 火锅）
+    function metricPointValue(g, p) {
+      if (p.value_num != null) return fmtNum(p.value_num) + (g && g.unit ? g.unit : '');
+      return p.value_text || '';
+    }
+    function resetAddMetricForm() {
+      addMetricForm.metric_key = ''; addMetricForm.value_num = ''; addMetricForm.value_text = '';
+      addMetricForm.unit = ''; addMetricForm.measured_at = '';
+    }
+    // 选指标键后自动带出目录默认单位（用户仍可改），并清掉不适用的那个值输入，避免误传另一类型的值。
+    function onPickMetricKey() {
+      const d = addMetricDef.value;
+      addMetricForm.unit = d ? d.unit : '';
+      if (d && d.numeric) addMetricForm.value_text = '';
+      else addMetricForm.value_num = '';
+    }
+    // 开合切换：收起清草稿（对齐 toggleAddEvent/toggleAddAttr 的对称清理模式）
+    function toggleAddMetric() {
+      if (showAddMetric.value) { showAddMetric.value = false; resetAddMetricForm(); return; }
+      showAddMetric.value = true;
+    }
+    async function submitAddMetric() {
+      if (addingMetric.value) return;
+      const key = addMetricForm.metric_key;
+      const def = addMetricDef.value;
+      if (!key || !def) { toast.value = '请选择指标'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      // 数值型必须给 value_num、类别型必须给 value_text（与后端 ManualAddMetric 硬约束一致，前端先拦一道）
+      if (def.numeric && String(addMetricForm.value_num).trim() === '') {
+        toast.value = '数值型指标需填数值'; setTimeout(() => { toast.value = ''; }, 2000); return;
+      }
+      if (!def.numeric && !addMetricForm.value_text.trim()) {
+        toast.value = '类别型指标需填描述'; setTimeout(() => { toast.value = ''; }, 2000); return;
+      }
+      addingMetric.value = true;
+      try {
+        const body = { metric_key: key };
+        if (def.numeric) body.value_num = Number(addMetricForm.value_num);
+        else body.value_text = addMetricForm.value_text.trim();
+        if (addMetricForm.unit.trim()) body.unit = addMetricForm.unit.trim();
+        if (addMetricForm.measured_at) body.measured_at = addMetricForm.measured_at; // 留空 → 后端用当前时间
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/metrics', body);
+        await reloadPersonDetail();
+        showAddMetric.value = false;
+        resetAddMetricForm();
+      } catch (e) { showError(e); }
+      finally { addingMetric.value = false; }
+    }
+    // 删除测点（2 步确认，DELETE /api/persons/{id}/metrics/{mid}）。测点 p 需含 id 才可删；
+    // 详情页 points 目前不下发 id 时删除按钮不渲染（见 index.html 的 v-if="p.id != null"）。
+    function askDeleteMetric(p) { deletingMetricId.value = p.id; }
+    async function confirmDeleteMetric() {
+      const id = deletingMetricId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/metrics/' + id);
+        deletingMetricId.value = null;
+        await reloadPersonDetail(); await loadPersons(); // pending 计数可能变化
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 确认队列（跨平面 pending 并集；与名册/详情独立刷新） ----------
     const pendingItems = ref([]);
     const pendingLoading = ref(false);
@@ -1323,15 +1421,16 @@ const app = createApp({
       } catch (e) { showError(e); }
       finally { delete queueBusyIds[k]; }
     }
-    // 队列条目摘要（kind 不同字段不同：attribute=建议值，relationship=类型+称呼，event=类型+标题，person=名字）
+    // 队列条目摘要（kind 不同字段不同：attribute=建议值，relationship=类型+称呼，event=类型+标题，metric=指标+值，person=名字）
     function pendingSummary(it) {
       if (it.kind === 'attribute') return (it.attr_key || '') + '：' + (it.value || '');
       if (it.kind === 'relationship') return (it.relation_type || '') + (it.label ? '（' + it.label + '）' : '');
       if (it.kind === 'event') return (it.event_type || '') + '：' + (it.value || ''); // event：event_type + title（value 后端映射为 title）
+      if (it.kind === 'metric') return metricLabel(it.metric_key) + '：' + (it.value || ''); // metric：指标中文名 + 值（value 后端映射为带单位的读数）
       return it.value || it.person_name; // person：名字
     }
     function pendingKindText(k) {
-      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记' }[k] || k;
+      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记', metric: '指标' }[k] || k;
     }
 
     // ---------- 从历史回填抽取（POST /api/profile/extract：不带 session_id = 最近 50 个 completed，同步） ----------
@@ -1685,7 +1784,7 @@ const app = createApp({
       propose_topic_rename: '话题改名', propose_topic_confirm: '确认话题', propose_topic_dismiss: '忽略话题',
       propose_todo_create: '新建待办', propose_todo_status: '待办状态',
       propose_profile_attr: '更新画像属性', propose_profile_event: '记录大事记',
-      propose_profile_relationship: '新增人物关系',
+      propose_profile_relationship: '新增人物关系', propose_profile_metric: '记录指标',
     };
     function toolLabel(name) { return TOOL_LABELS[toolBase(name)] || (name || '工具'); }
     // 参数摘要：把 args(JSON 字符串) 折成 "k=v · k=v"，解析失败原样显示
@@ -1727,15 +1826,15 @@ const app = createApp({
     //（JSON：{id,kind,target_kind,target_id,payload:{old?,new?},rationale,status}）。前端据此渲染
     // 「确认卡」：old→new diff + 理由 + [确认]/[放弃]。确认/放弃走 /api/agent/proposals/{id}/{action}
     //（幂等）。所有展示值一律走 Vue {{ }} 自动转义，不用 v-html（rationale/old/new 均为不可信文本）。
-    const PROPOSAL_KINDS = ['memory_update', 'memory_dismiss', 'topic_rename', 'topic_confirm', 'topic_dismiss', 'todo_create', 'todo_status', 'profile_attr', 'profile_event', 'profile_relationship'];
+    const PROPOSAL_KINDS = ['memory_update', 'memory_dismiss', 'topic_rename', 'topic_confirm', 'topic_dismiss', 'todo_create', 'todo_status', 'profile_attr', 'profile_event', 'profile_relationship', 'profile_metric'];
     const PROPOSAL_TITLES = {
       memory_update: '修改记忆', memory_dismiss: '忽略记忆',
       topic_rename: '话题改名', topic_confirm: '确认话题', topic_dismiss: '忽略话题',
       todo_create: '新建待办', todo_status: '待办状态',
-      profile_attr: '更新画像属性', profile_event: '记录大事记', profile_relationship: '新增人物关系',
+      profile_attr: '更新画像属性', profile_event: '记录大事记', profile_relationship: '新增人物关系', profile_metric: '记录指标',
     };
     // 字段名 → 中文标签（diff 行左侧）
-    const PROPOSAL_FIELD_LABELS = { title: '标题', content: '内容', name: '名称', status: '状态', due_at: '截止', topic_id: '关联话题', type: '类型', kind: '类型', attr_key: '属性', value: '值', event_type: '事件类型', occurred_at: '发生时间', relation_type: '关系类型', related_person_name: '关联人', org_name: '组织', direction: '方向', label: '称呼' };
+    const PROPOSAL_FIELD_LABELS = { title: '标题', content: '内容', name: '名称', status: '状态', due_at: '截止', topic_id: '关联话题', type: '类型', kind: '类型', attr_key: '属性', value: '值', event_type: '事件类型', occurred_at: '发生时间', relation_type: '关系类型', related_person_name: '关联人', org_name: '组织', direction: '方向', label: '称呼', metric_key: '指标', value_num: '数值', value_text: '描述', unit: '单位', measured_at: '时间' };
     // 状态枚举 → 中文（memory/topic/todo 状态并集）
     const PROPOSAL_STATUS_LABELS = { suggested: '待确认', pending: '待处理', confirmed: '已确认', active: '活跃', done: '已完成', dismissed: '已忽略', applied: '已应用', expired: '已过期' };
     // 单字段值格式化：status 走中文枚举，*_at 走本地时间，其余按类型稳妥转字符串。
@@ -2038,16 +2137,22 @@ const app = createApp({
       const n = vals.length;
       const W = 520, H = 150, padL = 30, padR = 14, padT = 14, padB = 26;
       const innerW = W - padL - padR, innerH = H - padT - padB;
-      const max = Math.max(1, ...(n ? vals : [1]));       // 避免除 0，基准至少 1
-      const baselineY = padT + innerH;
+      // 有符号值域：下界 min(0,…)、上界 max(0,…)，使 0 始终在域内——情绪 valence(−1..1) 等
+      // 负值指标不会掉出画布/基线下（评审 I1）。非负数据下 lo=0，映射与旧版一致（0 线在底部）。
+      const lo = Math.min(0, ...(n ? vals : [0]));
+      const hi = Math.max(0, ...(n ? vals : [0]));
+      let span = hi - lo; if (span === 0) span = 1;        // 避免除 0（全 0 数据）
+      const baselineY = padT + innerH;                     // 画布底边（x 轴标签基线）
       const xAt = i => n <= 1 ? padL + innerW / 2 : padL + innerW * i / (n - 1);
-      const yAt = v => baselineY - innerH * (v / max);
+      const yAt = v => padT + innerH * (hi - v) / span;    // v=hi→顶, v=lo→底
+      const zeroY = +yAt(0).toFixed(1);                    // 值 0 的 y（0 参考线画这里）
       const pts = vals.map((v, i) => ({
         x: +xAt(i).toFixed(1), y: +yAt(v).toFixed(1), v,
         label: shortLabel(labels && labels[i] != null ? String(labels[i]) : String(i + 1)),
       }));
       return {
-        W, H, padL, padT, padB, baselineY, max, maxLabel: fmtNum(max),
+        W, H, padL, padT, padB, baselineY, zeroY, max: hi, min: lo,
+        maxLabel: fmtNum(hi), minLabel: fmtNum(lo),
         pts, polyline: pts.map(p => p.x + ',' + p.y).join(' '),
       };
     }
@@ -2167,6 +2272,7 @@ const app = createApp({
       ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
       EVENT_TYPES, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
+      METRIC_CATALOG, showAddMetric, addMetricForm, addingMetric, addMetricDef, onPickMetricKey, toggleAddMetric, submitAddMetric, metricCharts, metricPointValue, deletingMetricId, askDeleteMetric, confirmDeleteMetric,
       pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
       backfilling, backfillInfo, runBackfill,
     };

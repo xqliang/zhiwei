@@ -41,18 +41,21 @@ func p2dDeps(t *testing.T) (MCPDeps, ProposalDeps) {
 	tod := &repo.TodoRepo{DB: db}
 	tt := &repo.TodoTopicRepo{DB: db}
 	pr := &repo.AgentProposalRepo{DB: db}
-	// 画像 repo + Service（manual 路径只用 DB/Attributes/Events/ChangeLogs/Persons）
+	// 画像 repo + Service（manual 路径只用 DB/Attributes/Events/Metrics/ChangeLogs/Persons）
 	persons := &repo.PersonRepo{DB: db}
 	pattrs := &repo.PersonAttributeRepo{DB: db}
 	pevents := &repo.PersonEventRepo{DB: db}
+	pmetrics := &repo.PersonMetricRepo{DB: db} // 第 5 平面：时序个人指标（get_metrics 读 + confirm 落库）
 	profileSvc := &profile.Service{
 		DB: db, Persons: persons, Attributes: pattrs, Events: pevents,
+		Metrics:       pmetrics, // confirm profile_metric 时经 ManualAddMetricExt 落库需此 repo
 		Relationships: &repo.PersonRelationshipRepo{DB: db},
 		ChangeLogs:    &repo.PersonChangeLogRepo{DB: db},
 	}
 	md := MCPDeps{
 		Memory: mem, Topic: top, Todo: tod, Proposals: pr,
 		Persons: persons, PersonAttributes: pattrs, PersonEvents: pevents,
+		PersonMetrics: pmetrics, // get_metrics 读工具依赖
 	}
 	pd := ProposalDeps{
 		DB: db, Proposals: pr, Memories: mem, Topics: top, Todos: tod, TodoTopics: tt,
@@ -772,5 +775,129 @@ func TestConfirmProfileRelationshipOrgOnly(t *testing.T) {
 	}
 	if rel.OrgName == nil || *rel.OrgName != orgName {
 		t.Errorf("组织关系 org_name 未落库: %+v", rel.OrgName)
+	}
+}
+
+// ---- P2 画像指标提议（propose_profile_metric + confirm 落库；第 5 平面 person_metric）----
+
+// countActiveMetrics 统计某主体某指标键的 active 测点条数。metric 无独占 label 可用，
+// 故用 before/after 差值圈定本用例产生的行（免受共享库既有测点串扰）。
+func countActiveMetrics(t *testing.T, pd ProposalDeps, personID ids.ID, metricKey string) int {
+	t.Helper()
+	var n int
+	if err := pd.DB.GetContext(t.Context(), &n,
+		`SELECT COUNT(*) FROM person_metric WHERE person_id = ? AND metric_key = ? AND status = 'active'`,
+		personID.Int64(), metricKey); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestProposeProfileMetricNoMutation 锁定 §8 根防线：propose_profile_metric 只建 pending 提议，
+// 绝不写 person_metric；非法 metric_key、数值键缺 value_num、类别键缺 value_text → tool-error。
+func TestProposeProfileMetricNoMutation(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	before := countActiveMetrics(t, pd, owner.ID, "weight") // 基线（差值法，免受共享库既有测点串扰）
+
+	vn := 70.0
+	res, _, err := proposeProfileMetricHandler(md)(ctx, nil, proposeProfileMetricArgs{
+		MetricKey: "weight", ValueNum: &vn, Unit: "kg", Rationale: "量了体重",
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	if err := json.Unmarshal([]byte(mcpText(t, res)), &p); err != nil {
+		t.Fatalf("解析提议: %v", err)
+	}
+	cleanupProposal(t, pd, p.ID)
+	if p.Status != "pending" || p.Kind != "profile_metric" || p.TargetKind != "profile" || p.TargetID == nil || *p.TargetID != owner.ID {
+		t.Fatalf("指标提议异常: %+v", p)
+	}
+	// 关键：propose 不写 person_metric（weight 测点数未变）
+	if after := countActiveMetrics(t, pd, owner.ID, "weight"); after != before {
+		t.Errorf("propose 不应写 person_metric, weight 测点 %d → %d", before, after)
+	}
+
+	// 非法 metric_key → tool-error
+	if _, _, e := proposeProfileMetricHandler(md)(ctx, nil, proposeProfileMetricArgs{MetricKey: "不存在指标xx", ValueNum: &vn}); e == nil {
+		t.Error("非法 metric_key 应报 tool-error")
+	}
+	// 数值型指标(weight)缺 value_num → tool-error
+	if _, _, e := proposeProfileMetricHandler(md)(ctx, nil, proposeProfileMetricArgs{MetricKey: "weight"}); e == nil {
+		t.Error("数值指标缺 value_num 应报 tool-error")
+	}
+	// 类别型指标(diet)缺 value_text → tool-error
+	if _, _, e := proposeProfileMetricHandler(md)(ctx, nil, proposeProfileMetricArgs{MetricKey: "diet"}); e == nil {
+		t.Error("类别指标缺 value_text 应报 tool-error")
+	}
+}
+
+// TestConfirmProfileMetricApplyOnce 锁定 §8 apply-once：propose_profile_metric → confirm → owner
+// 新增一条 active weight 测点(value_num=70)、proposal=applied、applied_ref 指向它；重复 confirm
+// 幂等——metric 虽 append-only，但第二次 confirm 因 status!=pending 早返回不再落库，故仍只 1 条。
+func TestConfirmProfileMetricApplyOnce(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	before := countActiveMetrics(t, pd, owner.ID, "weight")
+
+	vn := 70.0
+	res, _, err := proposeProfileMetricHandler(md)(ctx, nil, proposeProfileMetricArgs{
+		MetricKey: "weight", ValueNum: &vn, Unit: "kg", MeasuredAt: "2026-06-15", Rationale: "体检",
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	_ = json.Unmarshal([]byte(mcpText(t, res)), &p)
+	cleanupProposal(t, pd, p.ID)
+	if p.Kind != "profile_metric" || p.TargetID == nil || *p.TargetID != owner.ID {
+		t.Fatalf("指标提议异常: %+v", p)
+	}
+
+	code, p1 := postProposal(t, pd, p.ID, "confirm")
+	if code != http.StatusOK || p1.Status != "applied" || p1.AppliedRef == nil {
+		t.Fatalf("confirm code=%d status=%s ref=%v", code, p1.Status, p1.AppliedRef)
+	}
+	// 精确清理本用例落库的测点 + 其审计（append-only 表用 applied_ref 定位唯一行）
+	t.Cleanup(func() {
+		_, _ = pd.DB.Exec("DELETE FROM person_metric WHERE id = ?", p1.AppliedRef.Int64())
+		_, _ = pd.DB.Exec("DELETE FROM person_change_log WHERE entity_kind = 'metric' AND entity_id = ?", p1.AppliedRef.Int64())
+	})
+
+	// applied_ref 指向的测点：weight/value_num=70/active/manual，单位 kg，测点时间已落库
+	m, err := md.PersonMetrics.Get(ctx, *p1.AppliedRef)
+	if err != nil || m == nil {
+		t.Fatalf("新测点应存在: %v %+v", err, m)
+	}
+	if m.PersonID != owner.ID || m.MetricKey != "weight" || m.Status != "active" || m.Source != "manual" {
+		t.Fatalf("新测点字段异常: %+v", m)
+	}
+	if m.ValueNum == nil || *m.ValueNum != 70 {
+		t.Errorf("新测点 value_num 应为 70, got %v", m.ValueNum)
+	}
+	if m.Unit == nil || *m.Unit != "kg" {
+		t.Errorf("新测点 unit 应为 kg, got %v", m.Unit)
+	}
+	if m.MeasuredAt.IsZero() {
+		t.Errorf("新测点 measured_at 不应为零值")
+	}
+	// owner 恰好多一条 active weight 测点
+	if after := countActiveMetrics(t, pd, owner.ID, "weight"); after != before+1 {
+		t.Fatalf("confirm 应新增 1 条 active weight 测点, %d → %d", before, after)
+	}
+
+	// 重复 confirm：apply-once → 幂等，不再追加第二条（Resolve CAS：status!=pending 早返回）
+	code2, p2 := postProposal(t, pd, p.ID, "confirm")
+	if code2 != http.StatusOK || p2.Status != "applied" {
+		t.Fatalf("2nd confirm code=%d status=%s", code2, p2.Status)
+	}
+	if after := countActiveMetrics(t, pd, owner.ID, "weight"); after != before+1 {
+		t.Errorf("重复 confirm 不应再追加测点, 期望 %d 得 %d", before+1, after)
 	}
 }

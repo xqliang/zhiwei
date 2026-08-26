@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -150,6 +151,18 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 			return v
 		}
 		return ""
+	}
+	// newFloatPtr 从 pl.New 取 *float64：JSON 数字进 map[string]any 是 float64，存在且是 float64
+	// 则取其地址副本，否则 nil（缺键/非数字）。供 profile_metric 的 value_num（可空数值读数）用。
+	newFloatPtr := func(k string) *float64 {
+		if pl.New == nil {
+			return nil
+		}
+		if v, ok := pl.New[k].(float64); ok {
+			vv := v
+			return &vv
+		}
+		return nil
 	}
 	switch p.Kind {
 	case "memory_update":
@@ -327,7 +340,55 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 			return nil, err
 		}
 		return &row.ID, nil
+	case "profile_metric":
+		// 画像指标（第 5 平面 person_metric）：target_id=owner person id（propose 时定）。走事务版
+		// ManualAddMetricExt（内部再校验 metric_key 合法 + 数值/类别值约束 + measured_at 非零，与
+		// propose 端双保险）。value_num 为可空数值读数（JSON 数字 → float64）；measured_at 是原始
+		// 字符串，尽力解析(RFC3339/"2006-01-02 15:04"/"2006-01-02")，失败或空取 now（列 NOT NULL）。
+		// append-only：每次 confirm 追加一行、不 supersede；重复 confirm 因 status!=pending 在
+		// confirmProposal 早返回、不进本函数，故天然幂等（apply-once 靠 Resolve CAS）。
+		if p.TargetID == nil {
+			return nil, fmt.Errorf("profile_metric 缺 target_id")
+		}
+		metricKey := newStr("metric_key")
+		if !profile.ValidMetricKey(metricKey) { // 双保险：与 propose 端一致，防未来别的提议源不 gate 就写入非法键
+			return nil, fmt.Errorf("profile_metric 非法指标键: %s", metricKey)
+		}
+		measuredAt := time.Now() // ManualAddMetricExt 要求非零；空/解析失败即回退 now
+		if t, ok := parseMetricMeasuredAt(newStr("measured_at")); ok {
+			measuredAt = t
+		}
+		row, err := d.Profile.ManualAddMetricExt(ctx, tx, *p.TargetID, metricKey,
+			newFloatPtr("value_num"), newStr("value_text"), newStr("unit"), measuredAt)
+		if err != nil {
+			return nil, err
+		}
+		return &row.ID, nil
 	default:
 		return nil, fmt.Errorf("未知提议 kind: %s", p.Kind)
 	}
+}
+
+// parseMetricMeasuredAt 尽力解析测点时间，**保留时刻精度**（metric 是连续时序，同日多次测量
+// 靠时刻区分）。依次尝试 RFC3339（带时区/时刻）、"2006-01-02 15:04:05"、"2006-01-02 15:04"、
+// "2006-01-02T15:04:05"、"2006-01-02"；空串或全部失败返回 (_, false)，调用方回退 time.Now()
+// （ManualAddMetricExt 要求 measured_at 非零）。与 profile.parseMetricAt 的解析口径一致，但那是
+// profile 包内私有函数、不可跨包调用，故此处按同样格式集独立实现。
+func parseMetricMeasuredAt(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }

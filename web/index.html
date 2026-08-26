@@ -894,11 +894,11 @@
               <div class="trend-metric">{{ ch.metric || ('趋势 ' + (ci + 1)) }}</div>
               <!-- viewBox 写死常量（chartGeom 恒为 520x150）：避开 in-DOM 模板把 :viewBox 小写成 :viewbox 的坑 -->
               <svg viewBox="0 0 520 150" role="img" :aria-label="ch.metric || '趋势图'">
-                <!-- y 轴标注：顶部 max，底部 0 -->
+                <!-- y 轴标注：顶部 max，底部 min（非负数据 min=0，与旧版一致） -->
                 <text class="val" x="4" :y="ch.geom.padT + 4">{{ ch.geom.maxLabel }}</text>
-                <text class="val" x="4" :y="ch.geom.baselineY + 3">0</text>
-                <!-- 基线 -->
-                <line class="axis" :x1="ch.geom.padL" :y1="ch.geom.baselineY" x2="506" :y2="ch.geom.baselineY"></line>
+                <text class="val" x="4" :y="ch.geom.baselineY + 3">{{ ch.geom.minLabel }}</text>
+                <!-- 0 参考线（zeroY；非负数据即底边基线） -->
+                <line class="axis" :x1="ch.geom.padL" :y1="ch.geom.zeroY" x2="506" :y2="ch.geom.zeroY"></line>
                 <!-- 折线（≥2 点才画线） -->
                 <polyline v-if="ch.geom.pts.length > 1" class="line" :points="ch.geom.polyline"></polyline>
                 <!-- 每个点一组（用 SVG 原生 <g>，避免 <template> 在内联 svg 里被 HTML 解析器错解） -->
@@ -1183,6 +1183,7 @@
           <div v-if="it.kind !== 'person'" class="muted" style="font-size:var(--fs-xs)">
             置信度 {{ (it.confidence * 100).toFixed(0) }}%
             <span v-if="it.occurred_at"> · {{ fmtEventDate(it.occurred_at, true) }}</span>
+            <span v-if="it.measured_at"> · {{ fmtEventDate(it.measured_at, true) }}</span>
             <span v-if="it.session_id" style="cursor:pointer; text-decoration:underline" @click="jumpToSession(it.session_id)">来源录音</span>
           </div>
         </div>
@@ -1351,6 +1352,52 @@
         </div>
       </div>
 
+      <!-- 指标（第 5 平面 person_metric：与大事记同构——大事记记「某次发生」，指标记「某刻测得的读数」）。
+           每组标题=中文名(+单位)；numeric 组且 ≥2 数值点额外画趋势曲线（复用周报手绘 SVG 块）。 -->
+      <div v-if="personDetail.metrics && personDetail.metrics.length" style="margin-bottom:12px">
+        <div class="muted" style="font-weight:600; margin-bottom:4px">指标</div>
+        <div v-for="g in personDetail.metrics" :key="g.key" style="margin-bottom:8px">
+          <div class="muted" style="font-size:var(--fs-xs); margin:4px 0">{{ g.label }}<template v-if="g.unit">（{{ g.unit }}）</template></div>
+          <!-- 趋势曲线：仅 numeric 组且 ≥2 数值点（metricCharts 已按组预算好几何）。viewBox 固定 520x150。 -->
+          <div v-if="metricCharts[g.key]" class="trend-chart">
+            <svg viewBox="0 0 520 150" role="img" :aria-label="g.label + ' 趋势'">
+              <!-- y 轴标注：顶部 max，底部 min（情绪等负值指标 min<0，0 线在 zeroY） -->
+              <text class="val" x="4" :y="metricCharts[g.key].padT + 4">{{ metricCharts[g.key].maxLabel }}</text>
+              <text class="val" x="4" :y="metricCharts[g.key].baselineY + 3">{{ metricCharts[g.key].minLabel }}</text>
+              <!-- 0 参考线（zeroY；非负数据即底边基线） -->
+              <line class="axis" :x1="metricCharts[g.key].padL" :y1="metricCharts[g.key].zeroY" x2="506" :y2="metricCharts[g.key].zeroY"></line>
+              <!-- 折线（≥2 点才画线） -->
+              <polyline v-if="metricCharts[g.key].pts.length > 1" class="line" :points="metricCharts[g.key].polyline"></polyline>
+              <!-- 每个点一组（SVG 原生 <g>，避免 <template> 在内联 svg 里被 HTML 解析器错解） -->
+              <g v-for="(pt, pi) in metricCharts[g.key].pts" :key="pi">
+                <circle class="dot" :cx="pt.x" :cy="pt.y" r="2.5"></circle>
+                <text class="val" :x="pt.x" :y="pt.y - 6" text-anchor="middle">{{ fmtNum(pt.v) }}</text>
+                <text class="lbl" :x="pt.x" :y="metricCharts[g.key].baselineY + 14" text-anchor="middle">{{ pt.label }}</text>
+              </g>
+            </svg>
+          </div>
+          <!-- 各测点列表：measured_at + 值(数值带单位 / 类别描述) + 状态 chip；pending 灰显 -->
+          <div v-for="(p, pi) in g.points" :key="pi" class="seg" :style="p.status === 'pending' ? { opacity: 0.6 } : {}">
+            <div class="seg-text">
+              <div>
+                <b>{{ metricPointValue(g, p) }}</b>
+                <span class="muted"> · {{ fmtEventDate(p.measured_at, true) }}</span>
+                <span v-if="p.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+              </div>
+            </div>
+            <!-- 删除测点：需测点带 id（详情 API 的 points 暂未下发 id 时按钮不渲染，避免删到 undefined） -->
+            <div v-if="p.id != null" style="display:flex; gap:4px; flex-shrink:0">
+              <template v-if="deletingMetricId === p.id">
+                <span class="muted">删除？</span>
+                <button class="btn mini danger" @click="confirmDeleteMetric">确认</button>
+                <button class="btn mini" @click="deletingMetricId=null">取消</button>
+              </template>
+              <button v-else class="btn mini danger" @click="askDeleteMetric(p)" title="删除测点">🗑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 加事件表单 -->
       <div class="card sunken" v-if="showAddEvent" style="margin-bottom:10px">
         <div class="kv" style="margin-bottom:8px"><b>加大事记</b><button class="btn-link" @click="toggleAddEvent">✕</button></div>
@@ -1371,6 +1418,24 @@
         </div>
         <input class="txt" v-model="addEventForm.description" placeholder="细节（可空）" style="width:100%; margin-top:8px">
         <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；日期可选，只知道大概时间可留空。</div>
+      </div>
+
+      <!-- 加指标表单（仿加事件表单）：选指标键 → 按 numeric 填数值/描述 + 单位 + 测量日期 -->
+      <div class="card sunken" v-if="showAddMetric" style="margin-bottom:10px">
+        <div class="kv" style="margin-bottom:8px"><b>加指标测点</b><button class="btn-link" @click="toggleAddMetric">✕</button></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+          <select class="txt" v-model="addMetricForm.metric_key" @change="onPickMetricKey" style="min-width:120px">
+            <option value="" disabled>指标</option>
+            <option v-for="m in METRIC_CATALOG" :key="m.key" :value="m.key">{{ m.label }}</option>
+          </select>
+          <!-- 数值型指标填 value_num；类别型填 value_text（据所选指标 numeric 切换输入框） -->
+          <input v-if="addMetricDef && addMetricDef.numeric" class="txt" v-model="addMetricForm.value_num" type="number" step="any" placeholder="数值（如 70）*" style="width:auto; min-width:120px">
+          <input v-else-if="addMetricDef" class="txt" v-model="addMetricForm.value_text" placeholder="描述（如 火锅）*" style="flex:1; min-width:140px">
+          <input class="txt" v-model="addMetricForm.unit" placeholder="单位（可空）" style="width:auto; min-width:90px">
+          <input class="txt" v-model="addMetricForm.measured_at" type="date" title="测量日期（留空取当前时间）" style="width:auto; min-width:130px">
+          <button class="btn primary" :disabled="addingMetric" @click="submitAddMetric">{{ addingMetric ? '保存中…' : '保存' }}</button>
+        </div>
+        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；数值型(体重/睡眠/情绪/精力)填数值、类别型(饮食/健康)填描述；时间留空取当前时间。</div>
       </div>
 
       <!-- 加属性表单 -->
@@ -1441,6 +1506,7 @@
         <button class="btn mini" @click="toggleAddAttr">{{ showAddAttr ? '收起加属性' : '＋ 加属性' }}</button>
         <button class="btn mini" @click="toggleAddRel">{{ showAddRel ? '收起加关系' : '＋ 加关系' }}</button>
         <button class="btn mini" @click="toggleAddEvent">{{ showAddEvent ? '收起加大事记' : '＋ 加大事记' }}</button>
+        <button class="btn mini" @click="toggleAddMetric">{{ showAddMetric ? '收起加指标' : '＋ 加指标' }}</button>
       </div>
     </div>
   </div>
@@ -1754,6 +1820,6 @@
   </div>
 </div>
 
-<script src="/app/app.cbf7c614.js"></script>
+<script src="/app/app.c4144b47.js"></script>
 </body>
 </html>

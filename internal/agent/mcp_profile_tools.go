@@ -34,6 +34,11 @@ func registerProfileTools(s *mcp.Server, d MCPDeps) {
 		Description: "按姓名读取某个人物的画像(属性 + 大事记)。入参 name(精确匹配显示名)。找不到返回 {found:false}。",
 	}, getPersonHandler(d))
 
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_metrics",
+		Description: "读取我的时序个人指标(第 5 平面 person_metric)：情绪/体重/睡眠/精力/饮食/健康等测点序列。可选 metric_key 过滤(emotion|weight|sleep|mood_energy|diet|health)，留空返回全部。按指标键分组返回，每组含 key/label(中文名)/unit(单位)/numeric(是否数值型) 及 points(测点，每点含 measured_at/value_num/value_text/status，按时间升序)。owner 尚未建立时返回 {found:false}。",
+	}, getMetricsHandler(d))
+
 	// ---- 写-提议工具 ----
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_profile_attr",
@@ -49,6 +54,11 @@ func registerProfileTools(s *mcp.Server, d MCPDeps) {
 		Name:        "propose_profile_relationship",
 		Description: "提议给我(画像 owner「我」)新增一条人物关系或组织关系(不立即生效，返回待确认提议；用户确认后才落库)。relation_type 必须合法(配偶|子女|父母|兄弟姐妹|亲戚|朋友|同事|领导|下属|客户|供应商|合作方|组织|其他)；related_person_name(关联到某人，如「我朋友李四」) 与 org_name(关联到某组织) 至少给一个。确认时若 related_person_name 对应人物不存在会自动新建。",
 	}, proposeProfileRelationshipHandler(d))
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "propose_profile_metric",
+		Description: "提议给我记录一个时序指标测点(不立即生效，返回待确认提议；用户确认后才落库)。metric_key 必须合法(emotion|weight|sleep|mood_energy|diet|health)。数值型指标(体重/睡眠/情绪/精力)必须给 value_num；类别型指标(饮食/健康)必须给 value_text。unit 可选(留空取目录默认，如 kg/h)；measured_at 可选(如 2026-07-20 / '2026-07-20 15:04' / RFC3339，解析失败或留空取当前时间)。",
+	}, proposeProfileMetricHandler(d))
 }
 
 // ---- 读工具输出结构（JSON tag 直接暴露给模型；status 只含 active/pending）----
@@ -155,6 +165,77 @@ func getPersonHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, get
 			return nil, nil, err
 		}
 		return jsonResult(out)
+	}
+}
+
+// ---- get_metrics（读，第 5 平面 person_metric）：按 metric_key 分组的时序测点 ----
+
+// metricPointOut 是单个测点（曲线上的一点）：measured_at + 值(数值/类别) + 状态。
+// value_num/value_text 用指针 + omitempty：数值型指标只出 value_num，类别型只出 value_text。
+type metricPointOut struct {
+	MeasuredAt time.Time `json:"measured_at"`
+	ValueNum   *float64  `json:"value_num,omitempty"`
+	ValueText  *string   `json:"value_text,omitempty"`
+	Status     string    `json:"status"` // active|pending
+}
+
+// metricGroupOut 是一个指标键的一组测点 + 目录元数据（label/unit/numeric 取 profile.MetricDefOf）。
+type metricGroupOut struct {
+	Key     string           `json:"key"`     // 指标键（metric_key）
+	Label   string           `json:"label"`   // 中文名（目录）
+	Unit    string           `json:"unit"`    // 单位（目录；无量纲则空串）
+	Numeric bool             `json:"numeric"` // 数值型(value_num 可画曲线) / 类别型(value_text)
+	Points  []metricPointOut `json:"points"`  // 测点，按 measured_at 升序
+}
+
+type metricsOut struct {
+	Found   bool             `json:"found"` // owner 是否存在
+	Metrics []metricGroupOut `json:"metrics"`
+}
+
+type getMetricsArgs struct {
+	MetricKey string `json:"metric_key,omitempty" jsonschema:"可选指标键过滤: emotion|weight|sleep|mood_energy|diet|health；留空返回全部指标"`
+}
+
+// getMetricsHandler 读 owner「我」的时序指标测点（只取 active/pending，见 ListByPerson），
+// 按 metric_key 分组返回；owner 未建立时返回 {found:false}（仿 get_profile）。
+func getMetricsHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, getMetricsArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, a getMetricsArgs) (*mcp.CallToolResult, any, error) {
+		owner, err := d.Persons.GetOwner(ctx, toolUserID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if owner == nil {
+			return jsonResult(metricsOut{Found: false, Metrics: []metricGroupOut{}})
+		}
+		rows, err := d.PersonMetrics.ListByPerson(ctx, owner.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		filter := strings.TrimSpace(a.MetricKey)
+		// 按 metric_key 分组。ListByPerson 已按 (metric_key, measured_at) 升序返回，同键连续；
+		// 用 idx 记每键在 groups 里的下标，健壮于排序假设。label/unit/numeric 取目录定义。
+		groups := []metricGroupOut{}
+		idx := map[string]int{}
+		for _, m := range rows {
+			if filter != "" && m.MetricKey != filter {
+				continue
+			}
+			gi, ok := idx[m.MetricKey]
+			if !ok {
+				def := profile.MetricDefOf(m.MetricKey)
+				groups = append(groups, metricGroupOut{
+					Key: m.MetricKey, Label: def.Label, Unit: def.Unit, Numeric: def.Numeric,
+					Points: []metricPointOut{},
+				})
+				gi = len(groups) - 1
+				idx[m.MetricKey] = gi
+			}
+			groups[gi].Points = append(groups[gi].Points, metricPointOut{
+				MeasuredAt: m.MeasuredAt, ValueNum: m.ValueNum, ValueText: m.ValueText, Status: m.Status,
+			})
+		}
+		return jsonResult(metricsOut{Found: true, Metrics: groups})
 	}
 }
 
@@ -331,6 +412,66 @@ func proposeProfileRelationshipHandler(d MCPDeps) func(context.Context, *mcp.Cal
 		return proposeAndReturn(ctx, d, &repo.AgentProposal{
 			Kind: "profile_relationship", TargetKind: "profile", TargetID: &oid,
 			Payload: json.RawMessage(payload), Rationale: rationale,
+		})
+	}
+}
+
+// ---- propose_profile_metric（profile_metric）：只建 pending 提议，绝不写 person_metric（§8 根防线）----
+// 仿 proposeProfileEventHandler：校验 + GetOwner + Create 一条 pending 提议；确认时才在单事务内
+// 经 profile.Service.ManualAddMetricExt 落库（apply-once，见 proposals.go 的 profile_metric case）。
+type proposeProfileMetricArgs struct {
+	MetricKey  string   `json:"metric_key" jsonschema:"指标键(必填): emotion|weight|sleep|mood_energy|diet|health"`
+	ValueNum   *float64 `json:"value_num,omitempty" jsonschema:"数值读数：数值型指标(体重/睡眠/情绪/精力)必填，如体重 70、睡眠 7.5、情绪 -1..1"`
+	ValueText  string   `json:"value_text,omitempty" jsonschema:"类别读数：类别型指标(饮食/健康)必填，如饮食「火锅」、健康「感冒」"`
+	Unit       string   `json:"unit,omitempty" jsonschema:"单位(可选)，留空取目录默认，如 kg/h"`
+	MeasuredAt string   `json:"measured_at,omitempty" jsonschema:"测量时间(可选)，如 2026-07-20 / 「2026-07-20 15:04」/ RFC3339；解析失败或留空取当前时间"`
+	Rationale  string   `json:"rationale,omitempty" jsonschema:"给用户看的记录理由"`
+}
+
+func proposeProfileMetricHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, proposeProfileMetricArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeProfileMetricArgs) (*mcp.CallToolResult, any, error) {
+		metricKey := strings.TrimSpace(a.MetricKey)
+		// 校验（非法 → tool-error 供模型读）：
+		// ① metric_key 必须在指标目录内；
+		if !profile.ValidMetricKey(metricKey) {
+			return nil, nil, fmt.Errorf("非法指标键: %q（合法: emotion|weight|sleep|mood_energy|diet|health）", a.MetricKey)
+		}
+		// ② 数值型指标必须给 value_num；类别型指标必须给 value_text（与 ManualAddMetricExt 硬约束一致）。
+		valueText := strings.TrimSpace(a.ValueText)
+		if profile.MetricDefOf(metricKey).Numeric {
+			if a.ValueNum == nil {
+				return nil, nil, fmt.Errorf("数值指标 %s 需给出 value_num", metricKey)
+			}
+		} else if valueText == "" {
+			return nil, nil, fmt.Errorf("类别指标 %s 需给出 value_text", metricKey)
+		}
+		owner, err := d.Persons.GetOwner(ctx, toolUserID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if owner == nil {
+			return nil, nil, fmt.Errorf("尚未建立画像 owner「我」，无法提议记录指标")
+		}
+		// new 字段：确认时据此经 ManualAddMetricExt 落库。value_num 有值才放(JSON 数字，
+		// confirm 侧从 map[string]any 取 float64)；value_text/unit/measured_at 非空才放。
+		newFields := map[string]any{"metric_key": metricKey}
+		if a.ValueNum != nil {
+			newFields["value_num"] = *a.ValueNum
+		}
+		if valueText != "" {
+			newFields["value_text"] = valueText
+		}
+		if u := strings.TrimSpace(a.Unit); u != "" {
+			newFields["unit"] = u
+		}
+		if mt := strings.TrimSpace(a.MeasuredAt); mt != "" {
+			newFields["measured_at"] = mt // 原始字符串，confirm 时尽力解析、失败/空取 now
+		}
+		payload, _ := json.Marshal(map[string]any{"new": newFields})
+		oid := owner.ID // target_id = owner person id（confirm 时作 personID）
+		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+			Kind: "profile_metric", TargetKind: "profile", TargetID: &oid,
+			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})
 	}
 }

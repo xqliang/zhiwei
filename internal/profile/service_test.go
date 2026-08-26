@@ -30,11 +30,13 @@ func newTestService(t *testing.T) *Service {
 	}
 	svc := &Service{
 		DB: db, Persons: &repo.PersonRepo{DB: db},
+		Sessions:      &repo.SessionRepo{DB: db},
 		Memories:      &repo.MemoryRepo{DB: db},
 		Speakers:      &repo.SpeakerRepo{DB: db},
 		Attributes:    &repo.PersonAttributeRepo{DB: db},
 		Relationships: &repo.PersonRelationshipRepo{DB: db},
 		Events:        &repo.PersonEventRepo{DB: db},
+		Metrics:       &repo.PersonMetricRepo{DB: db},
 		ChangeLogs:    &repo.PersonChangeLogRepo{DB: db},
 		Gate:          GateConfig{AutoConf: 0.75},
 	}
