@@ -69,7 +69,7 @@ base 到 `000008_event`；两边 000009-000011 三重撞号。**推荐**（画�
 ---
 
 ## 五、7 决策点 —— 已定（2026-08-26 用户确认）
-1. **平面范围**：**缩范围**——首次合并**不引入** cycle/activity；集成分支里剔除/存根 main 的这两个平面（migrations 000009_metric_cycle 的 person_cycle 部分 + 000010_activity + 000011_person_restore 里针对 cycle/activity 的 ALTER，以及 fact/gate/service/confirm/api/web 里的 cycle/activity 代码）。cycle/activity 随后单独一轮移植。
+1. **平面范围**：**全范围**（用户 2026-08-26 改定，推翻先前"缩范围"）——cycle/activity 一并并入，把 main 的这两平面从「单用户 6 平面」移植进 feat 的「多用户 + catalog + agent」架构（fact 字段 / gate.DecideCycle&Activity / applyCycle&ActivityFact / manual+Ext / confirm kind / api handler+userID / web 面板；repo person_cycle/person_activity 补多用户 Ext）。**person_metric 仍用 feat 版**（decision #2）——故 main 的 000009_metric_cycle 里 person_metric CREATE 丢弃、只留 person_cycle。
 2. person_metric：**保 feat** + 移植 main 运营特性（pre_dismiss_status 列并进 feat CREATE + dismiss/restore 级联 + CountPending）。
 3. metric_key 词表：以 feat 为准（emotion/weight/sleep/mood_energy/diet/health），按需补 main 的 state/sleep_late。
 4. 数值存法：**feat num/text 分存**（与 catalog Numeric 一致）。
@@ -77,7 +77,7 @@ base 到 `000008_event`；两边 000009-000011 三重撞号。**推荐**（画�
 6. person_restore 级联扩到 feat metric：**是**（cycle/activity 因决策 1 不含）。
 7. profile_extraction_v3.md：以 feat 版为基（4 平面 num/text），保留 main 的事件重要度/多人事件抽取（related_people 数组 + 事件 importance）。
 
-**缩范围后的迁移重编号（最简）**：base 到 000008；main 的 000009_metric_cycle/000010_activity/000011_person_restore **不整体带入**（其 person_metric 定义丢弃、cycle/activity 剔除、person_restore 只保留对 feat metric 有用的 pre_dismiss_status→并进 feat metric CREATE）；feat 四迁移直接顺延 **000009_agent / 000010_conversation_memory / 000011_metric(含 pre_dismiss_status) / 000012_auth**。（即最终迁移与 feat 现状基本一致，只在 000011_metric 补一列。）
+**全范围迁移重编号**：base 到 000008；feat 四迁移原样顺延 **000009_agent / 000010_conversation_memory / 000011_metric / 000012_auth**；main 三迁移改号并入：**000013_cycle**（= main 000009_metric_cycle，**删 person_metric CREATE**[与 feat 000011 撞表]，只留 person_cycle）/ **000014_activity**（= main 000010_activity）/ **000015_person_restore**（= main 000011_person_restore，6 平面 pre_dismiss_status ALTER 全留；ALTER person_metric 作用于 feat 000011 建的表）。
 
 ## 七、仓库根执行脚本（由用户在 `zhiwei-water18-0822/` 跑；隔离 worktree 无法执行）
 > 分叉大、需人工解冲突，脚本给骨架，冲突处按 §一/§二/§五 手解。

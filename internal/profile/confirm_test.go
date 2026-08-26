@@ -260,3 +260,228 @@ func TestConfirmEvent(t *testing.T) {
 		t.Fatal("非法 kind 应报错")
 	}
 }
+
+// TestConfirmMetricCycle 覆盖 metric/cycle 平面的确认队列后端：造 pending（低置信 LLM 路径）
+// → 确认转 active（cycle 无冲突现值故不带 supersedes）；再造一条 → 放弃转 dismissed。
+// metric 无 supersedes（独立采样）、cycle 有 supersedes（单值语义）——本用例覆盖无冲突路径。
+// 跨包非自隔离：t.Cleanup 删掉 owner 的 person_metric/person_cycle 行 + 对应审计行。
+func TestConfirmMetricCycle(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_metric WHERE person_id = ?", oid.Int64())
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_cycle WHERE person_id = ?", oid.Int64())
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind IN ('metric','cycle')", oid.Int64())
+	})
+
+	// ---- metric：造 pending → 确认 → active ----
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "metric", Subject: Subject{Kind: "self"}, MetricKey: "weight",
+			ValueNum: fp(70.5), MeasuredAt: "2026-08-20", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metrics, _ := svc.Metrics.ListPending(ctx, 1)
+	var mID ids.ID
+	for _, m := range metrics {
+		if m.MetricKey == "weight" && m.ValueNum != nil && *m.ValueNum == 70.5 {
+			mID = m.ID
+		}
+	}
+	if mID == 0 {
+		t.Fatal("pending metric 未生成")
+	}
+	if err := svc.ConfirmPending(ctx, 1, "metric", mID); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := svc.Metrics.Get(ctx, mID); m == nil || m.Status != "active" {
+		t.Fatalf("metric 确认后应 active: %+v", m)
+	}
+
+	// metric 放弃 → dismissed
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "metric", Subject: Subject{Kind: "self"}, MetricKey: "emotion",
+			ValueNum: fp(-0.6), MetricValueText: "确认测试-焦虑", MeasuredAt: "2026-08-21", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metrics2, _ := svc.Metrics.ListPending(ctx, 1)
+	var mID2 ids.ID
+	for _, m := range metrics2 {
+		if m.MetricKey == "emotion" {
+			mID2 = m.ID
+		}
+	}
+	if mID2 == 0 {
+		t.Fatal("第二条 pending metric 未生成")
+	}
+	if err := svc.DismissPending(ctx, 1, "metric", mID2); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := svc.Metrics.Get(ctx, mID2); m == nil || m.Status != "dismissed" {
+		t.Fatalf("metric 放弃后应 dismissed: %+v", m)
+	}
+
+	// ---- cycle：造 pending → 确认 → active ----
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "medication",
+			CycleLabel: "确认周期测试-降压药", AnchorDate: "2026-08-01", PeriodDays: 30,
+			Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cycles, _ := svc.Cycles.ListPending(ctx, 1)
+	var cID ids.ID
+	for _, c := range cycles {
+		if c.Label != nil && *c.Label == "确认周期测试-降压药" {
+			cID = c.ID
+		}
+	}
+	if cID == 0 {
+		t.Fatal("pending cycle 未生成")
+	}
+	if err := svc.ConfirmPending(ctx, 1, "cycle", cID); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := svc.Cycles.Get(ctx, cID); c == nil || c.Status != "active" {
+		t.Fatalf("cycle 确认后应 active: %+v", c)
+	}
+
+	// cycle 放弃 → dismissed
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "followup",
+			CycleLabel: "确认周期测试-复诊", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cycles2, _ := svc.Cycles.ListPending(ctx, 1)
+	var cID2 ids.ID
+	for _, c := range cycles2 {
+		if c.Label != nil && *c.Label == "确认周期测试-复诊" {
+			cID2 = c.ID
+		}
+	}
+	if cID2 == 0 {
+		t.Fatal("第二条 pending cycle 未生成")
+	}
+	if err := svc.DismissPending(ctx, 1, "cycle", cID2); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := svc.Cycles.Get(ctx, cID2); c == nil || c.Status != "dismissed" {
+		t.Fatalf("cycle 放弃后应 dismissed: %+v", c)
+	}
+
+	// ---- cycle 冲突确认（区分 cycle 与 metric 的核心：cycle 带 supersedes，metric 不带）----
+	// 先手动建一条 active 周期（period=30），再 ApplyFacts 同 (type,label) 但不同参数（period=28）：
+	// 有 active 现值 + 参数不同 → 绕过同参佐证短路 → DecideCycle 返回 ConflictPending，
+	// pending 行带 SupersedesID 指向 active 行。确认后：旧行 superseded、新行 active。
+	act, err := svc.ManualAddCycle(ctx, 1, oid, "medication", "supersede测试-降压药", "2026-08-01", "", "", 30, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "cycle", Subject: Subject{Kind: "self"}, CycleType: "medication",
+			CycleLabel: "supersede测试-降压药", AnchorDate: "2026-08-01", PeriodDays: 28,
+			Confidence: 0.9, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	confPend, _ := svc.Cycles.ListPending(ctx, 1)
+	var conflictID ids.ID
+	for _, c := range confPend {
+		if c.Label != nil && *c.Label == "supersede测试-降压药" && c.SupersedesID != nil && *c.SupersedesID == act.ID {
+			conflictID = c.ID
+		}
+	}
+	if conflictID == 0 {
+		t.Fatalf("带 supersedes 的冲突 pending cycle 未生成: %+v", confPend)
+	}
+	if err := svc.ConfirmPending(ctx, 1, "cycle", conflictID); err != nil {
+		t.Fatal(err)
+	}
+	// 新行 → active（且 SupersedesID 仍指向旧行）
+	if nc, _ := svc.Cycles.Get(ctx, conflictID); nc == nil || nc.Status != "active" || nc.SupersedesID == nil || *nc.SupersedesID != act.ID {
+		t.Fatalf("冲突确认后新行应 active 且 supersedes 旧行: %+v", nc)
+	}
+	// 旧 active 行 → superseded
+	if oc, _ := svc.Cycles.Get(ctx, act.ID); oc == nil || oc.Status != "superseded" {
+		t.Fatalf("冲突确认后旧行应 superseded: %+v", oc)
+	}
+
+	// 非 pending 再确认 → 报错；非法 kind → 报错
+	if err := svc.ConfirmPending(ctx, 1, "metric", mID); err == nil {
+		t.Fatal("非 pending metric 再确认应报错")
+	}
+	if err := svc.ConfirmPending(ctx, 1, "bogus", cID); err == nil {
+		t.Fatal("非法 kind 应报错")
+	}
+}
+
+// TestConfirmActivity 覆盖 activity 平面的确认队列后端：造 pending（低置信 LLM 路径）→ 确认转
+// active（activity 无冲突现值、无 supersedes，测点流语义同 metric）；再造一条 → 放弃转 dismissed。
+// 跨包非自隔离：t.Cleanup 删掉 owner 的 person_activity 行 + 对应审计行。
+func TestConfirmActivity(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_activity WHERE person_id = ?", oid.Int64())
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'activity'", oid.Int64())
+	})
+
+	// 造 pending（低置信）→ 确认 → active
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "activity", Subject: Subject{Kind: "self"}, ActivityText: "确认活动测试-写代码",
+			Tool: "电脑", StartedAt: "2026-08-20", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pends, _ := svc.Activities.ListPending(ctx, 1)
+	var aID ids.ID
+	for _, a := range pends {
+		if a.Activity == "确认活动测试-写代码" {
+			aID = a.ID
+		}
+	}
+	if aID == 0 {
+		t.Fatal("pending activity 未生成")
+	}
+	if err := svc.ConfirmPending(ctx, 1, "activity", aID); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := svc.Activities.Get(ctx, aID); a == nil || a.Status != "active" {
+		t.Fatalf("activity 确认后应 active: %+v", a)
+	}
+
+	// 放弃 → dismissed
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "activity", Subject: Subject{Kind: "self"}, ActivityText: "确认活动测试-打球",
+			StartedAt: "2026-08-21", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pends2, _ := svc.Activities.ListPending(ctx, 1)
+	var aID2 ids.ID
+	for _, a := range pends2 {
+		if a.Activity == "确认活动测试-打球" {
+			aID2 = a.ID
+		}
+	}
+	if aID2 == 0 {
+		t.Fatal("第二条 pending activity 未生成")
+	}
+	if err := svc.DismissPending(ctx, 1, "activity", aID2); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := svc.Activities.Get(ctx, aID2); a == nil || a.Status != "dismissed" {
+		t.Fatalf("activity 放弃后应 dismissed: %+v", a)
+	}
+
+	// 非 pending 再确认 → 报错
+	if err := svc.ConfirmPending(ctx, 1, "activity", aID); err == nil {
+		t.Fatal("非 pending activity 再确认应报错")
+	}
+}

@@ -119,7 +119,7 @@ func TestManualAddEventExt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e1, err := svc.ManualAddEventExt(ctx, tx, 1, oid, "健康", title, "长期服药", "2025-06-01", "", "北京协和", nil)
+	e1, err := svc.ManualAddEventExt(ctx, tx, 1, oid, "健康", title, "长期服药", "2025-06-01", "", "北京协和", nil, 0)
 	if err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("ManualAddEventExt: %v", err)
@@ -131,7 +131,7 @@ func TestManualAddEventExt(t *testing.T) {
 		t.Fatalf("手动事件行异常: %+v", e1)
 	}
 	// Commit 后确实落库
-	if got, _ := svc.Events.FindActiveByKeyExt(ctx, svc.DB, oid, "健康", title); got == nil || got.ID != e1.ID {
+	if got, _ := svc.Events.FindActiveByNormalizedTitleExt(ctx, svc.DB, oid, "健康", title); got == nil || got.ID != e1.ID {
 		t.Fatalf("Commit 后应能查到 active 事件: %+v", got)
 	}
 
@@ -140,7 +140,7 @@ func TestManualAddEventExt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ManualAddEventExt(ctx, txBad, 1, oid, "不存在的类型", "X", "", "", "", "", nil); err == nil {
+	if _, err := svc.ManualAddEventExt(ctx, txBad, 1, oid, "不存在的类型", "X", "", "", "", "", nil, 0); err == nil {
 		_ = txBad.Rollback()
 		t.Fatalf("非法事件类型应报错")
 	}

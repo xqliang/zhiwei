@@ -81,16 +81,31 @@ ORDER BY is_owner DESC, updated_at DESC`, userID)
 	return list, err
 }
 
-// ListWithPending 名册 + 每人 pending 计数（属性+关系），供名册角标。
+// ListWithPending 名册 + 每人 pending 计数（全六平面：属性/关系/大事记/指标/周期/生活轨迹），
+// 供名册角标——须与 /api/profile/pending 队列的并集口径一致，漏平面会少计。
 func (r *PersonRepo) ListWithPending(ctx context.Context, userID int64) ([]PersonWithPending, error) {
 	var list []PersonWithPending
 	err := r.DB.SelectContext(ctx, &list, `
 SELECT p.*,
   (SELECT COUNT(*) FROM person_attribute a WHERE a.person_id = p.id AND a.status = 'pending')
-+ (SELECT COUNT(*) FROM person_relationship rel WHERE rel.person_id = p.id AND rel.status = 'pending') AS pending_count
++ (SELECT COUNT(*) FROM person_relationship rel WHERE rel.person_id = p.id AND rel.status = 'pending')
++ (SELECT COUNT(*) FROM person_event e WHERE e.person_id = p.id AND e.status = 'pending')
++ (SELECT COUNT(*) FROM person_metric m WHERE m.person_id = p.id AND m.status = 'pending')
++ (SELECT COUNT(*) FROM person_cycle c WHERE c.person_id = p.id AND c.status = 'pending')
++ (SELECT COUNT(*) FROM person_activity act WHERE act.person_id = p.id AND act.status = 'pending') AS pending_count
 FROM person p
 WHERE p.user_id = ? AND p.status != 'dismissed'
 ORDER BY p.is_owner DESC, p.updated_at DESC`, userID)
+	return list, err
+}
+
+// ListDismissed 已删除人物（status=dismissed 软删行），供「已删除」折叠区展示 + 恢复入口。
+// 与 List/ListWithPending 互补：那两个只回非 dismissed，这个只回 dismissed。更新时间倒序。
+func (r *PersonRepo) ListDismissed(ctx context.Context, userID int64) ([]Person, error) {
+	var list []Person
+	err := r.DB.SelectContext(ctx, &list, `
+SELECT * FROM person WHERE user_id = ? AND status = 'dismissed'
+ORDER BY updated_at DESC`, userID)
 	return list, err
 }
 

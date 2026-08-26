@@ -344,7 +344,7 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		eventType := newStr("event_type")
 		title := newStr("title")
 		occurredAt := newStr("occurred_at")
-		row, err := d.Profile.ManualAddEventExt(ctx, tx, p.UserID, *p.TargetID, eventType, title, "", occurredAt, "", "", nil)
+		row, err := d.Profile.ManualAddEventExt(ctx, tx, p.UserID, *p.TargetID, eventType, title, "", occurredAt, "", "", nil, 0)
 		if err != nil {
 			return nil, err
 		}

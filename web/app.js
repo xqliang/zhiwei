@@ -55,9 +55,19 @@ const app = createApp({
       }
       const text = await r.text();
       if (!r.ok) {
-        let msg = '请求失败';
-        try { msg = (text ? JSON.parse(text).error : '') || msg; } catch (e) {}
-        throw new Error(msg);
+        // 后端错误体有两种形态，都要透传给用户，不能一律吞成通用「请求失败」：
+        //   1) Go 的 http.Error 直接回「纯文本」错误串（如「display_name 不能为空」、
+        //      「该声纹已绑定人物「张三」」）——它不是 JSON，JSON.parse 会抛异常。
+        //   2) 业务 JSON API 回 {"error":"..."} 结构，取其 .error 字段。
+        // 策略：先按 JSON 解析取 .error；解析失败（形态 1）则回退用响应纯文本，
+        //   trim 去首尾空白后 slice(0,200) 截断，防后端偶发返回超长 HTML 错误页刷屏。
+        //   两种都拿不到内容时，才回落到「请求失败 + 状态码」这一最后兜底。
+        let msg = '';
+        try { msg = (text ? JSON.parse(text).error : '') || ''; } catch (e) {}
+        // 纯文本兜底：疑似 HTML（反代 502/504 错误页等，以 '<' 开头）不透传原始标签，
+        // 直接走最后兜底——本栈后端错误全是纯文本中文，命中 '<' 开头必非业务错误。
+        if (!msg && text && text.trim()[0] !== '<') { msg = text.trim().slice(0, 200); }
+        throw new Error(msg || '请求失败 ' + r.status);
       }
       // 部分写操作（关联/删除 topic）返回 200/204 空体，r.json() 会抛
       // "Unexpected end of JSON input"——空体直接返回 null，调用方按需判断。
@@ -1052,6 +1062,9 @@ const app = createApp({
     const personDetail = ref(null);     // 当前详情（GET /api/persons/{id}，Task 2 用）
     const showNewPerson = ref(false);   // 新建人物表单开合
     const newPerson = ref({ display_name: '', speaker_id: '', summary: '' });
+    // 新建人物「关联声纹」下拉的数据源 + 懒加载缓存标志（详见 loadNewPersonSpeakers）。
+    const newPersonSpeakers = ref([]);          // GET /api/speakers 的说话人列表（{id,name,...}）
+    const newPersonSpeakersLoaded = ref(false); // 简单缓存：已加载则跳过重复拉取（新建表单期间名册少变化）
     const creatingPerson = ref(false);  // 防重复提交
     const renamingPerson = ref(null);   // { id, name } 详情改名（Task 2 用）
 
@@ -1061,21 +1074,43 @@ const app = createApp({
         persons.value = d.persons || [];
       } catch (e) { showError(e); }
     }
+    // 新建人物「关联声纹」下拉的数据源：GET /api/speakers（响应结构同 loadAllSpeakers，
+    // {speakers:[{id,name,...}]}）。带 newPersonSpeakersLoaded 简单缓存——已加载则跳过
+    // （新建表单期间名册极少变化，无需每次重拉）。失败走 showError 提示但不阻塞表单：
+    // 下拉此时为空，用户仍可「不关联声纹」留空提交，不影响建档主流程。
+    async function loadNewPersonSpeakers() {
+      if (newPersonSpeakersLoaded.value) return; // 已加载：跳过（简单缓存标志）
+      try {
+        const d = await api('GET', '/api/speakers');
+        newPersonSpeakers.value = d.speakers || [];
+        newPersonSpeakersLoaded.value = true;
+      } catch (e) { showError(e); } // 仅提示不阻塞：下拉空 → 只能留空，但仍可提交
+    }
     function cancelNewPerson() {
       showNewPerson.value = false;
       newPerson.value = { display_name: '', speaker_id: '', summary: '' };
       creatingPerson.value = false;
+      // 注意：不清 newPersonSpeakers/newPersonSpeakersLoaded——纯只读列表，缓存无泄漏风险，
+      // 保留可让下次打开表单即时显示下拉（免二次拉取）。
     }
     // 工具栏「＋ 新建/收起」切换：收起时走 cancelNewPerson 一并清草稿（对齐 toggleNewTopic，
     // 避免 inline `showNewPerson = !showNewPerson` 收起不重置、重开残留旧输入的不对称）。
-    function toggleNewPerson() { if (showNewPerson.value) cancelNewPerson(); else showNewPerson.value = true; }
+    // 打开时懒加载声纹下拉数据源（不 await：表单立即展开，下拉数据返回后再填充，不卡展开）。
+    function toggleNewPerson() {
+      if (showNewPerson.value) { cancelNewPerson(); return; }
+      showNewPerson.value = true;
+      loadNewPersonSpeakers();
+    }
     async function createPerson() {
       if (creatingPerson.value) return;
       const name = newPerson.value.display_name.trim();
       if (!name) { toast.value = '请输入姓名'; setTimeout(() => { toast.value = ''; }, 2000); return; }
       creatingPerson.value = true;
       try {
-        // speaker_id 可空（只被提到、没录音的人也能建档）；后端校验声纹冲突返回 409
+        // speaker_id 可空（只被提到、没录音的人也能建档）；后端校验声纹冲突返回 409。
+        // 现在 speaker_id 来自下拉 <select>（值=声纹 id 或空串「不关联」），无首尾空格，
+        // 故 .trim() 纯为兼容旧自由输入、此处无害。选到已被占用的声纹提交时，后端回 409
+        // 纯文本「该声纹已绑定人物「张三」」——经 Task 1 的 api() 纯文本透传，showError 能显示原文。
         const body = { display_name: name };
         if (newPerson.value.speaker_id.trim()) body.speaker_id = newPerson.value.speaker_id.trim();
         if (newPerson.value.summary.trim()) body.summary = newPerson.value.summary.trim();
@@ -1090,13 +1125,17 @@ const app = createApp({
     async function togglePerson(id) {
       if (personDetail.value && personDetail.value.person.id === id) { closePersonDetail(); return; }
       closePersonDetail(); // 切换前清旧人物的临时态（历史抽屉/加属性草稿/编辑删除态），防跨人泄漏
-      try { personDetail.value = await api('GET', '/api/persons/' + id); }
+      try {
+        personDetail.value = await api('GET', '/api/persons/' + id);
+        // 指标(metric)已内嵌在人物详情响应里(personDetail.metrics 分组)，无需单独拉取；此处补拉活动时间线。
+        await loadActivities(); // 同步加载「生活轨迹」活动时间线（对齐 loadPending 的挂接方式）
+      }
       catch (e) { showError(e); }
     }
     function closePersonDetail() {
       personDetail.value = null;
       renamingPerson.value = null;
-      archivingPersonId.value = null; // 切换详情/收起时一并清归档确认态（对齐 toggleSession 折叠清 deletingSessionId）
+      deletingPersonId.value = null; // 切换详情/收起时一并清删除确认态（对齐 toggleSession 折叠清 deletingSessionId）
       // 属性手动管理临时态（Task 3）：加属性表单(含草稿) / 就地改值 / 删除确认 / 历史抽屉一并清空
       editingAttr.value = null; deletingAttrId.value = null; attrHistory.value = null;
       showAddAttr.value = false; addAttrForm.attr_key = ''; addAttrForm.value = '';
@@ -1106,6 +1145,10 @@ const app = createApp({
       showAddEvent.value = false; resetAddEventForm(); deletingEventId.value = null;
       // 指标临时态（P2 metric）：加指标表单(含草稿) / 删除确认一并清空
       showAddMetric.value = false; resetAddMetricForm(); deletingMetricId.value = null;
+      // 健康周期临时态（P3b，敏感区）：折叠+清列表/免责文案 / 加周期表单(含草稿) / 删除确认一并清空
+      healthOpen.value = false; cycles.value = []; cyclesNote.value = ''; showAddCycle.value = false; resetAddCycleForm(); deletingCycleId.value = null;
+      // 生活轨迹临时态（P4）：清列表/加载态 / 加活动表单(含草稿) / 提交态 / 删除确认一并清空
+      activities.value = []; activityLoading.value = false; showAddActivity.value = false; resetAddActivityForm(); addingActivity.value = false; deletingActivityId.value = null;
     }
     async function reloadPersonDetail() {
       if (!personDetail.value) return;
@@ -1129,16 +1172,37 @@ const app = createApp({
         showError(e);
       }
     }
-    // 人物归档（2 步确认；DELETE = status=dismissed 软删）
-    const archivingPersonId = ref(null);
-    function askArchivePerson(p) { archivingPersonId.value = p.id; }
-    function cancelArchivePerson() { archivingPersonId.value = null; }
-    async function confirmArchivePerson(p) {
+    // 人物删除（原「归档」，2 步确认；DELETE = status=dismissed 软删，六平面级联 dismiss——
+    // 行 dismiss 前状态记 pre_dismiss_status，恢复时可级联回滚，手动删过的行不受影响）
+    const deletingPersonId = ref(null);
+    function askDeletePerson(p) { deletingPersonId.value = p.id; }
+    function cancelDeletePerson() { deletingPersonId.value = null; }
+    async function confirmDeletePerson(p) {
       try {
         await api('DELETE', '/api/persons/' + p.id);
-        archivingPersonId.value = null;
+        deletingPersonId.value = null;
         if (personDetail.value && personDetail.value.person.id === p.id) closePersonDetail();
         await loadPersons();
+        await loadDeletedPersons(); // 已删除列表同步（该人物移入折叠区）
+      } catch (e) { showError(e); }
+    }
+    // 已删除人物（status=dismissed 软删行）：底部折叠区查看 + 恢复入口（对齐已忽略主题的交互）。
+    const deletedPersons = ref([]);
+    const deletedCollapsed = ref(true); // 默认收起
+    async function loadDeletedPersons() {
+      try {
+        const d = await api('GET', '/api/persons?dismissed=1');
+        deletedPersons.value = d.persons || [];
+      } catch (e) { showError(e); }
+    }
+    // 恢复已删除人物（PATCH status=active）：后端在同一事务级联恢复删除时被连带清掉的
+    // 六平面行（手动删过的行保持 dismissed，不会误恢复）
+    async function restorePerson(p) {
+      try {
+        await api('PATCH', '/api/persons/' + p.id, { status: 'active' });
+        await loadPersons();
+        await loadDeletedPersons();
+        toast.value = '人物已恢复'; setTimeout(() => { toast.value = ''; }, 2000);
       } catch (e) { showError(e); }
     }
     // epistemic_type（认知来源）→ 中文标签，属性徽标用。
@@ -1156,13 +1220,23 @@ const app = createApp({
     }
 
     // ---------- 人物属性手动管理（加 / 改(留痕) / 删 / 修改历史抽屉） ----------
-    // 常用属性 key 建议（datalist；与 internal/profile/catalog.go 的 47 键一致，可自由输入目录外 key）
-    const ATTR_KEYS = ['aliases','birthday','gender','zodiac','mbti','education','school','city','address','phone',
-      'occupation','industry','office_location','work_start_time','work_end_time','commute_mode','often_travel','current_projects',
-      'meal_time','cuisine','eats_spicy','eats_numbing','smokes','drinks','wears_makeup','perfume',
-      'hobbies','skills','reading_now','books_read','movies_watched','music_listened','games_played','fav_celebrities','fav_anime','fav_movie_genres','catchphrases','invests_stocks',
-      'cities_visited','places_traveled','has_car','car_brand','phone_brand',
-      'recent_concerns','attention_topics','personality','chronic_diseases'];
+    // 属性目录（F4 前端配套）：GET /api/profile/catalog → [{key,label,group,value_type,enum_options,cardinality}]。
+    // 懒加载缓存，模式照 loadNewPersonSpeakers：人物 tab 首次进入拉一次（静态数据，无需重拉）。
+    // 加属性/改值表单据此把值输入按 value_type 切成受控控件（enum→select / bool→是否 / date→日期选择器）——
+    // Task 1 写入端上闸后，受控输入保证提交值天然合法（enum 精确命中、bool 只认 true/false、date 可解析），
+    // 免去用户手输脏值被 400。目录同时作 attr_key 输入的 datalist 数据源（key + 中文 label 建议）。
+    const attrCatalog = ref([]);
+    const attrCatalogLoaded = ref(false);
+    async function loadAttrCatalog() {
+      if (attrCatalogLoaded.value) return; // 已加载：跳过（静态目录，缓存标志）
+      try {
+        const d = await api('GET', '/api/profile/catalog');
+        attrCatalog.value = d.catalog || [];
+        attrCatalogLoaded.value = true;
+      } catch (e) { showError(e); } // 失败不阻塞：目录空 → 值输入回退全部自由文本、datalist 无建议，仍可手输
+    }
+    // attrDefOf：按 key 查目录定义；目录外 key（自造）或目录未加载时返回 null → 前端回退自由文本输入。
+    function attrDefOf(key) { return attrCatalog.value.find(d => d.key === key) || null; }
 
     const showAddAttr = ref(false);          // 加属性表单开合
     const addAttrForm = reactive({ attr_key: '', value: '' });
@@ -1171,6 +1245,14 @@ const app = createApp({
     const deletingAttrId = ref(null);        // 2 步删除确认
     const attrHistory = ref(null);           // { attr_key, items }：历史抽屉
     const attrHistoryLoading = ref(false);
+
+    // 加属性表单 / 就地改值当前 key 的目录定义（受控输入据其 value_type 切控件）。
+    // addAttrForm.attr_key 是 reactive 字段、editingAttr 是 ref，computed 会自动追踪其变化。
+    const addAttrDef = computed(() => attrDefOf(addAttrForm.attr_key));
+    const editAttrDef = computed(() => (editingAttr.value ? attrDefOf(editingAttr.value.attr_key) : null));
+    // 加属性表单 key 变更（datalist 选中/失焦触发 change）时清空已填值：旧值可能不符合新 key 的
+    // 值类型（如已填的文本值留在切到 bool/enum 的受控控件里，select 无匹配项却仍在 model 里 → 提交非法值被 400）。
+    function onAddAttrKeyChange() { addAttrForm.value = ''; }
 
     async function submitAddAttr() {
       if (addingAttr.value) return;
@@ -1282,8 +1364,32 @@ const app = createApp({
     // 事件类型枚举与后端 ValidEventTypes 一致（9 类）
     const EVENT_TYPES = ['里程碑','聚会','会议','旅行','健康','成就','挫折','负面','其他'];
 
+    // 重要度三档（P7）：语义档位（人生分量）比数字输入更贴近用户直觉，映射后端 clamp 到 (0,1] 的值。
+    // 默认「一般」(0.5)；手动录入恒发所选档（见 submitAddEvent），与后端「类型默认」路径(LLM/缺省)互不干扰。
+    const EVENT_IMPORTANCE_LEVELS = [
+      { label: '重大', value: 0.9 },
+      { label: '一般', value: 0.5 },
+      { label: '日常', value: 0.3 },
+    ];
+    // 大事记行重要度视觉分层（P7）：不引新色，用「左侧 accent 竖条 + 透明度」映射人生分量三档——
+    // 重大(≥0.8) 显示 accent 左竖条(视觉加重)、一般(0.6~0.8) 常规、日常(<0.6) 淡显。所有行恒留 3px
+    // 左竖条槽位(默认透明)保持左对齐，只切换颜色不产生位移；纯视觉不暴露数值(数值走 hover title)。
+    // 对齐 dataviz「数据是唯一主角」：importance 是权重信号，用视觉重量表达而非再塞一个数字。
+    function eventRowStyle(ev) {
+      const imp = ev && typeof ev.importance === 'number' ? ev.importance : 0.5;
+      const style = {
+        paddingLeft: '8px',
+        borderLeft: '3px solid ' + (imp >= 0.8 ? 'var(--accent)' : 'transparent'),
+      };
+      // 淡显阈值 <0.45（非 <0.6）：三档按钮 一般=0.5 须保持常规亮度——若阈值取 0.6 会把
+      // 「一般」也淡显，与「日常」(0.3) 渲染无差别（final review Low 修正）。类型默认 0.4
+      // （其他）落淡显档、0.5/0.8 常规、0.9 重亮——各档可辨。
+      if (imp < 0.45) style.opacity = '0.55';
+      return style;
+    }
+
     const showAddEvent = ref(false);
-    const addEventForm = reactive({ event_type: '', title: '', description: '', occurred_at: '', end_at: '', location: '', related_person_id: '' });
+    const addEventForm = reactive({ event_type: '', title: '', description: '', occurred_at: '', end_at: '', location: '', related_person_ids: [], importance: 0.5 });
     const addingEvent = ref(false);
     const deletingEventId = ref(null);  // 2 步删除确认
 
@@ -1310,7 +1416,8 @@ const app = createApp({
     }
     function resetAddEventForm() {
       addEventForm.event_type = ''; addEventForm.title = ''; addEventForm.description = '';
-      addEventForm.occurred_at = ''; addEventForm.end_at = ''; addEventForm.location = ''; addEventForm.related_person_id = '';
+      addEventForm.occurred_at = ''; addEventForm.end_at = ''; addEventForm.location = '';
+      addEventForm.related_person_ids = []; addEventForm.importance = 0.5;  // 数组与档位对称清理（默认「一般」）
     }
     // 开合切换：收起清草稿（对齐 toggleAddAttr/toggleAddRel 对称模式）
     function toggleAddEvent() {
@@ -1331,7 +1438,11 @@ const app = createApp({
         if (addEventForm.occurred_at) body.occurred_at = addEventForm.occurred_at;
         if (addEventForm.end_at) body.end_at = addEventForm.end_at;
         if (addEventForm.location.trim()) body.location = addEventForm.location.trim();
-        if (addEventForm.related_person_id) body.related_person_id = addEventForm.related_person_id;
+        // 同行人物多选（P7）：数组非空才发 related_person_ids（后端 []string，逐个 ParseID）
+        if (addEventForm.related_person_ids.length) body.related_person_ids = addEventForm.related_person_ids;
+        // 重要度恒发所选档（P7）：手动录入 WYSIWYG——用户所见档位(默认「一般」0.5)即其意图，
+        // 恒发避免「看着是一般的里程碑被后端类型默认悄悄提成重大」的意外；后端 clamp 到 (0,1]。
+        body.importance = addEventForm.importance;
         await api('POST', '/api/persons/' + personDetail.value.person.id + '/events', body);
         await reloadPersonDetail();
         showAddEvent.value = false;
@@ -1446,6 +1557,155 @@ const app = createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 健康周期（cycle 平面，P3，敏感：默认折叠 + 免责直显） ----------
+    const CYCLE_TYPES = [
+      { key: 'menstrual', label: '生理期' },
+      { key: 'medication', label: '用药' },
+      { key: 'injection', label: '注射' },
+      { key: 'followup', label: '随访' },
+    ];
+    const healthOpen = ref(false);        // 敏感区默认折叠
+    const cycles = ref([]);
+    const cyclesNote = ref('');           // 后端免责文案（响应 note 字段直显）
+    const cycleLoading = ref(false);
+    const showAddCycle = ref(false);
+    const addCycleForm = reactive({ cycle_type: '', label: '', anchor_date: '', period_days: '', duration_days: '', dosage: '', frequency: '' });
+    const addingCycle = ref(false);
+    const deletingCycleId = ref(null);
+
+    function cycleTypeLabel(k) { const t = CYCLE_TYPES.find(x => x.key === k); return t ? t.label : k; }
+    // 日期仅显示 YYYY-MM-DD（DATE 列的 ISO 串截取）
+    function fmtDateOnly(iso) { return iso ? String(iso).slice(0, 10) : '—'; }
+    // 取周期数据的唯一入口（toggleHealth/reloadCycles 共用，避免两处内联重复）。
+    // 敏感数据：await 前记下当前人物 id，回来时若已切人/已收起则丢弃响应，
+    // 防止「A 的在途响应晚于 B 返回」把 A 的生理期/用药渲染到 B 名下。
+    async function fetchCyclesInto() {
+      const pid = personDetail.value?.person?.id;
+      const d = await api('GET', '/api/persons/' + pid + '/cycles');
+      if (!healthOpen.value || personDetail.value?.person?.id !== pid) return;
+      cycles.value = d.cycles || [];
+      cyclesNote.value = d.note || '';
+    }
+    // 敏感区懒加载：首次展开才拉数据（含免责 note）；再点收起并清列表
+    async function toggleHealth() {
+      if (healthOpen.value) {
+        healthOpen.value = false; cycles.value = []; cyclesNote.value = '';
+        showAddCycle.value = false; resetAddCycleForm(); deletingCycleId.value = null;
+        return;
+      }
+      healthOpen.value = true;
+      cycleLoading.value = true;
+      try { await fetchCyclesInto(); } catch (e) { showError(e); }
+      finally { cycleLoading.value = false; }
+    }
+    async function reloadCycles() {
+      if (!healthOpen.value) return;
+      try { await fetchCyclesInto(); } catch (e) { showError(e); }
+    }
+    function resetAddCycleForm() {
+      addCycleForm.cycle_type = ''; addCycleForm.label = ''; addCycleForm.anchor_date = '';
+      addCycleForm.period_days = ''; addCycleForm.duration_days = ''; addCycleForm.dosage = ''; addCycleForm.frequency = '';
+    }
+    function toggleAddCycle() {
+      if (showAddCycle.value) { showAddCycle.value = false; resetAddCycleForm(); return; }
+      showAddCycle.value = true;
+    }
+    async function submitAddCycle() {
+      if (addingCycle.value) return;
+      const ct = addCycleForm.cycle_type;
+      if (!ct) { toast.value = '请选择周期类型'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingCycle.value = true;
+      try {
+        const body = { cycle_type: ct };
+        if (addCycleForm.label.trim()) body.label = addCycleForm.label.trim();
+        if (addCycleForm.anchor_date) body.anchor_date = addCycleForm.anchor_date;
+        if (addCycleForm.period_days) body.period_days = Number(addCycleForm.period_days);
+        if (addCycleForm.duration_days) body.duration_days = Number(addCycleForm.duration_days);
+        if (addCycleForm.dosage.trim()) body.dosage = addCycleForm.dosage.trim();
+        if (addCycleForm.frequency.trim()) body.frequency = addCycleForm.frequency.trim();
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/cycles', body);
+        showAddCycle.value = false;
+        resetAddCycleForm();
+        await reloadCycles(); await loadPersons();
+      } catch (e) { showError(e); }
+      finally { addingCycle.value = false; }
+    }
+    function askDeleteCycle(c) { deletingCycleId.value = c.id; }
+    async function confirmDeleteCycle() {
+      const id = deletingCycleId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/cycles/' + id);
+        deletingCycleId.value = null;
+        await reloadCycles(); await loadPersons();
+      } catch (e) { showError(e); }
+    }
+
+    // ---------- 生活轨迹（activity 平面，P4：什么时间 / 多长时间 / 什么工具 / 做什么 / 地点 / 通勤） ----------
+    // 测点流语义（同 metric 平面）：追加式、无「当前值」、无冲突——每条 = 某时开始的一次活动。
+    // 画成时间线列表（升序，从早到晚）而非曲线：活动是「类别身份」，画连续线是撒谎（dataviz 结论，P3b 已引用）。
+    const activities = ref([]);              // 当前人物的全状态活动（后端升序返回）
+    const activityLoading = ref(false);
+    const showAddActivity = ref(false);
+    const addActivityForm = reactive({ activity: '', tool: '', location: '', commute_mode: '', started_at: '', duration_min: '' });
+    const addingActivity = ref(false);
+    const deletingActivityId = ref(null);    // 2 步删除确认
+
+    async function loadActivities() {
+      if (!personDetail.value) return;
+      // 记下请求时的人物 id，await 回来后校验——快速切人时晚到的旧响应直接丢弃，
+      // 防止过期数据渲染且粘住（await 前记 pid，回来校验人物未变）。
+      const pid = personDetail.value.person.id;
+      activityLoading.value = true;
+      try {
+        const d = await api('GET', '/api/persons/' + pid + '/activities');
+        if (personDetail.value?.person?.id !== pid) return;
+        activities.value = d.activities || [];
+      } catch (e) { showError(e); }
+      finally { activityLoading.value = false; }
+    }
+    // 展示视图：排除 dismissed（软删不显示，与详情各平面过滤一致）。
+    const activityRows = computed(() => activities.value.filter(a => a.status !== 'dismissed'));
+    function resetAddActivityForm() {
+      addActivityForm.activity = ''; addActivityForm.tool = ''; addActivityForm.location = '';
+      addActivityForm.commute_mode = ''; addActivityForm.started_at = ''; addActivityForm.duration_min = '';
+    }
+    function toggleAddActivity() {
+      if (showAddActivity.value) { showAddActivity.value = false; resetAddActivityForm(); return; }
+      showAddActivity.value = true;
+    }
+    async function submitAddActivity() {
+      if (addingActivity.value) return;
+      const act = addActivityForm.activity.trim();
+      if (!act) { toast.value = '请输入活动'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingActivity.value = true;
+      try {
+        // 可选字段非空才发（后端 trim 空→NULL）；duration_min 表单是字符串，Number() 转数字。
+        const body = { activity: act };
+        if (addActivityForm.tool.trim()) body.tool = addActivityForm.tool.trim();
+        if (addActivityForm.location.trim()) body.location = addActivityForm.location.trim();
+        if (addActivityForm.commute_mode.trim()) body.commute_mode = addActivityForm.commute_mode.trim();
+        if (addActivityForm.started_at) body.started_at = addActivityForm.started_at;
+        if (addActivityForm.duration_min) body.duration_min = Number(addActivityForm.duration_min);
+        // POST 返回裸行不消费，直接 reload（对齐 submitAddMetric）；名册角标可能变故一并刷新。
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/activities', body);
+        showAddActivity.value = false;
+        resetAddActivityForm();
+        await loadActivities(); await loadPersons();
+      } catch (e) { showError(e); }
+      finally { addingActivity.value = false; }
+    }
+    function askDeleteActivity(a) { deletingActivityId.value = a.id; }
+    async function confirmDeleteActivity() {
+      const id = deletingActivityId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/activities/' + id);
+        deletingActivityId.value = null;
+        await loadActivities(); await loadPersons();
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 确认队列（跨平面 pending 并集；与名册/详情独立刷新） ----------
     const pendingItems = ref([]);
     const pendingLoading = ref(false);
@@ -1490,10 +1750,17 @@ const app = createApp({
       if (it.kind === 'relationship') return (it.relation_type || '') + (it.label ? '（' + it.label + '）' : '');
       if (it.kind === 'event') return (it.event_type || '') + '：' + (it.value || ''); // event：event_type + title（value 后端映射为 title）
       if (it.kind === 'metric') return metricLabel(it.metric_key) + '：' + (it.value || ''); // metric：指标中文名 + 值（value 后端映射为带单位的读数）
+      if (it.kind === 'cycle') {
+        // 后端 value = type 或 type·label；type 是英文枚举，换成中文（cycleTypeLabel
+        // 找不到时回退原 key），label 部分原样保留
+        const v = it.value || '';
+        return it.cycle_type ? v.replace(it.cycle_type, cycleTypeLabel(it.cycle_type)) : v;
+      }
+      if (it.kind === 'activity') return it.value || ''; // activity：value = activity 串（做什么）
       return it.value || it.person_name; // person：名字
     }
     function pendingKindText(k) {
-      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记', metric: '指标' }[k] || k;
+      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记', metric: '指标', cycle: '周期', activity: '活动' }[k] || k;
     }
 
     // ---------- 从历史回填抽取（POST /api/profile/extract：不带 session_id = 最近 50 个 completed，同步） ----------
@@ -1652,19 +1919,19 @@ const app = createApp({
     // ---------- 重新提取（基于最新 ASR 重跑 segment→extract） ----------
     // 点卡片「重新提取」→ 2 步确认 → 若有未保存转写先存盘 → POST reextract 建任务
     // → 轮询 job 状态 → 完成后刷新列表+详情。2 步确认提示会覆盖旧记忆/待办。
-    const reextractingId = ref(null);   // 正在重新提取的 session id（卡片显 loading）
-    const reextractConfirmId = ref(null); // 待确认重新提取的 session id
-    let reextractPollTimer = null;
+    const reextractingIds = reactive(new Set()); // 正在重新提取的 session id 集合（支持多卡片并行）
+    const reextractConfirmId = ref(null);        // 待确认重新提取的 session id
+    const reextractTimers = new Map();           // sessionId → 轮询 timer（并行时各自独立，互不覆盖）
     function askReextract(s) { deletingSessionId.value = null; reextractConfirmId.value = s.id; }
     function cancelReextract() { reextractConfirmId.value = null; }
     async function confirmReextract(s) { reextractConfirmId.value = null; await reextractSession(s); }
     async function reextractSession(s) {
-      if (reextractingId.value) return;
+      if (reextractingIds.has(s.id)) return; // 只防**同一** session 重复提交；不同 session 允许并行（后端 pool 并发=2，多的排队）
       // 当前展开且有未保存转写修改 → 先存盘，确保用最新 ASR 提取
       if (expandedId.value === s.id && segDirty.value) {
         await saveTranscript(s);
       }
-      reextractingId.value = s.id;
+      reextractingIds.add(s.id);
       try {
         await api('POST', '/api/sessions/' + s.id + '/reextract', {});
         toast.value = '正在重新提取…';
@@ -1676,36 +1943,38 @@ const app = createApp({
             err = r.job ? (r.job.last_error || '') : '';
           } catch (e) { /* 轮询失败静默重试 */ }
           if (st === 'done' || st === 'completed') {
-            reextractingId.value = null;
+            reextractingIds.delete(s.id);
+            reextractTimers.delete(s.id);
             toast.value = '重新提取完成'; setTimeout(() => { toast.value = ''; }, 2500);
             await loadSessions();
             if (expandedId.value === s.id) await reloadSession(s.id);
           } else if (st === 'failed') {
-            reextractingId.value = null;
+            reextractingIds.delete(s.id);
+            reextractTimers.delete(s.id);
             toast.value = '重新提取失败' + (err ? '：' + err : '');
             setTimeout(() => { toast.value = ''; }, 4000);
           } else {
-            reextractPollTimer = setTimeout(poll, 2000);
+            reextractTimers.set(s.id, setTimeout(poll, 2000));
           }
         };
         poll();
       } catch (e) {
-        reextractingId.value = null;
+        reextractingIds.delete(s.id);
         showError(e);
       }
     }
 
     // ---------- 重新识别说话人（清空说话人归属 + 重跑 speaker stage 用最新声纹库 1:N） ----------
     // 区别于重新提取（speaker 幂等跳过、不改已有归属）；重新识别会覆盖手动换人，故二次确认。
-    const reidentifyingId = ref(null);     // 正在重新识别的 session id（卡片显 loading）
-    const reidentifyConfirmId = ref(null); // 待确认重新识别的 session id
-    let reidentifyPollTimer = null;
+    const reidentifyingIds = reactive(new Set()); // 正在重新识别的 session id 集合（支持多卡片并行）
+    const reidentifyConfirmId = ref(null);        // 待确认重新识别的 session id
+    const reidentifyTimers = new Map();           // sessionId → 轮询 timer（并行时各自独立）
     function askReidentify(s) { deletingSessionId.value = null; reextractConfirmId.value = null; reidentifyConfirmId.value = s.id; }
     function cancelReidentify() { reidentifyConfirmId.value = null; }
     async function confirmReidentify(s) { reidentifyConfirmId.value = null; await reidentifySession(s); }
     async function reidentifySession(s) {
-      if (reidentifyingId.value) return;
-      reidentifyingId.value = s.id;
+      if (reidentifyingIds.has(s.id)) return; // 只防**同一** session 重复提交；不同 session 允许并行（后端 pool 并发=2，多的排队）
+      reidentifyingIds.add(s.id);
       try {
         await api('POST', '/api/sessions/' + s.id + '/reidentify', {});
         toast.value = '正在重新识别说话人…';
@@ -1717,21 +1986,23 @@ const app = createApp({
             err = r.job ? (r.job.last_error || '') : '';
           } catch (e) { /* 轮询失败静默重试 */ }
           if (st === 'done' || st === 'completed') {
-            reidentifyingId.value = null;
+            reidentifyingIds.delete(s.id);
+            reidentifyTimers.delete(s.id);
             toast.value = '重新识别完成'; setTimeout(() => { toast.value = ''; }, 2500);
             await loadSessions();
             if (expandedId.value === s.id) await reloadSession(s.id);
           } else if (st === 'failed') {
-            reidentifyingId.value = null;
+            reidentifyingIds.delete(s.id);
+            reidentifyTimers.delete(s.id);
             toast.value = '重新识别失败' + (err ? '：' + err : '');
             setTimeout(() => { toast.value = ''; }, 4000);
           } else {
-            reidentifyPollTimer = setTimeout(poll, 2000);
+            reidentifyTimers.set(s.id, setTimeout(poll, 2000));
           }
         };
         poll();
       } catch (e) {
-        reidentifyingId.value = null;
+        reidentifyingIds.delete(s.id);
         showError(e);
       }
     }
@@ -2285,8 +2556,8 @@ const app = createApp({
       if (name === 'agent') { loadAgentConversations(); if (agentConvId.value) { const cid = agentConvId.value; loadAgentHistory(cid); openAgentWS(cid); } }
       // 报告 tab：拉主题列表（话题状态选择器数据源）+ 按当前日报/周报类型加载报告。
       if (name === 'reports') { loadTopics(); loadReport(); }
-      // 人物 tab：进入时复位详情/归档确认态，拉名册 + 确认队列（跨平面 pending 并集，独立刷新）。
-      if (name === 'persons') { closePersonDetail(); archivingPersonId.value = null; loadPersons(); loadPending(); }
+      // 人物 tab：进入时复位详情/删除确认态，拉名册 + 已删除列表 + 确认队列（跨平面 pending 并集，独立刷新）+ 属性目录（受控输入元数据，懒加载缓存）。
+      if (name === 'persons') { closePersonDetail(); deletingPersonId.value = null; loadPersons(); loadDeletedPersons(); loadPending(); loadAttrCatalog(); }
     }
     // 启动先校验登录态（登录门）：GET /api/auth/me → 200 进主界面并加载首屏数据（bootMainData）；
     // 401 → api() 已置 authed=false，显示登录页。未登录时不再盲发 sessions/topics/speakers 等请求。
@@ -2313,8 +2584,8 @@ const app = createApp({
       hasNameCandidates, acceptNameCandidate, dismissNameCandidate,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
       spMergeMode, spMergeSelected, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
-      reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
-      reidentifyingId, reidentifyConfirmId, askReidentify, cancelReidentify, confirmReidentify,
+      reextractingIds, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
+      reidentifyingIds, reidentifyConfirmId, askReidentify, cancelReidentify, confirmReidentify,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       lastAudioFile, matchInfo, voiceprintMatching, tryMatchVoiceprint,
       topics, topicDetail, showNewTopic, newTopic, creating, toggleNewTopic, cancelNewTopic, renaming,
@@ -2337,12 +2608,14 @@ const app = createApp({
       statusTopicId, topicStatusRow, topicStatusLoading, topicStatusError, topicStatusContent, topicStatusFailed,
       loadTopicStatus, onPickStatusTopic,
       // 人物 / 画像
-      persons, personDetail, showNewPerson, newPerson, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
+      persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, deletingPersonId, askDeletePerson, cancelDeletePerson, confirmDeletePerson, deletedPersons, deletedCollapsed, loadDeletedPersons, restorePerson,
       epiText, personNameOf,
-      ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
+      attrCatalog, attrDefOf, addAttrDef, editAttrDef, onAddAttrKeyChange, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
-      EVENT_TYPES, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
+      EVENT_TYPES, EVENT_IMPORTANCE_LEVELS, eventRowStyle, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
       METRIC_CATALOG, showAddMetric, addMetricForm, addingMetric, addMetricDef, onPickMetricKey, toggleAddMetric, submitAddMetric, metricCharts, metricPointValue, deletingMetricId, askDeleteMetric, confirmDeleteMetric,
+      CYCLE_TYPES, healthOpen, cycles, cyclesNote, cycleLoading, toggleHealth, showAddCycle, addCycleForm, addingCycle, toggleAddCycle, submitAddCycle, deletingCycleId, askDeleteCycle, confirmDeleteCycle, cycleTypeLabel, fmtDateOnly,
+      activities, activityRows, activityLoading, showAddActivity, addActivityForm, addingActivity, toggleAddActivity, submitAddActivity, deletingActivityId, askDeleteActivity, confirmDeleteActivity,
       pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
       backfilling, backfillInfo, runBackfill,
     };

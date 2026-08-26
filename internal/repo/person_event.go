@@ -32,6 +32,9 @@ type PersonEvent struct {
 	EpistemicType        string    `db:"epistemic_type" json:"epistemic_type"` // observed|inferred|predicted|suggested
 	Source               string    `db:"source" json:"source"`                 // manual|llm
 	Status               string    `db:"status" json:"status"`                 // active|pending|superseded|dismissed
+	// PreDismissStatus 删除级联 dismiss 前的状态（active|pending）；NULL=非级联（手动删/正常行）。
+	// 恢复人物时据此区分「级联删的（要恢复）」和「手动删的（保持 dismissed）」，见 RestoreArchivedExt。
+	PreDismissStatus     *string   `db:"pre_dismiss_status" json:"pre_dismiss_status,omitempty"`
 	SessionID            *ids.ID   `db:"session_id" json:"session_id,omitempty"`
 	MemoryID             *ids.ID   `db:"memory_id" json:"memory_id,omitempty"`
 	TranscriptSegmentIDs ids.List  `db:"transcript_segment_ids" json:"transcript_segment_ids"`
@@ -114,24 +117,37 @@ SELECT * FROM person_event WHERE person_id = ? ORDER BY occurred_at DESC, id DES
 	return list, err
 }
 
-// FindActiveByKeyExt 事件的「当前 active 行」查询：按（主体, 类型, 标题）定位。
-// 事件的当前身份是 event_type + title（如「旅行 / 去云南旅游」），同一身份至多一条 active，
-// 供 Task 6 事务内判定「这条事件是否已有 active 版本」（有则走冲突/更新，无则新增）。
-// 无命中返回 (nil, nil)。只提供 Ext 版本：消费方（ApplyFacts）全程在事务内，
-// 与 person_relationship 的 FindActiveByTypeExt 保持一致，故不额外包非事务版。
-func (r *PersonEventRepo) FindActiveByKeyExt(ctx context.Context, ext QueryRowxContext, personID ids.ID, eventType, title string) (*PersonEvent, error) {
-	var e PersonEvent
-	err := ext.QueryRowxContext(ctx, `
+// FindActiveByNormalizedTitleExt 事件的「当前 active 行」查询（P2a③：标题归一化匹配）：
+// 按（主体, 类型, status='active'）拉候选行，Go 侧用 NormalizeTitle 归一化标题后逐条比较，
+// 命中返回该行；无命中返回 (nil, nil)。供 ApplyFacts 事务内判定「这条事件是否已有 active 版本」
+// （有则走佐证 reaffirm，无则新增）。只提供 Ext 版本：消费方全程在事务内，与
+// person_relationship 的 FindActiveByTypeExt 一致，故不额外包非事务版。
+//
+// 为何在 Go 侧归一化而非 SQL 内比较：NormalizeTitle 的语义（转小写 + 仅保留字母/数字/汉字、
+// 去标点空格）与 MySQL 的 LOWER/正则并不等价，若下推 SQL 会两处各写一套、易漂移；单人物单
+// 类型的 active 事件行数很小（通常个位数），全量拉回内存比较零性能顾虑。这也与 attribute 平面
+// 「Go 侧 NormalizeTitle 比较 reaffirm」（gate.go DecideAttribute）语义单点一致。
+//
+// 与原精确版（(person,type,title) 全等匹配）的关系：本查询是其超集——精确相等必然归一化相等，
+// 故一次查询两用：既承担幂等去重的「已有 active 版本」判定，又让字面近重复标题（「去云南旅游」/
+// 「去云南旅游！」/「去 云南 旅游」）走佐证而非重复建行（P2a③）。候选按 id 倒序遍历，
+// 同一归一化标题存在多条 active 时取 id 最大（最新）一条，与原精确版 ORDER BY id DESC 行为一致。
+func (r *PersonEventRepo) FindActiveByNormalizedTitleExt(ctx context.Context, ext QueryerContext, personID ids.ID, eventType, title string) (*PersonEvent, error) {
+	var list []PersonEvent
+	err := ext.SelectContext(ctx, &list, `
 SELECT * FROM person_event
-WHERE person_id = ? AND event_type = ? AND title = ? AND status = 'active'
-ORDER BY id DESC LIMIT 1`, personID.Int64(), eventType, title).StructScan(&e)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+WHERE person_id = ? AND event_type = ? AND status = 'active'
+ORDER BY id DESC`, personID.Int64(), eventType)
 	if err != nil {
 		return nil, err
 	}
-	return &e, nil
+	norm := NormalizeTitle(title)
+	for i := range list {
+		if NormalizeTitle(list[i].Title) == norm {
+			return &list[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // FindByNaturalKeyExt 幂等去重：同 session 同（主体, 类型, 标题）任意 status 的行。
@@ -161,6 +177,40 @@ func (r *PersonEventRepo) SetStatusExt(ctx context.Context, ext ExecerContext, i
 
 func (r *PersonEventRepo) SetStatus(ctx context.Context, id ids.ID, status string) error {
 	return r.SetStatusExt(ctx, r.DB, id, status)
+}
+
+// DismissAllByPersonExt 人物删除级联（spec §13 F5）：把该人物在**大事记（事件）平面**上所有
+// 活跃态（active/pending）的行批量置 dismissed，返回受影响行数（RowsAffected）。供
+// ManualSetPersonStatus 删除分支在事务内调用（ext 传 *sqlx.Tx，随删除事务一起提交/回滚）。
+//
+// 级联语义——只动 active 与 pending：superseded（已被新版本取代）与 dismissed（已放弃/已删除）
+// 都是**终态**，不再改动；否则会把「历史被取代行」也翻成 dismissed，既无意义又污染 supersedes
+// 链的历史可读性。故用 status IN ('active','pending') 精确圈定活跃态。
+//
+// 同时把行 dismiss 前的状态记入 pre_dismiss_status（active|pending），供 RestoreArchivedExt
+// 级联恢复——手动删除的行不走这里，pre_dismiss_status 保持 NULL，恢复时天然不被误恢复。
+func (r *PersonEventRepo) DismissAllByPersonExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
+	res, err := ext.ExecContext(ctx,
+		`UPDATE person_event SET pre_dismiss_status = status, status = 'dismissed' WHERE person_id = ? AND status IN ('active','pending')`,
+		personID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// RestoreArchivedExt 人物恢复级联：把删除时被级联置 dismissed 的行翻回**原状态**
+// （pre_dismiss_status 记录的 active|pending），并清空标记（防止残留导致下次恢复误判）。
+// 只动 status='dismissed' AND pre_dismiss_status IS NOT NULL 的行——手动删除的行
+// pre_dismiss_status 为 NULL，不受影响。供 ManualSetPersonStatus 恢复分支在事务内调用。
+func (r *PersonEventRepo) RestoreArchivedExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
+	res, err := ext.ExecContext(ctx,
+		`UPDATE person_event SET status = pre_dismiss_status, pre_dismiss_status = NULL WHERE person_id = ? AND status = 'dismissed' AND pre_dismiss_status IS NOT NULL`,
+		personID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ListPending 全局确认队列（事件平面部分），按 id 升序（先产生的先确认）。

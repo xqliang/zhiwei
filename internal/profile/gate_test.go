@@ -128,3 +128,68 @@ func TestDecideEvent(t *testing.T) {
 		t.Fatalf("默认阈值 0.75，0.9 应 active: %v", d)
 	}
 }
+
+func TestDecideCycle(t *testing.T) {
+	cfg := GateConfig{AutoConf: 0.75}
+	f := Fact{Plane: "cycle", CycleType: "medication", CycleLabel: "降压药",
+		Subject:    Subject{Kind: "self"},
+		Confidence: 0.9, EpistemicType: "observed"}
+
+	// 无现值、高置信 → active
+	if d := DecideCycle(f, nil, false, cfg); d != DecisionCreateActive {
+		t.Fatalf("高置信新周期应 create_active: %v", d)
+	}
+	// 无现值、低置信 → pending
+	low := f
+	low.Confidence = 0.6
+	if d := DecideCycle(low, nil, false, cfg); d != DecisionCreatePending {
+		t.Fatalf("低置信应 create_pending: %v", d)
+	}
+	// 自然键已处理 → skip（幂等）
+	if d := DecideCycle(f, nil, true, cfg); d != DecisionSkip {
+		t.Fatalf("dedupHit 应 skip: %v", d)
+	}
+	// 有 active 现值 → 冲突 pending（单值语义，supersedes 指向现值，绝不静默覆盖）。
+	// 注意即使高置信也走冲突路径（无 reaffirm——周期更新即取代）：钉死 existing!=nil 分支优先于置信度。
+	if d := DecideCycle(f, &repo.PersonCycle{}, false, cfg); d != DecisionConflictPending {
+		t.Fatalf("有现值应 conflict_pending: %v", d)
+	}
+	// 默认阈值兜底：AutoConf<=0 用 0.75，0.9 应 active
+	if d := DecideCycle(f, nil, false, GateConfig{}); d != DecisionCreateActive {
+		t.Fatalf("默认阈值 0.75，0.9 应 active: %v", d)
+	}
+}
+
+func TestDecideActivity(t *testing.T) {
+	cfg := GateConfig{AutoConf: 0.75}
+	f := Fact{Plane: "activity", ActivityText: "写代码", Tool: "电脑",
+		Subject:    Subject{Kind: "self"},
+		Confidence: 0.9, EpistemicType: "observed"}
+
+	// 高置信 observed → 直接 active（纯置信闸门，测点流语义同 metric）
+	if d := DecideActivity(f, false, cfg); d != DecisionCreateActive {
+		t.Fatalf("高置信活动应 create_active: %v", d)
+	}
+	// 低置信 → pending
+	low := f
+	low.Confidence = 0.6
+	if d := DecideActivity(low, false, cfg); d != DecisionCreatePending {
+		t.Fatalf("低置信应 create_pending: %v", d)
+	}
+	// 高置信 predicted（预测）→ pending（predicted 不在自动写入白名单，须人工确认）
+	pred := f
+	pred.EpistemicType = "predicted"
+	if d := DecideActivity(pred, false, cfg); d != DecisionCreatePending {
+		t.Fatalf("predicted 应 create_pending: %v", d)
+	}
+	// 自然键已处理（同 session 重跑）→ skip（幂等）
+	if d := DecideActivity(f, true, cfg); d != DecisionSkip {
+		t.Fatalf("dedupHit 应 skip: %v", d)
+	}
+	// activity 无 reaffirm/conflict 语义：DecideActivity 签名不含 existing 参数——同活动不同时刻是
+	// 「两次独立记录各自成行」而非佐证/冲突（同 metric）。故只有 active/pending/skip 三条路径可测。
+	// 默认阈值兜底：AutoConf<=0 用 0.75，0.9 应 active
+	if d := DecideActivity(f, false, GateConfig{}); d != DecisionCreateActive {
+		t.Fatalf("默认阈值 0.75，0.9 应 active: %v", d)
+	}
+}

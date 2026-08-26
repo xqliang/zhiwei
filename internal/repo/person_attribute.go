@@ -26,6 +26,9 @@ type PersonAttribute struct {
 	EpistemicType        string    `db:"epistemic_type" json:"epistemic_type"` // observed|inferred|predicted|suggested
 	Source               string    `db:"source" json:"source"`                 // manual|llm
 	Status               string    `db:"status" json:"status"`                 // active|pending|superseded|dismissed
+	// PreDismissStatus 归档级联 dismiss 前的状态（active|pending）；NULL=非级联（手动删/正常行）。
+	// 恢复人物时据此区分「级联删的（要恢复）」和「手动删的（保持 dismissed）」，见 RestoreArchivedExt。
+	PreDismissStatus *string `db:"pre_dismiss_status" json:"pre_dismiss_status,omitempty"`
 	SessionID            *ids.ID   `db:"session_id" json:"session_id,omitempty"`
 	MemoryID             *ids.ID   `db:"memory_id" json:"memory_id,omitempty"`
 	TranscriptSegmentIDs ids.List  `db:"transcript_segment_ids" json:"transcript_segment_ids"`
@@ -165,6 +168,40 @@ func (r *PersonAttributeRepo) SetStatusExt(ctx context.Context, ext ExecerContex
 
 func (r *PersonAttributeRepo) SetStatus(ctx context.Context, id ids.ID, status string) error {
 	return r.SetStatusExt(ctx, r.DB, id, status)
+}
+
+// DismissAllByPersonExt 人物删除级联（spec §13 F5）：把该人物在**属性平面**上所有活跃态
+// （active/pending）的行批量置 dismissed，返回受影响行数（RowsAffected）。供 ManualSetPersonStatus
+// 删除分支在事务内调用（ext 传 *sqlx.Tx，随删除事务一起提交/回滚）。
+//
+// 级联语义——只动 active 与 pending：superseded（已被新版本取代）与 dismissed（已放弃/已删除）
+// 都是**终态**，不再改动；否则会把「历史被取代行」也翻成 dismissed，既无意义又污染 supersedes
+// 链的历史可读性。故用 status IN ('active','pending') 精确圈定活跃态。
+//
+// 同时把行 dismiss 前的状态记入 pre_dismiss_status（active|pending），供 RestoreArchivedExt
+// 级联恢复——手动删除的行不走这里，pre_dismiss_status 保持 NULL，恢复时天然不被误恢复。
+func (r *PersonAttributeRepo) DismissAllByPersonExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
+	res, err := ext.ExecContext(ctx,
+		`UPDATE person_attribute SET pre_dismiss_status = status, status = 'dismissed' WHERE person_id = ? AND status IN ('active','pending')`,
+		personID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// RestoreArchivedExt 人物恢复级联：把删除时被级联置 dismissed 的行翻回**原状态**
+// （pre_dismiss_status 记录的 active|pending），并清空标记（防止残留导致下次恢复误判）。
+// 只动 status='dismissed' AND pre_dismiss_status IS NOT NULL 的行——手动删除的行
+// pre_dismiss_status 为 NULL，不受影响。供 ManualSetPersonStatus 恢复分支在事务内调用。
+func (r *PersonAttributeRepo) RestoreArchivedExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
+	res, err := ext.ExecContext(ctx,
+		`UPDATE person_attribute SET status = pre_dismiss_status, pre_dismiss_status = NULL WHERE person_id = ? AND status = 'dismissed' AND pre_dismiss_status IS NOT NULL`,
+		personID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // BumpConfidenceExt 佐证上调置信度，封顶 0.99（同 memory 的佐证模式）。

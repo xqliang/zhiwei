@@ -79,13 +79,13 @@ func TestPersonEventQueries(t *testing.T) {
 		t.Fatalf("CreateExt 零值兜底异常: %+v", e1)
 	}
 
-	// FindActiveByKeyExt：按（主体, 类型, 标题）命中 active 的 e1。
-	got, err := events.FindActiveByKeyExt(ctx, db, a.ID, "旅行", "去云南旅游")
+	// FindActiveByNormalizedTitleExt：按（主体, 类型, 归一化标题）命中 active 的 e1。
+	got, err := events.FindActiveByNormalizedTitleExt(ctx, db, a.ID, "旅行", "去云南旅游")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got == nil || got.ID != e1.ID {
-		t.Fatalf("FindActiveByKeyExt 未命中 e1: %+v", got)
+		t.Fatalf("FindActiveByNormalizedTitleExt 未命中 e1: %+v", got)
 	}
 	// related_person_ids 应能从 JSON 列原样还原为 [乙.ID]（验证 ids.List Scan）。
 	if len(got.RelatedPersonIDs) != 1 || got.RelatedPersonIDs[0] != b.ID {
@@ -102,13 +102,22 @@ func TestPersonEventQueries(t *testing.T) {
 	if got.Location == nil || *got.Location != "云南" {
 		t.Fatalf("location 回读异常: %v", got.Location)
 	}
-	// 未命中：标题不同应返回 nil。
-	miss, err := events.FindActiveByKeyExt(ctx, db, a.ID, "旅行", "去西藏旅游")
+	// P2a③ 归一化命中：字面近重复标题（空格 + 全角标点）归一化后与 e1 同值 → 命中 e1。
+	// 「去 云南 旅游！」→ 去标点空格 → "去云南旅游" == NormalizeTitle(e1.Title)。
+	normHit, err := events.FindActiveByNormalizedTitleExt(ctx, db, a.ID, "旅行", "去 云南 旅游！")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normHit == nil || normHit.ID != e1.ID {
+		t.Fatalf("FindActiveByNormalizedTitleExt 归一化近重复标题应命中 e1: %+v", normHit)
+	}
+	// 未命中：归一化后仍不同的标题应返回 nil。
+	miss, err := events.FindActiveByNormalizedTitleExt(ctx, db, a.ID, "旅行", "去西藏旅游")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if miss != nil {
-		t.Fatalf("FindActiveByKeyExt 应未命中(不同标题): %+v", miss)
+		t.Fatalf("FindActiveByNormalizedTitleExt 应未命中(归一化后仍不同): %+v", miss)
 	}
 
 	// Get 未命中路径：不存在的 id 应返回 (nil, nil)，不报 sql.ErrNoRows（调用方按 nil 判空）。

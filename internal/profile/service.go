@@ -30,8 +30,10 @@ type Service struct {
 	Persons       *repo.PersonRepo
 	Attributes    *repo.PersonAttributeRepo
 	Relationships *repo.PersonRelationshipRepo
-	Events        *repo.PersonEventRepo  // event 平面（P2 大事记）
-	Metrics       *repo.PersonMetricRepo // metric 平面（P3 时序个人指标）
+	Events        *repo.PersonEventRepo    // event 平面（P2 大事记）
+	Metrics       *repo.PersonMetricRepo   // metric 平面（P3 时序个人指标）
+	Cycles        *repo.PersonCycleRepo    // cycle 平面（P3 周期/日程，敏感）
+	Activities    *repo.PersonActivityRepo // activity 平面（P4 生活轨迹，测点流语义）
 	ChangeLogs    *repo.PersonChangeLogRepo
 
 	LLM           provider.LLMProvider // ExtractSession 用（Task 13）；手动 CRUD 不需要
@@ -94,8 +96,8 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 		return st, fmt.Errorf("读 session memories: %w", err)
 	}
 
-	// metric 平面 measured_at 缺省时的稳定回退：优先本 session 的 created_at（同 session
-	// 重跑得同一时间 → FindByPointExt 命中、幂等不重复插；评审 C1）。session 读不到才退
+	// metric/activity 平面 measured_at/started_at 缺省时的稳定回退：优先本 session 的 created_at
+	// （同 session 重跑得同一时间 → 自然键命中、幂等不重复插；评审 C1）。session 读不到才退
 	// s.now()（墙钟，仅测试/无 session 场景；生产 extract 恒有真 session）。
 	fallbackAt := s.now()
 	if s.Sessions != nil {
@@ -106,11 +108,41 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 		}
 	}
 
-	for _, f := range facts {
+	// F2（spec §13）：两趟落库——relationship 平面先行。
+	//
+	// 背景：subject=relation:TYPE 的事实（如「我老婆是儿科医生」的属性、「陪我老婆去产检」的
+	// 活动）靠 resolveSubject→personByOwnerRelation 查 owner 的该类型 active 关系对端来解析归属，
+	// 依赖同批里先落的关系行（personByOwnerRelation 走 tx、能读到本事务内未提交的关系）。但 LLM
+	// 输出顺序不保证关系事实排在依赖它的事实之前；单趟循环遇乱序（属性在前、关系在后）时，属性会
+	// 因当时查不到关系对端被判「主体解析不到」→ st.Skipped（非破坏，但白丢一次抽取机会）。
+	//
+	// 故拆两趟：第一趟只落 relationship 平面（建立 owner↔对端 关系行），第二趟落其余全部平面
+	// （此时同批关系行已在 tx 内可见，relation:TYPE 归属可解析）。两趟共用同一 tx、不改事务边界，
+	// 任一趟任一条失败仍整体回滚，失败语义不变。
+	applyOne := func(f Fact) error {
 		prov := Provenance{SessionID: sessionID, SegmentIDs: f.SegmentIDs, FallbackAt: fallbackAt}
 		if err := s.applyFact(ctx, tx, userID, f, prov, memRows, &st); err != nil {
-			return st, fmt.Errorf("应用事实(plane=%s key=%s relation=%s subject=%s): %w",
+			return fmt.Errorf("应用事实(plane=%s key=%s relation=%s subject=%s): %w",
 				f.Plane, f.AttrKey, f.RelationType, f.Subject.Kind, err)
+		}
+		return nil
+	}
+	// 第一趟：只落 relationship 平面（供第二趟解析 relation:TYPE 归属）。
+	for _, f := range facts {
+		if f.Plane != "relationship" {
+			continue
+		}
+		if err := applyOne(f); err != nil {
+			return st, err
+		}
+	}
+	// 第二趟：落其余所有平面（attribute/event/metric/cycle/activity）。
+	for _, f := range facts {
+		if f.Plane == "relationship" {
+			continue
+		}
+		if err := applyOne(f); err != nil {
+			return st, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -138,6 +170,12 @@ func (s *Service) applyFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fa
 	if f.Plane == "metric" {
 		return s.applyMetricFact(ctx, tx, userID, f, personID, memID, prov, st)
 	}
+	if f.Plane == "activity" {
+		return s.applyActivityFact(ctx, tx, userID, f, personID, memID, prov, st)
+	}
+	if f.Plane == "cycle" {
+		return s.applyCycleFact(ctx, tx, userID, f, personID, memID, prov, st)
+	}
 	if f.Plane == "relationship" {
 		return s.applyRelationshipFact(ctx, tx, userID, f, personID, memID, prov, st)
 	}
@@ -150,10 +188,23 @@ func (s *Service) applyAttributeFact(ctx context.Context, tx *sqlx.Tx, userID in
 	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
 
 	d := Def(f.AttrKey)
+
+	// F4 写入端校验/规范化（单点闸，见 validate.go）：gender=「男性」、smokes=「是」、
+	// birthday=「八月三号」这类脏值在此拦下。规范化后的值贯穿后续 existing/dedup 查询、
+	// DecideAttribute 闸门比较与 attrRow 落库——闸门比较链全程用同一规范值，避免「按原值比较、
+	// 按规范值落库」的口径漂移（f 是值传递的本地副本，改 f.Value 只影响本次调用链）。
+	// 校验失败 → Skipped 且不落库不进队列（宁少勿错：脏值不入库、不制造确认噪声；后续会话
+	// 若抽到规范值仍可正常落）。
+	norm, err := NormalizeAttrValue(d, f.Value)
+	if err != nil {
+		st.Skipped++
+		return nil
+	}
+	f.Value = norm
+
 	isList := d.Cardinality == CardinalityList
 
 	var existing *repo.PersonAttribute
-	var err error
 	if isList {
 		existing, err = s.Attributes.FindActiveByKeyValueExt(ctx, tx, personID, f.AttrKey, f.Value)
 	} else {
@@ -272,16 +323,23 @@ func (s *Service) applyRelationshipFact(ctx context.Context, tx *sqlx.Tx, userID
 // ---- 事件平面（P2 大事记）----
 
 // applyEventFact 事件落库：闸门（同键佐证/新键按置信度）+ 单事务 + 审计。
-// related 为可选增强（解析不到存空 RelatedPersonIDs，不阻断事件创建——见 fact.go 注释）。
+// related 为可选增强（P2a② 多人）：related_people 数组逐人解析、解析不到存空 RelatedPersonIDs，
+// 均不阻断事件创建；数组空时回退旧 Related 单人字段（见下方解析段与 fact.go Fact.EventRelated 注释）。
 //
-// 已知限制：自然键 / 同键查询（FindActiveByKeyExt、FindByNaturalKeyExt）对 title 是原始
-// 精确匹配（不归一化）——LLM 标题字面近重复（「去云南旅游」vs「云南旅游」）会各建一条 active
-// 而非互相佐证；与关系平面 org_name 不入自然键（见 applyRelationshipFact）同类，属 P2 已知
-// 取舍，后续如需再对 title 归一化后纳入键。
+// P2a③ 标题归一化去重：两个查询职责不同、刻意用不同的匹配口径——
+//   - dedup（FindByNaturalKeyExt）：**精确**标题的同 session 自然键，防同一 session 重跑重复建行。
+//     刻意不归一化——同 session 严格幂等只认精确重复；归一化留给跨 session 的字面近重复。
+//   - existing（FindActiveByNormalizedTitleExt）：**归一化**标题的当前 active 行匹配。
+//     使 LLM 跨 session 出的字面近重复标题（「去云南旅游」/「去云南旅游！」/「去 云南 旅游」）
+//     命中同一 active 事件走佐证（reaffirm），而非各建一条 active。镜像 attribute 平面
+//     「Go 侧 NormalizeTitle 比较 reaffirm」（gate.go DecideAttribute）的既有模式。
+//
+// 决策顺序由 DecideEvent 保证：dedupHit 优先 Skip（精确幂等）→ existing 非空 Reaffirm（归一化佐证）
+// → 否则按置信度新建。归一化匹配是精确匹配的超集，故只需一次归一化查询即两用（既判去重又判佐证）。
 func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
 	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
 
-	existing, err := s.Events.FindActiveByKeyExt(ctx, tx, personID, f.EventType, f.EventTitle)
+	existing, err := s.Events.FindActiveByNormalizedTitleExt(ctx, tx, personID, f.EventType, f.EventTitle)
 	if err != nil {
 		return err
 	}
@@ -305,9 +363,22 @@ func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 		if dec == DecisionCreateActive {
 			status = "active"
 		}
-		// related 解析（可选）：解析不到存空，不 skip 事件
+		// related 解析（可选，P2a② 多人）：related_people 数组逐个 resolveSubject（单人解析不到
+		// 跳过该人、不阻断事件——多人场景「宁少记一人不丢事件」）；数组为空时回退旧 Related 单人字段
+		// （prompt few-shot 与历史输出向后兼容）。整体解析不到就存空 RelatedPersonIDs，事件照常创建
+		//（见 applyEventFact 顶注释与 fact.go Fact.EventRelated）。
 		var relatedIDs ids.List
-		if f.Related.Kind != "" {
+		if len(f.EventRelated) > 0 {
+			for _, sub := range f.EventRelated {
+				// 逐人容错：resolveSubject 出错或解析到 0（无法归属）都跳过该人，继续下一个——
+				// 不 return err 中断整批（真正的 DB 故障会在后续 Events.CreateExt 处再次暴露并回滚，
+				// 不会因这里吞掉个别人的错误而落下半条脏数据）。
+				if rid, err := s.resolveSubject(ctx, tx, userID, sub, prov); err == nil && rid != 0 {
+					relatedIDs = append(relatedIDs, rid)
+				}
+			}
+		} else if f.Related.Kind != "" {
+			// 旧单人路径原样保留：单人解析的 DB 错误照旧上抛（这条不是多人容错语义）。
 			if rid, err := s.resolveSubject(ctx, tx, userID, f.Related, prov); err != nil {
 				return err
 			} else if rid != 0 {
@@ -338,7 +409,7 @@ func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 //   - 恒 create、无 reaffirm/conflict：命中完全同点（自然键含 measured_at + 值）则幂等跳过，
 //     否则按闸门建行（硬约束 3）；
 //   - measured_at 保留时刻精度（parseMetricAt，不复用抹平到当天零点的 parseEventAt），
-//     缺省时回退 s.now()，保证列 NOT NULL 非零（硬约束 4）；
+//     缺省时回退 prov.FallbackAt（本 session created_at），保证列 NOT NULL 非零（硬约束 4）；
 //   - confidence 存抽取确定性，value_num/value_text 才是主载荷；repo 不给 confidence 兜底，
 //     故建行必显式设 confidence（硬约束 5）。
 func (s *Service) applyMetricFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
@@ -387,6 +458,148 @@ func (s *Service) applyMetricFact(ctx context.Context, tx *sqlx.Tx, userID int64
 		st.Active++
 	} else {
 		st.Pending++
+	}
+	return nil
+}
+
+// ---- activity 平面（P4 生活轨迹）----
+
+// applyActivityFact 测点流语义（完全对齐 applyMetricFact）：每条活动独立一行，无当前值/无冲突/
+// 无佐证——纯置信闸门 + 自然键防重跑。started_at 解析链：parseEventAt(f.StartedAt) 成功用之，
+// 失败 → prov.FallbackAt（本 session created_at，对话发生时即活动时刻，比留 NULL 更符合时间线
+// 语义——时间线按时间排布不能没有锚点，同 metric 的 measured_at）。三个可空串（tool/location/
+// commute_mode）trim 后空串→nil（对齐 cycle label 的 <=> NULL 约定）；duration>0 才落，≤0 视为
+// LLM 未给→nil（同 cycle period/duration「未给不设」）。
+func (s *Service) applyActivityFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
+	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
+
+	// started_at 先定（自然键成分）：解析失败落 prov.FallbackAt。
+	startedAt := prov.FallbackAt
+	if t, ok := parseEventAt(f.StartedAt); ok {
+		startedAt = t
+	}
+	// activity 恒非空（ParseFacts 已强制），仍取指针——与三个可空串统一走 repo 的 <=> 匹配。
+	activity := strings.TrimSpace(f.ActivityText)
+	tool := trimToPtr(f.Tool)
+	location := trimToPtr(f.Location)
+	commuteMode := trimToPtr(f.CommuteMode)
+	// duration>0 才落，≤0 视为未给（不臆造 0 分钟）。同为自然键成分，nil 走 <=> 命中 IS NULL。
+	var durationMin *int
+	if f.DurationMin > 0 {
+		dm := f.DurationMin
+		durationMin = &dm
+	}
+	dedup, err := s.Activities.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID,
+		&activity, tool, location, commuteMode, startedAt, durationMin)
+	if err != nil {
+		return err
+	}
+
+	dec := DecideActivity(f, dedup != nil, s.Gate)
+	if dec == DecisionSkip {
+		st.Skipped++
+		return nil
+	}
+	// 测点无冲突无佐证，Active/Pending 两路径只差 status（对齐 applyMetricFact 模式）。
+	status := "pending"
+	if dec == DecisionCreateActive {
+		status = "active"
+	}
+	row := activityRow(userID, personID, f, tool, location, commuteMode, durationMin, startedAt, status, memID, prov)
+	if err := s.Activities.CreateExt(ctx, tx, row); err != nil {
+		return err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, createActivityLog(personID, row, memID, prov)); err != nil {
+		return err
+	}
+	if status == "active" {
+		st.Active++
+	} else {
+		st.Pending++
+	}
+	return nil
+}
+
+// ---- cycle 平面（P3 周期/日程，敏感）----
+
+// applyCycleFact 单值语义（同 person+type+label 至多一条 active）：冲突 pending+supersedes
+// 绝不静默覆盖（对齐 attribute 单值模式）。next_predicted_at = anchor_date + period_days
+// （两者齐才算；纯估算非医疗建议，spec §9，算在 cycleRow→applyCycleParams 内）。
+// label 统一 trim 后空串→nil（repo <=> NULL 匹配；混用空串与 NULL 会产生重复 active）。
+func (s *Service) applyCycleFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
+	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
+
+	var label *string
+	if l := strings.TrimSpace(f.CycleLabel); l != "" {
+		label = &l
+	}
+	existing, err := s.Cycles.FindActiveByKeyExt(ctx, tx, personID, f.CycleType, label)
+	if err != nil {
+		return err
+	}
+	dedup, err := s.Cycles.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, f.CycleType, label)
+	if err != nil {
+		return err
+	}
+
+	// 同参短路（对齐 attribute 的「同值→佐证」语义）：existing 的关键参数与新事实完全一致时
+	// 视为佐证（仅审计，不加行不进队列）——否则后续 session 每次重提同一周期（「还在吃降压药」，
+	// 参数没变）都会造一条冲突 pending，造成确认疲劳。放在 dedup 判断之后：同 session 重跑由
+	// 自然键 Skip 优先（纯幂等），仅跨 session 未命中自然键但同参时才走佐证（统计上归 Reaffirmed）。
+	if dedup == nil && existing != nil && cycleParamsEqual(existing, f) {
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: personID, EntityKind: "cycle", EntityID: &existing.ID,
+			ChangeType: "reaffirm", ChangedBy: "llm", NewValue: snap(existing.CycleType),
+			SessionID: &prov.SessionID, MemoryID: memID,
+			TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+			Note:                 strPtr("同参佐证：周期未变化"),
+		}); err != nil {
+			return err
+		}
+		st.Reaffirmed++
+		return nil
+	}
+
+	dec := DecideCycle(f, existing, dedup != nil, s.Gate)
+	switch dec {
+	case DecisionSkip:
+		st.Skipped++
+	case DecisionConflictPending:
+		// DecideCycle 仅在 existing != nil 时返回 ConflictPending，故此处 existing 必非空；
+		// 仍防御性判空（与 applyAttributeFact 冲突分支同构）。
+		var sup *ids.ID
+		note := ""
+		if existing != nil {
+			idv := existing.ID
+			sup = &idv
+			note = "conflict: 与现有周期记录冲突，待人工确认"
+			st.Conflicts++
+		}
+		row := cycleRow(userID, personID, f, label, "pending", sup, memID, prov)
+		if err := s.Cycles.CreateExt(ctx, tx, row); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, createCycleLog(personID, row, memID, prov, note)); err != nil {
+			return err
+		}
+		st.Pending++
+	default: // DecisionCreateActive / DecisionCreatePending
+		status := "pending"
+		if dec == DecisionCreateActive {
+			status = "active"
+		}
+		row := cycleRow(userID, personID, f, label, status, nil, memID, prov)
+		if err := s.Cycles.CreateExt(ctx, tx, row); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, createCycleLog(personID, row, memID, prov, "")); err != nil {
+			return err
+		}
+		if status == "active" {
+			st.Active++
+		} else {
+			st.Pending++
+		}
 	}
 	return nil
 }
@@ -548,6 +761,40 @@ func relRow(userID int64, personID ids.ID, f Fact, relatedID ids.ID, status stri
 	return row
 }
 
+// defaultImportance 事件类型的默认重要度（P2a①：importance 不再用 confidence 代偿）。
+//
+// 重要度衡量「这件事在人生里的分量」，与 confidence（抽取把握）**正交**：一句「今天中午随便吃了个
+// 火锅」可能被高置信抽出（confidence 高），但它的人生分量很低（importance 低）——旧代偿把二者混为
+// 一谈是错的（spec §13 P2a①）。类型分级依据 spec §4.4 事件语义：
+//   - 里程碑/成就（女儿出生/考上研究生/晋升）——人生大事 → 0.9
+//   - 挫折/负面/健康（被骗/离职/确诊/生病）——影响深远的负向事件 → 0.8
+//   - 旅行/聚会/会议——值得记的经历，分量中等 → 0.5
+//   - 其他（及未知类型）——日常琐事，给略低地板 → 0.4
+//
+// 兜底 0.4（而非 repo CreateExt 的 0.5）：未命中枚举的多是琐碎「其他」，比中性再低半档更贴语义；
+// 且本函数恒返回 >0，eventRow/ManualAddEvent 落库的 importance 必非零，repo 的 0→0.5 兜底不会触发。
+func defaultImportance(eventType string) float64 {
+	switch eventType {
+	case "里程碑", "成就":
+		return 0.9
+	case "挫折", "负面", "健康":
+		return 0.8
+	case "旅行", "聚会", "会议":
+		return 0.5
+	default: // 其他 / 未知类型
+		return 0.4
+	}
+}
+
+// eventImportanceOrDefault 事件重要度取值链（P2a①）：LLM/手动显式给值（>0）优先并 clamp 到 (0,1]，
+// 未给（<=0）走事件类型默认。LLM 路径（eventRow）与手动路径（ManualAddEvent）共用，保证取值口径单点。
+func eventImportanceOrDefault(explicit float64, eventType string) float64 {
+	if explicit > 0 {
+		return clamp01(explicit)
+	}
+	return defaultImportance(eventType)
+}
+
 func eventRow(userID int64, personID ids.ID, f Fact, relatedIDs ids.List, status string,
 	memID *ids.ID, prov Provenance) *repo.PersonEvent {
 	row := &repo.PersonEvent{
@@ -557,9 +804,9 @@ func eventRow(userID int64, personID ids.ID, f Fact, relatedIDs ids.List, status
 		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
 		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
 		RelatedPersonIDs:     relatedIDs,
-		// MVP：importance 用 confidence 代（手动路径 1.0/LLM 路径闸后值）——
-		// 独立重要度建模留后续，spec §13 已记
-		Importance: f.Confidence,
+		// P2a①：重要度独立建模，取值链 = LLM 显式值(>0) > 事件类型默认；不再用 confidence 代偿
+		//（重要度=人生分量，置信度=抽取把握，两者正交——见 defaultImportance）。
+		Importance: eventImportanceOrDefault(f.EventImportance, f.EventType),
 	}
 	if f.EventDescription != "" {
 		row.Description = strPtr(f.EventDescription)
@@ -605,6 +852,121 @@ func createMetricLog(personID ids.ID, row *repo.PersonMetric, memID *ids.ID, pro
 		SessionID: &prov.SessionID, MemoryID: memID,
 		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
 	}
+}
+
+// ---- cycle 平面行与审计构造 ----
+
+func cycleRow(userID int64, personID ids.ID, f Fact, label *string, status string,
+	sup *ids.ID, memID *ids.ID, prov Provenance) *repo.PersonCycle {
+	row := &repo.PersonCycle{
+		UserID: userID, PersonID: personID, CycleType: f.CycleType, Label: label,
+		Confidence: f.Confidence, EpistemicType: f.EpistemicType,
+		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs), SupersedesID: sup,
+	}
+	applyCycleParams(row, f.AnchorDate, f.PeriodDays, f.DurationDays, f.Dosage, f.FrequencyText)
+	return row
+}
+
+// applyCycleParams 把周期的可选参数（anchor/period/duration/dosage/frequency）填入 row，
+// 并据 anchor+period 计算 next_predicted_at。LLM 路径（cycleRow）与手动路径（ManualAddCycle）
+// 共用，保证「下次预测」算法与「LLM 未给的 0/空不落列」规则单点——散落两处易漂移。
+// anchor 走 parseEventAt（UTC 午夜归一，防 DSN 转 UTC 偏移，见其注释）；period/duration<=0
+// 视为 LLM 未给，不设列；next_predicted = anchor + period（两者齐才算，估算非医疗建议 spec §9）。
+func applyCycleParams(row *repo.PersonCycle, anchorDate string, periodDays, durationDays int, dosage, frequency string) {
+	if t, ok := parseEventAt(anchorDate); ok {
+		row.AnchorDate = &t
+	}
+	if periodDays > 0 {
+		pd := periodDays
+		row.PeriodDays = &pd
+	}
+	if durationDays > 0 {
+		dd := durationDays
+		row.DurationDays = &dd
+	}
+	if d := strings.TrimSpace(dosage); d != "" {
+		row.Dosage = &d
+	}
+	if fr := strings.TrimSpace(frequency); fr != "" {
+		row.FrequencyText = &fr
+	}
+	if row.AnchorDate != nil && row.PeriodDays != nil {
+		nxt := row.AnchorDate.AddDate(0, 0, *row.PeriodDays)
+		row.NextPredictedAt = &nxt
+	}
+}
+
+// cycleParamsEqual 判断已存在 active 周期的关键参数与新事实是否一致。
+// 缺省兼容：新事实未给的参数（空串/0）不主张变化，与现值任意值兼容——
+// 否则「详细记录后裸重提」（fact 只有 type+label）会被误判为变化而进冲突队列。
+// 仅当新事实显式给出参数且与现值不同才视为变化。
+func cycleParamsEqual(e *repo.PersonCycle, f Fact) bool {
+	if fa := strings.TrimSpace(f.AnchorDate); fa != "" {
+		if e.AnchorDate == nil {
+			return false
+		}
+		if t, ok := parseEventAt(fa); !ok || !t.Equal(*e.AnchorDate) {
+			return false
+		}
+	}
+	if f.PeriodDays > 0 && derefInt(e.PeriodDays) != f.PeriodDays {
+		return false
+	}
+	if f.DurationDays > 0 && derefInt(e.DurationDays) != f.DurationDays {
+		return false
+	}
+	if d := strings.TrimSpace(f.Dosage); d != "" && derefStr(e.Dosage) != d {
+		return false
+	}
+	if fr := strings.TrimSpace(f.FrequencyText); fr != "" && derefStr(e.FrequencyText) != fr {
+		return false
+	}
+	return true
+}
+
+// ---- activity 平面行与审计构造（P4 生活轨迹，测点流语义，对齐 createMetricLog）----
+
+// activityRow 构造一条 person_activity 行。tool/location/commuteMode/durationMin 由调用方
+// （applyActivityFact / ManualAddActivity）trim/判空后传入（空→nil，走 repo 的 <=> NULL 匹配），
+// 此处只负责组装——单点 trim、单点判空，避免散落两处漂移。activity 平面无 SupersedesID
+// （测点流无版本取代语义，见 repo.PersonActivity 顶部说明），故行里不设该字段。
+func activityRow(userID int64, personID ids.ID, f Fact, tool, location, commuteMode *string,
+	durationMin *int, startedAt time.Time, status string, memID *ids.ID, prov Provenance) *repo.PersonActivity {
+	return &repo.PersonActivity{
+		UserID: userID, PersonID: personID,
+		Activity:    strings.TrimSpace(f.ActivityText),
+		Tool:        tool,
+		Location:    location,
+		CommuteMode: commuteMode,
+		StartedAt:   startedAt,
+		DurationMin: durationMin,
+		Confidence:  f.Confidence, EpistemicType: f.EpistemicType,
+		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+}
+
+func createActivityLog(personID ids.ID, row *repo.PersonActivity, memID *ids.ID, prov Provenance) *repo.PersonChangeLog {
+	return &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "activity", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "llm", NewValue: snap(row.Activity),
+		Confidence: fp(row.Confidence), SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+}
+
+func createCycleLog(personID ids.ID, row *repo.PersonCycle, memID *ids.ID, prov Provenance, note string) *repo.PersonChangeLog {
+	l := &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "cycle", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "llm", NewValue: snap(row.CycleType),
+		Confidence: fp(row.Confidence), SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+	if note != "" {
+		l.Note = strPtr(note)
+	}
+	return l
 }
 
 func createAttrLog(personID ids.ID, row *repo.PersonAttribute, memID *ids.ID, prov Provenance, note string) *repo.PersonChangeLog {
@@ -689,7 +1051,36 @@ func snap(v any) *string {
 
 func strPtr(s string) *string { return &s }
 
+// trimToPtr trim 后空串→nil，非空→指向 trim 结果的指针。activity 三个可空串列
+// （tool/location/commute_mode）的 <=> NULL 约定专用——空串与 NULL 混用会破坏自然键幂等，
+// 故统一「空即 NULL」（对齐 cycle label 的 trim→nil 处理）。手动路径 ManualAddActivity 也复用。
+func trimToPtr(s string) *string {
+	if t := strings.TrimSpace(s); t != "" {
+		return &t
+	}
+	return nil
+}
+
 func fp(f float64) *float64 { return &f }
+
+// derefInt / derefStr 解指针取值，nil → 零值（周期同参比较用，见 cycleParamsEqual）。
+func derefInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// formatMetricValue 数值型测点的规范字符串形态——value_num 与 value_text 的唯一格式化点
+// （双存约定：自然键去重按 value_text 字符串比较，两列必须同源，散落 fmt 会漂移破坏幂等）。
+func formatMetricValue(f float64) string { return strconv.FormatFloat(f, 'g', -1, 64) }
 
 // idPtr 0 → nil（SQL NULL 安全传参）。
 func idPtr(id ids.ID) *ids.ID {

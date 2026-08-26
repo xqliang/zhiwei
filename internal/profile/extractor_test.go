@@ -157,6 +157,170 @@ func TestExtractorEventNoCollapse(t *testing.T) {
 	}
 }
 
+// TestExtractorEventNormalizedTitleCollapse 是 P2a③ 在批内去重侧的护栏：同一窗口内同主体、
+// 同 event_type 的两条事实，标题仅差标点/空格/大小写——factKey 用 repo.NormalizeTitle 归一化后
+// 判别键相同 → 塌缩成 1 条（保高置信）。须与 DB 自然键同步归一化：否则近重复标题在批内不塌缩、
+// 到 Service 又被归一化 reaffirm 吞掉，Extract 统计口径与实际落库漂移（P3a 教训）。
+func TestExtractorEventNormalizedTitleCollapse(t *testing.T) {
+	blocks := []memory.Block{
+		{SpeakerLabel: "我", Text: "上个月去云南旅游，去云南旅游！", SegmentIDs: []ids.ID{511}},
+	}
+	// 两条 self event，同类型(旅行)、标题仅差全角标点/空格 → 归一化后同键：应塌缩成 1，高置信(.9)胜出。
+	resp := `{"facts":[
+		{"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去云南旅游",
+		 "confidence":0.6,"epistemic_type":"observed","block_index":1},
+		{"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去 云南 旅游！",
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1}
+	]}`
+	ex := &Extractor{LLM: &fakeLLM{resps: []string{resp}}, Model: "m", Prompt: "s", Window: 10}
+	facts, err := ex.Extract(context.Background(), blocks, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("近重复标题(仅差标点/空格)归一化后应塌缩成 1 条: %+v", facts)
+	}
+	// 塌缩后保留高置信那条（对齐 TestExtractorDedupAcrossWindows 的「高置信胜出」语义）
+	if facts[0].Confidence != 0.9 {
+		t.Fatalf("塌缩应保留高置信(.9)那条: %v", facts[0].Confidence)
+	}
+}
+
+// TestExtractorMetricNoCollapse 是 metric 平面 factKey 判别的回归测试（对齐
+// TestExtractorEventNoCollapse 先例）：同一窗口内多条 self metric——主体全是 self、
+// attr/relation/event 字段全空，仅靠 metric_key/metric_value/measured_at 区分。
+// metric 是测点流（同键多采样各自成行），三段判别缺一都会塌缩掉独立测点。
+func TestExtractorMetricNoCollapse(t *testing.T) {
+	blocks := []memory.Block{
+		{SpeakerLabel: "我", Text: "最近有点焦虑，今天称了 72.5 公斤，昨天 73", SegmentIDs: []ids.ID{601}},
+	}
+	// 四条 self metric，逐位盯住 metric_key / value / measured_at 三个判别位：
+	//   emotion·焦虑 vs weight·72.5      —— metric_key 不同
+	//   weight·72.5  vs weight·73.0      —— 同 key 不同 value（钉 value_num 判别位）
+	//   weight·72.5·"" vs weight·72.5·8-20 —— 同 key 同 value 不同 measured_at（钉时间判别位：同值两次采样不塌缩）
+	resp := `{"facts":[
+		{"plane":"metric","subject":{"kind":"self"},"metric_key":"emotion","value_num":-0.6,"value_text":"焦虑",
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"metric","subject":{"kind":"self"},"metric_key":"weight","value_num":72.5,
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"metric","subject":{"kind":"self"},"metric_key":"weight","value_num":73.0,
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"metric","subject":{"kind":"self"},"metric_key":"weight","value_num":72.5,
+		 "measured_at":"2026-08-20","confidence":0.9,"epistemic_type":"observed","block_index":1}
+	]}`
+	ex := &Extractor{LLM: &fakeLLM{resps: []string{resp}}, Model: "m", Prompt: "s", Window: 10}
+	facts, err := ex.Extract(context.Background(), blocks, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 4 {
+		t.Fatalf("metric 判别(key/value/measured_at)不同不应塌缩，应 4 条: %+v", facts)
+	}
+	if facts[0].MetricKey != "emotion" || facts[0].MetricValueText != "焦虑" {
+		t.Fatalf("metric0 错误: %+v", facts[0])
+	}
+	// 同 key 不同 value 两条并存——证明 value_num 参与判别键
+	if facts[1].ValueNum == nil || *facts[1].ValueNum != 72.5 || facts[2].ValueNum == nil || *facts[2].ValueNum != 73.0 {
+		t.Fatalf("同 key 不同 value 应各留: %v / %v", facts[1].ValueNum, facts[2].ValueNum)
+	}
+	// 同 key 同 value 不同 measured_at 两条并存——证明 measured_at 参与判别键（测点流：同值两次采样不塌缩）
+	if facts[3].MetricKey != "weight" || facts[3].ValueNum == nil || *facts[3].ValueNum != 72.5 || facts[3].MeasuredAt != "2026-08-20" {
+		t.Fatalf("metric3(同值不同时刻)错误: %+v", facts[3])
+	}
+}
+
+// TestExtractorCycleNoCollapse 是 cycle 平面 factKey 判别的回归测试，兼作「AnchorDate
+// 不入键」修复的护栏。cycle 键须**精确镜像 DB 自然键 (session,person,cycle_type,label)**——
+// 只含 CycleType+CycleLabel、**不含 AnchorDate**：否则同 (type,label) 不同 anchor 的两条
+// 在此不塌缩，却在 Service 单事务里被 DB 自然键 dedup 成「先到的赢」而非「高置信赢」。
+func TestExtractorCycleNoCollapse(t *testing.T) {
+	blocks := []memory.Block{
+		{SpeakerLabel: "我", Text: "我在吃降压药和打胰岛素，还有生理期", SegmentIDs: []ids.ID{701}},
+	}
+	// 四条 self cycle：
+	//   medication·降压药 vs medication·胰岛素     —— 同 type 不同 label（钉 CycleLabel 判别位）
+	//   medication·降压药(anchor 8-01,conf .9) vs medication·降压药(anchor 9-01,conf .6)
+	//                                              —— 同 type+label 仅 anchor 不同：**应塌缩**，高置信(.9,8-01)胜出（钉 anchor 不入键）
+	//   menstrual(空 label)                        —— 空 label 合法且自成一键（NULL label 视作独立键）
+	resp := `{"facts":[
+		{"plane":"cycle","subject":{"kind":"self"},"cycle_type":"medication","cycle_label":"降压药",
+		 "anchor_date":"2026-08-01","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"cycle","subject":{"kind":"self"},"cycle_type":"medication","cycle_label":"胰岛素",
+		 "anchor_date":"2026-07-01","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"cycle","subject":{"kind":"self"},"cycle_type":"medication","cycle_label":"降压药",
+		 "anchor_date":"2026-09-01","confidence":0.6,"epistemic_type":"observed","block_index":1},
+		{"plane":"cycle","subject":{"kind":"self"},"cycle_type":"menstrual",
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1}
+	]}`
+	ex := &Extractor{LLM: &fakeLLM{resps: []string{resp}}, Model: "m", Prompt: "s", Window: 10}
+	facts, err := ex.Extract(context.Background(), blocks, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 降压药两条(仅 anchor 不同)塌缩成 1，加胰岛素、menstrual → 共 3 条
+	if len(facts) != 3 {
+		t.Fatalf("cycle 应 3 条(降压药同 type+label 塌缩、胰岛素/menstrual 各留): %+v", facts)
+	}
+	// 存活的降压药须是高置信那条(conf .9, anchor 8-01)——证明 anchor 不入键且高置信胜出，
+	// 而非「先到的赢」的相反错误。若 anchor 误入键，这里会是 4 条而非 3 条。
+	if facts[0].CycleLabel != "降压药" || facts[0].Confidence != 0.9 || facts[0].AnchorDate != "2026-08-01" {
+		t.Fatalf("降压药应留高置信那条(conf .9/anchor 8-01): %+v", facts[0])
+	}
+	// 同 type(medication)不同 label 并存——证明 CycleLabel 参与判别键
+	if facts[1].CycleType != "medication" || facts[1].CycleLabel != "胰岛素" {
+		t.Fatalf("胰岛素应独立保留: %+v", facts[1])
+	}
+	// 空 label 的 menstrual 自成一键并保留
+	if facts[2].CycleType != "menstrual" || facts[2].CycleLabel != "" {
+		t.Fatalf("menstrual(空 label)应独立保留: %+v", facts[2])
+	}
+}
+
+// TestExtractorActivityNoCollapse 是 activity 平面 factKey 判别的回归测试（对齐 metric 先例）：
+// 同一窗口内多条 self activity——主体全是 self，仅靠 activity/tool/location/commute_mode/
+// started_at/duration_min 六段判别。activity 是测点流（同活动不同时刻各自成行），关键盯住
+// activity（做什么）与 started_at（何时）两个判别位；全键相同才塌缩（保高置信）。
+func TestExtractorActivityNoCollapse(t *testing.T) {
+	blocks := []memory.Block{
+		{SpeakerLabel: "我", Text: "今早坐地铁通勤，上午写代码，昨天也坐地铁通勤", SegmentIDs: []ids.ID{801}},
+	}
+	// 四条 self activity，逐位盯住判别键：
+	//   通勤·地铁·8-20 vs 写代码·电脑·8-20     —— activity 不同（钉 activity 判别位）
+	//   通勤·地铁·8-20 vs 通勤·地铁·8-19       —— 同活动不同 started_at（钉时间判别位：两次通勤不塌缩）
+	//   通勤·地铁·8-20(conf .9) vs 通勤·地铁·8-20(conf .6) —— 全键相同：**应塌缩**，高置信(.9)胜出
+	resp := `{"facts":[
+		{"plane":"activity","subject":{"kind":"self"},"activity":"通勤","commute_mode":"地铁",
+		 "started_at":"2026-08-20","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"activity","subject":{"kind":"self"},"activity":"写代码","tool":"电脑",
+		 "started_at":"2026-08-20","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"activity","subject":{"kind":"self"},"activity":"通勤","commute_mode":"地铁",
+		 "started_at":"2026-08-19","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"activity","subject":{"kind":"self"},"activity":"通勤","commute_mode":"地铁",
+		 "started_at":"2026-08-20","confidence":0.6,"epistemic_type":"observed","block_index":1}
+	]}`
+	ex := &Extractor{LLM: &fakeLLM{resps: []string{resp}}, Model: "m", Prompt: "s", Window: 10}
+	facts, err := ex.Extract(context.Background(), blocks, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 通勤·8-20 两条(仅 conf 不同)塌缩成 1，加写代码、通勤·8-19 → 共 3 条
+	if len(facts) != 3 {
+		t.Fatalf("activity 应 3 条(通勤 8-20 塌缩、写代码/通勤 8-19 各留): %+v", facts)
+	}
+	// 存活的通勤·8-20 须是高置信那条(conf .9)——证明全键相同时高置信胜出（非「先到的赢」）
+	if facts[0].ActivityText != "通勤" || facts[0].StartedAt != "2026-08-20" || facts[0].Confidence != 0.9 {
+		t.Fatalf("通勤 8-20 应留高置信那条(conf .9): %+v", facts[0])
+	}
+	// 不同 activity 并存——证明 activity 参与判别键
+	if facts[1].ActivityText != "写代码" {
+		t.Fatalf("写代码应独立保留: %+v", facts[1])
+	}
+	// 同 activity 同 commute 不同 started_at 并存——证明 started_at 参与判别键（测点流：两次通勤不塌缩）
+	if facts[2].ActivityText != "通勤" || facts[2].StartedAt != "2026-08-19" {
+		t.Fatalf("通勤 8-19 应独立保留(started_at 判别): %+v", facts[2])
+	}
+}
+
 // TestExtractorInvalidBlockIndex 覆盖 factProvenance 越界兜底：block_index=0 或 >len
 // 时用整个窗口的 segment 并集回填（对照 memory 包同名用例）。
 func TestExtractorInvalidBlockIndex(t *testing.T) {

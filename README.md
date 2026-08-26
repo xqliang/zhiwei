@@ -108,7 +108,11 @@ DELETE           /api/persons/{id}/relationships/{rid}
 GET              /api/persons/{id}/history           修改历史（?entity_kind=&attr_key= 过滤）
 GET/POST         /api/persons/{id}/events             大事记列表（?status= 过滤）/ 手动新增
 DELETE           /api/persons/{id}/events/{eid}       删除事件（软删 dismissed）
-GET              /api/profile/pending                确认队列（属性/关系/人物/大事记 pending 并集）
+GET/POST         /api/persons/{id}/metrics            时序指标（?metric_key=&from=&to= 区间，升序）/ 手动新增
+DELETE           /api/persons/{id}/metrics/{mid}      删除测点
+GET/POST         /api/persons/{id}/cycles             周期列表（含免责 note）/ 手动新增（生理期/用药等，敏感）
+DELETE           /api/persons/{id}/cycles/{cid}       删除周期
+GET              /api/profile/pending                确认队列（属性/关系/人物/大事记/指标/周期 pending 并集）
 POST             /api/profile/pending/{kind}/{id}/confirm|dismiss   确认/放弃
 POST             /api/profile/extract                画像抽取/回填（可带 session_id；默认最近 50 个 completed）
 ```

@@ -18,10 +18,11 @@ type Subject struct {
 	Relation string `json:"relation"` // kind=relation 时的关系类型（如 配偶）
 }
 
-// Fact 是 LLM 输出的一条画像事实（闸门前后通用载体）。四个平面：
-// attribute（属性）/ relationship（关系）/ event（大事记）/ metric（时序个人指标）。
+// Fact 是 LLM 输出的一条画像事实（闸门前后通用载体）。六个平面：
+// attribute（属性）/ relationship（关系）/ event（大事记）/ metric（时序个人指标）/
+// cycle（周期/日程，敏感）/ activity（生活轨迹）。
 type Fact struct {
-	Plane   string  // attribute|relationship|event|metric
+	Plane   string  // attribute|relationship|event|metric|cycle|activity
 	Subject Subject // 信息归属的人物指代
 
 	// ---- attribute 平面 ----
@@ -43,6 +44,14 @@ type Fact struct {
 	OccurredAt       string // 原始字符串（YYYY-MM-DD / YYYY-MM / RFC3339），时间解析放 service 层（parseEventAt）
 	EndAt            string
 	EventLocation    string
+	// EventImportance 事件的人生分量 0~1（P2a①：与 confidence 正交，见 service.go defaultImportance）。
+	// LLM 可显式给值；0=未给（service 层走事件类型默认，不再用 confidence 代偿）。
+	EventImportance float64
+	// EventRelated 同场/同行人物（P2a②：多人事件）。每项是 Subject 指代，service 层 applyEventFact
+	// 逐个 resolveSubject 落 RelatedPersonIDs 数组。json 标签用**新键 related_people**（见 rawFact），
+	// 刻意不复用 related——related 是 relationship 平面「关系对端」与 event 单人「主人物」的共用字段；
+	// EventRelated 空时 service 回退旧 Related 单人（prompt few-shot 与历史输出向后兼容）。
+	EventRelated []Subject
 
 	// ---- metric 平面（P3 时序个人指标）----
 	// 注意：value_text 字段名刻意用 MetricValueText，与 attribute 平面的 Value 区分
@@ -53,6 +62,23 @@ type Fact struct {
 	Unit            string   // 单位（可空；空时落库回退 MetricDefOf(key).Unit）
 	MeasuredAt      string   // 原始测点时间字符串（RFC3339/"2006-01-02 15:04"/"2006-01-02"），解析放 service 层（parseMetricAt，保留时刻）
 
+	// ---- cycle 平面（周期/日程，敏感）----
+	CycleType     string // menstrual|medication|injection|followup
+	CycleLabel    string
+	AnchorDate    string // YYYY-MM-DD 原始串
+	PeriodDays    int
+	DurationDays  int
+	Dosage        string
+	FrequencyText string // 频次（'每日两次'）；rawFact 的 json 标签是 frequency（非 frequency_text），对齐 prompt 契约
+
+	// ---- activity 平面（生活轨迹）----
+	ActivityText string // 做什么（开会/写代码/打球…）；rawFact 的 json 标签是 activity（同 FrequencyText/frequency 桥接先例）
+	Tool         string // 什么工具（手机/电脑/健身房…）
+	Location     string // 自由文本；由 rawFact 的 json:"location" 填充（与 EventLocation 同源——一条 fact 只有一个 plane，event/activity 互斥不污染）
+	CommuteMode  string // 通勤方式中文短串（地铁/开车/步行…；不做枚举强校验）
+	StartedAt    string // 原始日期串（YYYY-MM-DD/RFC3339），解析在 service 层 parseEventAt
+	DurationMin  int    // 持续分钟
+
 	// ---- 通用 ----
 	Confidence    float64
 	EpistemicType string // observed|inferred|predicted|suggested
@@ -62,7 +88,7 @@ type Fact struct {
 	SegmentIDs []ids.ID // provenance：来源块的 segment id
 }
 
-var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true, "metric": true}
+var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true, "metric": true, "cycle": true, "activity": true}
 
 // validSubjectKinds 是人物指代 Subject.Kind（也用于 Related.Kind）的合法取值。
 // 非法或缺失的指代无法归属到具体人物，直接丢弃该条（宁少勿错）。
@@ -85,6 +111,11 @@ var validDirections = map[string]bool{"upstream": true, "downstream": true, "pee
 var ValidEventTypes = map[string]bool{
 	"里程碑": true, "聚会": true, "会议": true, "旅行": true, "健康": true,
 	"成就": true, "挫折": true, "负面": true, "其他": true,
+}
+
+// ValidCycleTypes 周期类型枚举（spec §4.6：敏感周期/日程的 4 种）。
+var ValidCycleTypes = map[string]bool{
+	"menstrual": true, "medication": true, "injection": true, "followup": true,
 }
 
 type rawSubject struct {
@@ -110,12 +141,29 @@ type rawFact struct {
 	OccurredAt       string     `json:"occurred_at"`
 	EndAt            string     `json:"end_at"`
 	EventLocation    string     `json:"location"`
+	EventImportance  float64      `json:"importance"`     // P2a①：事件人生分量 0~1；无同层标签冲突（confidence 各自独立）
+	EventRelated     []rawSubject `json:"related_people"` // P2a②：多人事件同场人物数组；新键 related_people，不复用 related
 	// ---- metric 平面 ----（value_text 为 metric 专用 json key，与 attribute 的 value、event 的 title 不冲突）
 	MetricKey       string   `json:"metric_key"`
 	ValueNum        *float64 `json:"value_num"`
 	MetricValueText string   `json:"value_text"`
 	Unit            string   `json:"unit"`
 	MeasuredAt      string   `json:"measured_at"`
+	// ---- cycle 平面 ----
+	CycleType     string `json:"cycle_type"`
+	CycleLabel    string `json:"cycle_label"`
+	AnchorDate    string `json:"anchor_date"`
+	PeriodDays    int    `json:"period_days"`
+	DurationDays  int    `json:"duration_days"`
+	Dosage        string `json:"dosage"`
+	FrequencyText string `json:"frequency"` // Go 字段 FrequencyText，json 标签 frequency——对齐 prompt v3 契约
+	// ---- activity 平面 ----（Location 复用上面 EventLocation 的 json:"location"——同一 json 键不能有两个 Go 字段；
+	// 一条 fact 非 event 即 activity，ParseFacts 里 activity 的 Location 从 rf.EventLocation 取值即可，故此处不单列）
+	ActivityText string `json:"activity"` // Go 字段 ActivityText，json 标签 activity
+	Tool         string `json:"tool"`
+	CommuteMode  string `json:"commute_mode"`
+	StartedAt    string `json:"started_at"`
+	DurationMin  int    `json:"duration_min"`
 
 	Confidence    float64 `json:"confidence"`
 	EpistemicType string  `json:"epistemic_type"`
@@ -158,11 +206,26 @@ func ParseFacts(raw string) ([]Fact, error) {
 			OccurredAt:       strings.TrimSpace(rf.OccurredAt),
 			EndAt:            strings.TrimSpace(rf.EndAt),
 			EventLocation:    strings.TrimSpace(rf.EventLocation),
+			EventImportance:  clamp01(rf.EventImportance),   // P2a①：0=未给（service 走类型默认）
+			EventRelated:     trimSubjects(rf.EventRelated), // P2a②：多人同场人物逐个 trim（空→nil，service 回退旧 Related）
 			MetricKey:        strings.TrimSpace(rf.MetricKey),
 			ValueNum:         rf.ValueNum,
 			MetricValueText:  strings.TrimSpace(rf.MetricValueText),
 			Unit:             strings.TrimSpace(rf.Unit),
 			MeasuredAt:       strings.TrimSpace(rf.MeasuredAt),
+			CycleType:        strings.TrimSpace(rf.CycleType),
+			CycleLabel:       strings.TrimSpace(rf.CycleLabel),
+			AnchorDate:       strings.TrimSpace(rf.AnchorDate),
+			PeriodDays:       rf.PeriodDays,   // int，不 trim
+			DurationDays:     rf.DurationDays, // int，不 trim
+			Dosage:           strings.TrimSpace(rf.Dosage),
+			FrequencyText:    strings.TrimSpace(rf.FrequencyText),
+			ActivityText:     strings.TrimSpace(rf.ActivityText),
+			Tool:             strings.TrimSpace(rf.Tool),
+			Location:         strings.TrimSpace(rf.EventLocation), // activity 复用 json:"location"（见 rawFact 注释）
+			CommuteMode:      strings.TrimSpace(rf.CommuteMode),
+			StartedAt:        strings.TrimSpace(rf.StartedAt),
+			DurationMin:      rf.DurationMin, // int，不 trim
 			Confidence:       clamp01(rf.Confidence),
 			EpistemicType:    strings.TrimSpace(rf.EpistemicType),
 			BlockIndex:       rf.BlockIndex,
@@ -209,6 +272,17 @@ func ParseFacts(raw string) ([]Fact, error) {
 			} else if f.MetricValueText == "" {
 				continue
 			}
+		case "cycle":
+			// 周期记录：仅强制合法 cycle_type；label/anchor 可空（如纯随访、生理期无药名）。
+			if !ValidCycleTypes[f.CycleType] {
+				continue
+			}
+		case "activity":
+			// 活动流：仅强制 activity 非空（started_at 可空，service 落 session 时间；tool 等
+			// 全可空——「下午去游泳了」没说工具地点也是有效活动）。
+			if f.ActivityText == "" {
+				continue
+			}
 		}
 		facts = append(facts, f)
 	}
@@ -234,4 +308,18 @@ func trimSubject(s rawSubject) Subject {
 		Name:     strings.TrimSpace(s.Name),
 		Relation: strings.TrimSpace(s.Relation),
 	}
+}
+
+// trimSubjects 对一组 rawSubject 逐个 trimSubject（P2a② event related_people 多人数组用）。
+// 空/nil 输入返回 nil（不分配空切片）——service 层据 len(EventRelated)==0 回退旧 Related 单人字段，
+// nil 与空切片在此语义等价。每项与 trimSubject 同处理（Name 归一化后才能匹配同一人物）。
+func trimSubjects(ss []rawSubject) []Subject {
+	if len(ss) == 0 {
+		return nil
+	}
+	out := make([]Subject, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, trimSubject(s))
+	}
+	return out
 }

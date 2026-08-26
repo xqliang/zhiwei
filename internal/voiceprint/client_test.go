@@ -15,7 +15,7 @@ import (
 // 而 ids.New() 依赖 ids.Init() 先设置好 snowflake 节点，否则 node 为 nil 会 panic。
 // 与 internal/pipeline、internal/repo 的测试初始化保持一致。
 func TestMain(m *testing.M) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	os.Exit(m.Run())
 }
 

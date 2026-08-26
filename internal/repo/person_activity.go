@@ -1,0 +1,249 @@
+package repo
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"zhiwei/internal/ids"
+)
+
+// PersonActivity 是生活轨迹平面（spec §4.7）：人物的「活动流」——每条记录 = 某个时间开始、
+// （可选）持续多久的一次日常活动（做什么/用什么工具/在哪/怎么通勤）。
+// 与其他平面的区别：attribute 记「长期属性」、event 记「某次重大事件」、metric 记「某时刻的一个读数」、
+// activity 记「某段时间在做的一件事」。同一个人每天会产生很多条活动（早上通勤、上午写代码、晚上打球…）。
+//
+// 测点流语义（**完全对齐 person_metric**）：activity 没有「当前值」概念，也没有「新版本取代旧版本」
+// 的语义——改口就是记一条新活动、或直接 dismiss 掉旧条，故本表 **没有 supersedes_id 列**，
+// 本 struct 也不含该字段（与 metric 一致，与 cycle/attribute/relationship/event 相反）。
+type PersonActivity struct {
+	ID       ids.ID `db:"id" json:"id"`
+	UserID   int64  `db:"user_id" json:"user_id"`
+	PersonID ids.ID `db:"person_id" json:"person_id"`
+	Activity string `db:"activity" json:"activity"` // 做什么（开会/写代码/打球…），NOT NULL
+	// 以下三个可空串：LLM/用户没说就为 NULL（「下午去游泳了」没提工具地点也是有效活动）。
+	// 它们都是自然键成分，去重时按 `<=>` 精确区分 NULL 与非 NULL（见 FindByNaturalKeyExt）。
+	Tool        *string `db:"tool" json:"tool,omitempty"`                 // 什么工具/载体（手机/电脑/健身房/汽车…）
+	Location    *string `db:"location" json:"location,omitempty"`         // 地点自由文本
+	CommuteMode *string `db:"commute_mode" json:"commute_mode,omitempty"` // 通勤方式中文短串（地铁/开车/步行…；不做枚举强校验）
+	// StartedAt 活动开始时间（NOT NULL）：LLM 未给具体时间时由 Service 落 session 时间。
+	// 与横切字段的 CreatedAt 不同——StartedAt 是「活动发生的时刻」，用于时间线排序/区间查询。
+	StartedAt time.Time `db:"started_at" json:"started_at"`
+	// DurationMin 持续分钟数，可空（未说时长的活动为 NULL，不臆造 0）；同为自然键成分，`<=>` 匹配。
+	DurationMin *int `db:"duration_min" json:"duration_min,omitempty"`
+	// ---- 横切字段（与 attribute/relationship/event/metric 平面一致，spec §3）----
+	// 注意：无 SupersedesID（见 struct 顶部说明——测点流无版本取代语义）。
+	Confidence           float64   `db:"confidence" json:"confidence"`
+	EpistemicType        string    `db:"epistemic_type" json:"epistemic_type"` // observed|inferred|predicted|suggested
+	Source               string    `db:"source" json:"source"`                 // manual|llm
+	Status               string    `db:"status" json:"status"`                 // active|pending|superseded|dismissed
+	// PreDismissStatus 删除级联 dismiss 前的状态（active|pending）；NULL=非级联（手动删/正常行）。
+	// 恢复人物时据此区分「级联删的（要恢复）」和「手动删的（保持 dismissed）」，见 RestoreArchivedExt。
+	PreDismissStatus     *string   `db:"pre_dismiss_status" json:"pre_dismiss_status,omitempty"`
+	SessionID            *ids.ID   `db:"session_id" json:"session_id,omitempty"`
+	MemoryID             *ids.ID   `db:"memory_id" json:"memory_id,omitempty"`
+	TranscriptSegmentIDs ids.List  `db:"transcript_segment_ids" json:"transcript_segment_ids"`
+	Version              int       `db:"version" json:"version"`
+	CreatedAt            time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt            time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type PersonActivityRepo struct{ DB *sqlx.DB }
+
+// CreateExt 在指定执行器上创建（ext 传 *sqlx.Tx 即加入事务）。零值兜底同其他 repo。
+// 注：Confidence==0 也兜底为 0.8——闸门已把低置信候选拦在门外，到这里的 0 视为漏填。
+// 显式列出 17 列（created_at/updated_at 由 DB 默认值填充，不在写入之列）。
+func (r *PersonActivityRepo) CreateExt(ctx context.Context, ext ExecerContext, a *PersonActivity) error {
+	a.ID = ids.New()
+	if a.UserID == 0 {
+		a.UserID = 1
+	}
+	if a.Confidence == 0 {
+		a.Confidence = 0.8
+	}
+	if a.EpistemicType == "" {
+		a.EpistemicType = "observed"
+	}
+	if a.Source == "" {
+		a.Source = "manual"
+	}
+	if a.Status == "" {
+		a.Status = "active"
+	}
+	if a.Version == 0 {
+		a.Version = 1
+	}
+	_, err := ext.NamedExecContext(ctx, `
+INSERT INTO person_activity
+  (id, user_id, person_id, activity, tool, location, commute_mode, started_at, duration_min,
+   confidence, epistemic_type, source, status, session_id, memory_id, transcript_segment_ids, version)
+VALUES
+  (:id, :user_id, :person_id, :activity, :tool, :location, :commute_mode, :started_at, :duration_min,
+   :confidence, :epistemic_type, :source, :status, :session_id, :memory_id, :transcript_segment_ids, :version)`, a)
+	return err
+}
+
+func (r *PersonActivityRepo) Create(ctx context.Context, a *PersonActivity) error {
+	return r.CreateExt(ctx, r.DB, a)
+}
+
+// Get 按 id 查；不存在返回 (nil, nil)（与其他 repo 风格一致，调用方判 nil）。
+func (r *PersonActivityRepo) Get(ctx context.Context, id ids.ID) (*PersonActivity, error) {
+	var a PersonActivity
+	err := r.DB.GetContext(ctx, &a, `SELECT * FROM person_activity WHERE id = ?`, id.Int64())
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// ListByPerson 时间线查询：某人物在 [from, to) 时间窗内的活动，按开始时间**升序**。
+//   - from/to 为**半开区间** [from, to)：started_at >= from AND started_at < to，
+//     from/to 各自为 nil 时跳过对应边界（都 nil = 不限时间）。用半开区间是为了让相邻时间
+//     窗口（如「本月」「下月」）无缝拼接且不重叠——to 取「下一窗口起点」即可，边界点归后一窗口。
+//   - 全状态返回（详情/时间线要展示 active+pending，历史走 change_log），不过滤 status。
+//
+// 排序特意用 ASC（升序）：时间线按时间从早到晚往下铺开，最早的活动在最前——这与 event/attribute 的
+// ListByPerson 用 DESC（最新在前，列表阅读习惯）**相反**，是时间线场景的刻意选择（同 metric 时序图表）。
+// 同一 started_at 再按 id ASC 兜底（先建的在前），保证顺序稳定可复现。
+//
+// 注：activity 平面没有 metric_key 那样的「指标维度」过滤——活动本身就是类别，不再二级分类。
+func (r *PersonActivityRepo) ListByPerson(ctx context.Context, personID ids.ID, from, to *time.Time) ([]PersonActivity, error) {
+	// 动态拼 WHERE：条件按需追加，参数与占位符一一对应。
+	q := `SELECT * FROM person_activity WHERE person_id = ?`
+	args := []any{personID.Int64()}
+	if from != nil {
+		q += ` AND started_at >= ?` // 半开区间左闭：含 from
+		args = append(args, *from)
+	}
+	if to != nil {
+		q += ` AND started_at < ?` // 半开区间右开：不含 to
+		args = append(args, *to)
+	}
+	q += ` ORDER BY started_at ASC, id ASC`
+	var list []PersonActivity
+	err := r.DB.SelectContext(ctx, &list, q, args...)
+	return list, err
+}
+
+// FindByNaturalKeyExt 幂等去重：同 session、同 person、同活动（含工具/地点/通勤/开始时刻/时长全等）的行
+// （任意 status）。重跑同一 session 时命中已有活动，不重复入库（spec §6.3）。
+//
+// 自然键 = (session_id, person_id, activity, tool, location, commute_mode, started_at, duration_min)。
+// 其中 activity/tool/location/commute_mode 四个串列**全部**用 NULL 安全的 `<=>`（不是普通 `=`）：
+//   - activity 虽在 DB 里 NOT NULL，但为与其余三列写法统一、避免特判，也用 `<=>`——绑定非 NULL 值时
+//     `<=>` 与 `=` 行为完全一致，调用方对 activity 恒传非 nil，故语义无差别；
+//   - tool/location/commute_mode 真正可空：传 nil 绑定 SQL NULL，命中「该列 IS NULL」的行
+//     （如「下午去游泳」没记工具地点的那条）；传非 nil 命中等值行。
+//     （普通 `= NULL` 恒为 UNKNOWN 永不命中，故对可空列必须用 `<=>`。）
+//
+// 抄 metric 的 vt any 中转技法：**每个可空参数各做一个 any 变量**，nil 时保持 any 的零值（绑定为 SQL NULL），
+// 非 nil 时装入解引用后的值——这样同一条 SQL 既能命中 NULL 行也能命中等值行。
+//
+// started_at 参与自然键且 NOT NULL，用 `=` 精确匹配：同一活动不同开始时刻是两条独立记录
+// （今早通勤与昨早通勤不能去重成一条）。duration_min 可空，故同样用 `<=>`。
+// 无命中返回 (nil, nil)。
+func (r *PersonActivityRepo) FindByNaturalKeyExt(ctx context.Context, ext QueryRowxContext, sessionID, personID ids.ID, activity, tool, location, commuteMode *string, startedAt time.Time, durationMin *int) (*PersonActivity, error) {
+	var a PersonActivity
+	// 每个可空参数一个 any 中转：为 nil 时保持零值 any（绑定 SQL NULL），配合 <=> 命中该列 IS NULL 的行。
+	var av any
+	if activity != nil {
+		av = *activity
+	}
+	var tl any
+	if tool != nil {
+		tl = *tool
+	}
+	var lc any
+	if location != nil {
+		lc = *location
+	}
+	var cm any
+	if commuteMode != nil {
+		cm = *commuteMode
+	}
+	var dm any
+	if durationMin != nil {
+		dm = *durationMin
+	}
+	err := ext.QueryRowxContext(ctx, `
+SELECT * FROM person_activity
+WHERE session_id = ? AND person_id = ? AND activity <=> ? AND tool <=> ? AND location <=> ?
+  AND commute_mode <=> ? AND started_at = ? AND duration_min <=> ?
+ORDER BY id LIMIT 1`, sessionID.Int64(), personID.Int64(), av, tl, lc, cm, startedAt, dm).StructScan(&a)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+func (r *PersonActivityRepo) SetStatusExt(ctx context.Context, ext ExecerContext, id ids.ID, status string) error {
+	_, err := ext.ExecContext(ctx,
+		`UPDATE person_activity SET status = ? WHERE id = ?`, status, id.Int64())
+	return err
+}
+
+func (r *PersonActivityRepo) SetStatus(ctx context.Context, id ids.ID, status string) error {
+	return r.SetStatusExt(ctx, r.DB, id, status)
+}
+
+// DismissAllByPersonExt 人物删除级联（spec §13 F5）：把该人物在**生活轨迹平面**上所有活跃态
+// （active/pending）的行批量置 dismissed，返回受影响行数（RowsAffected）。供 ManualSetPersonStatus
+// 删除分支在事务内调用（ext 传 *sqlx.Tx，随删除事务一起提交/回滚）。
+//
+// 级联语义——只动 active 与 pending：dismissed 已是终态不再改动；activity 是测点流、无版本取代
+// 语义（本表无 supersedes_id，实践中不产生 superseded 行），但仍用与其他平面一致的
+// status IN ('active','pending') 圈定活跃态——写法统一、且对未来可能出现的 superseded 行天然安全。
+//
+// 同时把行 dismiss 前的状态记入 pre_dismiss_status（active|pending），供 RestoreArchivedExt
+// 级联恢复——手动删除的行不走这里，pre_dismiss_status 保持 NULL，恢复时天然不被误恢复。
+func (r *PersonActivityRepo) DismissAllByPersonExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
+	res, err := ext.ExecContext(ctx,
+		`UPDATE person_activity SET pre_dismiss_status = status, status = 'dismissed' WHERE person_id = ? AND status IN ('active','pending')`,
+		personID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// RestoreArchivedExt 人物恢复级联：把删除时被级联置 dismissed 的行翻回**原状态**
+// （pre_dismiss_status 记录的 active|pending），并清空标记（防止残留导致下次恢复误判）。
+// 只动 status='dismissed' AND pre_dismiss_status IS NOT NULL 的行——手动删除的行
+// pre_dismiss_status 为 NULL，不受影响。供 ManualSetPersonStatus 恢复分支在事务内调用。
+func (r *PersonActivityRepo) RestoreArchivedExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
+	res, err := ext.ExecContext(ctx,
+		`UPDATE person_activity SET status = pre_dismiss_status, pre_dismiss_status = NULL WHERE person_id = ? AND status = 'dismissed' AND pre_dismiss_status IS NOT NULL`,
+		personID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ListPending 全局确认队列（生活轨迹平面部分），按 id 升序（先产生的先确认）。
+func (r *PersonActivityRepo) ListPending(ctx context.Context, userID int64) ([]PersonActivity, error) {
+	var list []PersonActivity
+	err := r.DB.SelectContext(ctx, &list, `
+SELECT * FROM person_activity WHERE user_id = ? AND status = 'pending' ORDER BY id`, userID)
+	return list, err
+}
+
+// CountPendingByPerson 统计某人物的 pending 活动数（供详情页/名册 pending 角标计数）。
+// 与 metric/cycle 一致用轻量 COUNT（详情页活动时间线按需拉，计数不必拉全表过滤）。
+// person_id 全局唯一（雪花 ID），无需再带 user_id 限定。
+func (r *PersonActivityRepo) CountPendingByPerson(ctx context.Context, personID ids.ID) (int, error) {
+	var n int
+	err := r.DB.GetContext(ctx, &n,
+		`SELECT COUNT(*) FROM person_activity WHERE person_id = ? AND status = 'pending'`, personID.Int64())
+	return n, err
+}

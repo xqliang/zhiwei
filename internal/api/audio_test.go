@@ -18,7 +18,7 @@ func setupAPI(t *testing.T) http.Handler {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	if err := ids.Init(1); err != nil {
+	if err := ids.InitForTest(); err != nil {
 		t.Fatal(err)
 	}
 	sessions := &repo.SessionRepo{DB: db}

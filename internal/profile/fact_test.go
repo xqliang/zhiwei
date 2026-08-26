@@ -85,9 +85,9 @@ func TestParseFactsEvent(t *testing.T) {
 	raw := `{"facts":[
 		{"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去云南旅游一周",
 		 "description":"和朋友自驾","occurred_at":"2026-07-20","end_at":"2026-07-27","location":"云南",
-		 "confidence":0.9,"epistemic_type":"observed","block_index":1},
+		 "importance":0.8,"confidence":0.9,"epistemic_type":"observed","block_index":1},
 		{"plane":"event","subject":{"kind":"self"},"event_type":"聚会","title":"同学十年聚会",
-		 "confidence":0.7,"epistemic_type":"observed","block_index":2}
+		 "importance":1.5,"confidence":0.7,"epistemic_type":"observed","block_index":2}
 	]}`
 	facts, err := ParseFacts(raw)
 	if err != nil {
@@ -101,8 +101,79 @@ func TestParseFactsEvent(t *testing.T) {
 		f0.EndAt != "2026-07-27" || f0.EventLocation != "云南" || f0.EventDescription != "和朋友自驾" {
 		t.Fatalf("event fact0 错误: %+v", f0)
 	}
+	// P2a①：importance 解析落 EventImportance
+	if f0.EventImportance != 0.8 {
+		t.Fatalf("event fact0 importance 应解析为 0.8: %v", f0.EventImportance)
+	}
+	// P2a①：超范围 importance（1.5）应 clamp 到 1.0
+	if facts[1].EventImportance != 1.0 {
+		t.Fatalf("event fact1 importance 应 clamp 到 1.0: %v", facts[1].EventImportance)
+	}
 	// occurred_at 缺省允许（事件仍创建，时间列 NULL 由 service 处理）
 	if facts[1].OccurredAt != "" {
 		t.Fatalf("occurred_at 应允许为空: %q", facts[1].OccurredAt)
+	}
+}
+
+func TestParseFactsCycle(t *testing.T) {
+	// 注意 frequency 字段的 json 标签是 "frequency"（Go 字段 FrequencyText），对齐 prompt v3 契约
+	raw := `{"facts":[
+		{"plane":"cycle","subject":{"kind":"self"},"cycle_type":"medication","cycle_label":" 降压药 ",
+		 "anchor_date":" 2026-08-01 ","period_days":30,"duration_days":1,"dosage":" 1片 ",
+		 "frequency":" 每日一次 ","confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"cycle","subject":{"kind":"self"},"cycle_type":"menstrual","confidence":0.8,"block_index":2},
+		{"plane":"cycle","subject":{"kind":"self"},"cycle_type":"bogus","confidence":0.9}
+	]}`
+	facts, err := ParseFacts(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 非法 type（bogus）丢；medication 全字段 + menstrual 空 label 各保留 → 2 条
+	if len(facts) != 2 {
+		t.Fatalf("应保留 2 条: %+v", facts)
+	}
+	// 全字段：label/anchor/dosage/frequency 前后空格应 TrimSpace；period/duration 为 int 原样透传
+	f0 := facts[0]
+	if f0.Plane != "cycle" || f0.CycleType != "medication" || f0.CycleLabel != "降压药" ||
+		f0.AnchorDate != "2026-08-01" || f0.PeriodDays != 30 || f0.DurationDays != 1 ||
+		f0.Dosage != "1片" || f0.FrequencyText != "每日一次" {
+		t.Fatalf("cycle fact0 错误（trim 应生效）: %+v", f0)
+	}
+	// menstrual 空 label/anchor 合法（纯周期记录，label/anchor 可空——不因缺字段被丢）
+	f1 := facts[1]
+	if f1.CycleType != "menstrual" || f1.CycleLabel != "" || f1.AnchorDate != "" {
+		t.Fatalf("cycle fact1（空 label 应合法）错误: %+v", f1)
+	}
+}
+
+func TestParseFactsActivity(t *testing.T) {
+	// activity 字段的 json 标签是 "activity"（Go 字段 ActivityText）；location 复用 event 的
+	// json:"location"（Go 字段 Location），一条 fact 非 event 即 activity，不冲突（见 rawFact 注释）。
+	raw := `{"facts":[
+		{"plane":"activity","subject":{"kind":"self"},"activity":" 写代码 ","tool":" 电脑 ",
+		 "location":" 公司 ","started_at":" 2026-08-20 ","duration_min":120,
+		 "confidence":0.9,"epistemic_type":"observed","block_index":1},
+		{"plane":"activity","subject":{"kind":"self"},"activity":"通勤","commute_mode":"地铁",
+		 "started_at":"2026-08-20","duration_min":40,"confidence":0.95,"block_index":1},
+		{"plane":"activity","subject":{"kind":"self"},"activity":"","tool":"手机","confidence":0.9}
+	]}`
+	facts, err := ParseFacts(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 空 activity 那条被丢（仅强制 activity 非空）；保留 2 条
+	if len(facts) != 2 {
+		t.Fatalf("应保留 2 条: %+v", facts)
+	}
+	// 全字段：activity/tool/location/started_at 前后空格应 TrimSpace；duration_min int 原样透传
+	f0 := facts[0]
+	if f0.Plane != "activity" || f0.ActivityText != "写代码" || f0.Tool != "电脑" ||
+		f0.Location != "公司" || f0.StartedAt != "2026-08-20" || f0.DurationMin != 120 {
+		t.Fatalf("activity fact0 错误（trim 应生效）: %+v", f0)
+	}
+	// 通勤：commute_mode 解析；tool/location 缺省允许为空；duration_min 透传
+	f1 := facts[1]
+	if f1.ActivityText != "通勤" || f1.CommuteMode != "地铁" || f1.Tool != "" || f1.Location != "" || f1.DurationMin != 40 {
+		t.Fatalf("activity fact1 错误（可空字段缺省合法）: %+v", f1)
 	}
 }

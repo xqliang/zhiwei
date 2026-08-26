@@ -431,18 +431,34 @@
                 <template v-if="s.memory_count"> · {{ s.memory_count }} 条记忆</template>
                 <template v-if="s.todo_count"> · {{ s.todo_count }} 个待办</template>
               </div>
+              <!-- 整段声纹相似 top-3 + 判定（列表级，2026-08-26）：
+                   整段只有 1 个 ASR 说话人 → 用整段（全部段向量均值）比对；
+                   多人 → 用时长最长的一段比对（最能代表主要说话人）。
+                   判定两级规则：top1≥0.8 强命中 / ≥0.72 且领先第二名 ≥0.06 弱命中。
+                   存量会话（逐段向量落库前处理）无此行 -->
+              <div v-if="s.voice_top && (s.voice_top.matches||[]).length" class="muted"
+                   style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
+                   :title="'整段声纹与声纹库的相似度 top-3（' + (s.voice_top.basis === 'whole' ? '单人录音：整段音频比对' : '多人录音：时长最长的一段比对') + '）。判定：top1≥0.8，或 ≥0.72 且领先第二名 ≥0.06'">
+                <span>🎤 声纹{{ s.voice_top.basis === 'whole' ? '(整段)' : '(最长段)' }} ≈</span>
+                <span v-for="(m, mi) in s.voice_top.matches" :key="m.speaker_id"
+                      :style="(s.voice_top.matched && mi === 0) ? { color: 'var(--accent)', fontWeight: 600 } : {}">
+                  {{ mi > 0 ? '·' : '' }} {{ m.name }} {{ m.similarity.toFixed(2) }}
+                </span>
+                <span v-if="s.voice_top.matched" :style="{ color: 'var(--ok)', fontWeight: 600 }"
+                      title="两级规则判定命中：这个人">→ {{ s.voice_top.speaker_name }}{{ s.voice_top.rule === 'gap' ? '(弱)' : '' }}</span>
+              </div>
             </div>
             <div style="display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap" @click.stop>
-              <span v-if="reextractingId !== s.id && reidentifyingId !== s.id" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
-              <span v-else-if="reextractingId === s.id" class="badge running"><span class="spinner"></span> 重新提取中</span>
+              <span v-if="!reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
+              <span v-else-if="reextractingIds.has(s.id)" class="badge running"><span class="spinner"></span> 重新提取中</span>
               <span v-else class="badge running"><span class="spinner"></span> 重新识别中</span>
-              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && reextractingId !== s.id && reidentifyingId !== s.id" class="btn mini" @click="askReidentify(s)" title="清空说话人归属，按最新声纹库重新匹配（会覆盖手动换人）">重新识别</button>
+              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && !reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="btn mini" @click="askReidentify(s)" title="清空说话人归属，按最新声纹库重新匹配（会覆盖手动换人）">重新识别</button>
               <button v-if="reidentifyConfirmId === s.id" class="btn warn" @click="confirmReidentify(s)">确认重识别?</button>
               <button v-if="reidentifyConfirmId === s.id" class="btn ghost" @click="cancelReidentify()">取消</button>
-              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && reextractingId !== s.id && reidentifyingId !== s.id" class="btn mini" @click="askReextract(s)">重新提取</button>
+              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && !reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="btn mini" @click="askReextract(s)">重新提取</button>
               <button v-if="reextractConfirmId === s.id" class="btn warn" @click="confirmReextract(s)">确认重提取?</button>
               <button v-if="reextractConfirmId === s.id" class="btn ghost" @click="cancelReextract()">取消</button>
-              <button v-if="reidentifyConfirmId !== s.id && deletingSessionId !== s.id && reextractConfirmId !== s.id && reextractingId !== s.id && reidentifyingId !== s.id" class="btn mini" @click="askDeleteSession(s)">删除</button>
+              <button v-if="reidentifyConfirmId !== s.id && deletingSessionId !== s.id && reextractConfirmId !== s.id && !reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="btn mini" @click="askDeleteSession(s)">删除</button>
               <button v-if="deletingSessionId === s.id" class="btn danger" @click="confirmDeleteSession(s)">确认删除?</button>
               <button v-if="deletingSessionId === s.id" class="btn ghost" @click="cancelDeleteSession()">取消</button>
             </div>
@@ -1193,6 +1209,13 @@
       </div>
     </div>
 
+    <!-- 回填进行中提示：/api/profile/extract 是同步端点，处理最近 50 段录音时可能长时间
+         无响应，给一行 muted 小字告诉用户「在跑、没卡死」，避免误以为按钮失灵而反复点击。
+         样式对齐既有 muted+fs-xs 提示（如下方待确认区说明）。 -->
+    <div v-if="backfilling" class="muted" style="font-size:var(--fs-xs); margin-bottom:12px">
+      正在处理最近 50 段录音的画像抽取，期间可能无响应，请稍候…
+    </div>
+
     <!-- 回填结果摘要（最近 50 段录音同步重放；单段失败不中断） -->
     <div class="card sunken" v-if="backfillInfo" style="margin-bottom:12px">
       <div class="kv">
@@ -1235,8 +1258,11 @@
       <div class="kv" style="margin-bottom:12px"><b>新建人物</b><button class="btn-link" @click="cancelNewPerson">✕</button></div>
       <label class="field-label">姓名 *</label>
       <input class="txt" v-model="newPerson.display_name" placeholder="如：张三" style="margin-bottom:8px">
-      <label class="field-label">关联声纹 speaker_id（可空；只被提到的人可不绑）</label>
-      <input class="txt" v-model="newPerson.speaker_id" placeholder="从声纹 tab 复制 id，可留空" style="margin-bottom:8px">
+      <label class="field-label">关联声纹（可空；只被提到的人可不绑）</label>
+      <select class="txt" v-model="newPerson.speaker_id" style="margin-bottom:8px">
+        <option value="">不关联声纹（可留空）</option>
+        <option v-for="sp in newPersonSpeakers" :key="sp.id" :value="sp.id">{{ sp.name }}（{{ sp.id }}）</option>
+      </select>
       <label class="field-label">备注</label>
       <input class="txt" v-model="newPerson.summary" placeholder="一句话备注（可空）" style="margin-bottom:8px">
       <div class="edit-actions">
@@ -1247,9 +1273,11 @@
       </div>
     </div>
 
-    <!-- 名册卡片 -->
+    <!-- 名册卡片 + 就地展开的详情：template 包一层，让详情卡渲染在所点人物卡片正下方
+         （对齐时间线 session 的就地展开模式），而不是整个列表末尾——长名册时列表末尾的详情根本看不到 -->
     <div v-if="!persons.length" class="card empty">还没有人物。点「新建」，或上传录音后由画像抽取自动生成。</div>
-    <div class="card clickable" v-for="p in persons" :key="p.id" @click="togglePerson(p.id)">
+    <template v-for="p in persons" :key="p.id">
+    <div class="card clickable" @click="togglePerson(p.id)">
       <div class="kv">
         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
           <b>{{ p.display_name }}</b>
@@ -1259,18 +1287,18 @@
         </div>
         <div style="display:flex; gap:6px; align-items:center; flex-shrink:0" @click.stop>
           <span v-if="p.pending_count" class="chip" style="background:var(--warn-soft); color:var(--warn)" title="待确认的属性/关系数">{{ p.pending_count }} 待确认</span>
-          <template v-if="archivingPersonId === p.id">
-            <span class="muted">归档？</span>
-            <button class="btn mini danger" @click="confirmArchivePerson(p)">确认</button>
-            <button class="btn mini" @click="cancelArchivePerson()">取消</button>
+          <template v-if="deletingPersonId === p.id">
+            <span class="muted">删除？</span>
+            <button class="btn mini danger" @click="confirmDeletePerson(p)">确认</button>
+            <button class="btn mini" @click="cancelDeletePerson()">取消</button>
           </template>
-          <button v-else class="btn mini" @click="askArchivePerson(p)">归档</button>
+          <button v-else class="btn mini" @click="askDeletePerson(p)" title="软删（status=dismissed）+ 六平面级联；可在下方「已删除」区恢复">删除</button>
         </div>
       </div>
     </div>
 
-    <!-- 人物详情（就地展开在名册之后；Task 1 已定义 togglePerson/closePersonDetail 数据流） -->
-    <div class="card" v-if="personDetail" style="border-color:var(--accent)">
+    <!-- 人物详情（就地展开在所点人物卡片正下方；仅渲染匹配当前迭代 p 的那份；Task 1 已定义 togglePerson/closePersonDetail 数据流） -->
+    <div class="card" v-if="personDetail && personDetail.person.id === p.id" style="border-color:var(--accent)">
       <div class="kv" style="margin-bottom:12px">
         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
           <template v-if="!renamingPerson">
@@ -1312,7 +1340,19 @@
           </div>
           <div style="display:flex; gap:4px; flex-shrink:0">
             <template v-if="editingAttr && editingAttr.id === a.id">
-              <input class="txt inline" v-model="editingAttr.value" @keyup.enter="commitEditAttr" @keyup.esc="editingAttr=null">
+              <!-- 就地改值同样按该行 attr_key 的 value_type 切受控控件（F4 配套，规则同加属性表单） -->
+              <select v-if="editAttrDef && editAttrDef.value_type === 'enum'" class="txt inline" v-model="editingAttr.value">
+                <option value="">请选择</option>
+                <option v-for="opt in editAttrDef.enum_options" :key="opt" :value="opt">{{ opt }}</option>
+              </select>
+              <select v-else-if="editAttrDef && editAttrDef.value_type === 'bool'" class="txt inline" v-model="editingAttr.value">
+                <!-- option value 即后端 true/false 线值，「是/否」仅展示文案（同加属性表单，无需提交前映射） -->
+                <option value="">请选择</option>
+                <option value="true">是</option>
+                <option value="false">否</option>
+              </select>
+              <input v-else-if="editAttrDef && editAttrDef.value_type === 'date'" class="txt inline" type="date" v-model="editingAttr.value">
+              <input v-else class="txt inline" v-model="editingAttr.value" @keyup.enter="commitEditAttr" @keyup.esc="editingAttr=null">
               <button class="btn primary" style="padding:6px 12px" @click="commitEditAttr">存</button>
               <button class="btn mini" @click="editingAttr=null">取消</button>
             </template>
@@ -1361,7 +1401,10 @@
         <div class="muted" style="font-weight:600; margin-bottom:4px">大事记</div>
         <div v-for="g in eventsByYear" :key="g.year" style="margin-bottom:8px">
           <div class="muted" style="font-size:var(--fs-xs); margin:4px 0">{{ g.year }}</div>
-          <div v-for="ev in g.items" :key="ev.id" class="seg">
+          <!-- 重要度视觉分层（P7）：左侧 accent 竖条(重大≥0.8)+透明度淡显(日常<0.6)映射人生分量，
+               纯视觉不暴露数值；hover title 才给数值（见 app.js eventRowStyle） -->
+          <div v-for="ev in g.items" :key="ev.id" class="seg" :style="eventRowStyle(ev)"
+               :title="'重要度 ' + (typeof ev.importance === 'number' ? ev.importance.toFixed(1) : '—')">
             <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ ev.event_type }}</span>
             <div class="seg-text">
               <div>
@@ -1432,6 +1475,123 @@
           </div>
         </div>
       </div>
+      <!-- 健康周期（敏感：默认折叠；展开直显后端免责 note） -->
+      <div style="margin-bottom:12px">
+        <div class="kv">
+          <div class="muted" style="font-weight:600">健康周期 <span class="muted" style="font-size:var(--fs-xs)">（敏感信息）</span></div>
+          <button class="btn mini" @click="toggleHealth">{{ healthOpen ? '收起 ▴' : '展开 ▾' }}</button>
+        </div>
+        <div v-if="healthOpen">
+          <!-- 免责文案直显（后端 note，spec §9） -->
+          <div v-if="cyclesNote" class="muted" style="font-size:var(--fs-xs); margin:6px 0">ℹ️ {{ cyclesNote }}</div>
+          <div v-if="cycleLoading" class="muted">加载中…</div>
+          <template v-else>
+            <div v-for="c in cycles" :key="c.id" class="seg">
+              <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ cycleTypeLabel(c.cycle_type) }}</span>
+              <div class="seg-text">
+                <div>
+                  <b v-if="c.label">{{ c.label }}</b><!-- 无 label 时类型 chip 已表达身份，不再回退重复显示 -->
+                  <span class="chip" :style="c.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ c.source === 'llm' ? 'AI' : '人工' }}</span>
+                  <span v-if="c.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+                </div>
+                <div class="muted" style="font-size:var(--fs-xs)">
+                  上次 {{ fmtDateOnly(c.anchor_date) }}
+                  <span v-if="c.period_days"> · 周期 {{ c.period_days }} 天</span>
+                  <span v-if="c.next_predicted_at"> · 下次约 {{ fmtDateOnly(c.next_predicted_at) }}</span>
+                  <span v-if="c.dosage"> · {{ c.dosage }}</span>
+                  <span v-if="c.frequency_text"> · {{ c.frequency_text }}</span>
+                </div>
+              </div>
+              <div style="display:flex; gap:4px; flex-shrink:0">
+                <template v-if="deletingCycleId === c.id">
+                  <span class="muted">删除？</span>
+                  <button class="btn mini danger" @click="confirmDeleteCycle">确认</button>
+                  <button class="btn mini" @click="deletingCycleId=null">取消</button>
+                </template>
+                <button v-else class="btn mini danger" @click="askDeleteCycle(c)" title="删除周期">🗑</button>
+              </div>
+            </div>
+            <div v-if="!cycles.length" class="muted" style="font-size:var(--fs-xs)">暂无周期记录。</div>
+          </template>
+          <!-- 加周期表单 -->
+          <div class="edit-actions" style="margin-top:6px">
+            <button class="btn mini" @click="toggleAddCycle">{{ showAddCycle ? '收起添加' : '＋ 加周期' }}</button>
+          </div>
+          <div class="card sunken" v-if="showAddCycle" style="margin-top:8px">
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+              <select class="txt" v-model="addCycleForm.cycle_type" style="min-width:100px">
+                <option value="" disabled>类型</option>
+                <option v-for="t in CYCLE_TYPES" :key="t.key" :value="t.key">{{ t.label }}</option>
+              </select>
+              <input class="txt" v-model="addCycleForm.label" placeholder="名称（药名等；生理期留空）" style="flex:1; min-width:120px">
+              <input class="txt" v-model="addCycleForm.anchor_date" type="date" title="上次开始日" style="width:auto; min-width:130px">
+              <input class="txt" v-model="addCycleForm.period_days" type="number" min="1" step="1" placeholder="周期天数" style="width:auto; min-width:90px">
+              <input class="txt" v-model="addCycleForm.duration_days" type="number" min="1" step="1" placeholder="持续天数" style="width:auto; min-width:90px">
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px">
+              <input class="txt" v-model="addCycleForm.dosage" placeholder="剂量（如 1片）" style="flex:1; min-width:100px">
+              <input class="txt" v-model="addCycleForm.frequency" placeholder="频次（如 每日一次）" style="flex:1; min-width:100px">
+              <button class="btn primary" :disabled="addingCycle" @click="submitAddCycle">{{ addingCycle ? '保存中…' : '保存' }}</button>
+            </div>
+            <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">下次时间为按周期估算，仅供参考，非医疗建议。</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 生活轨迹（activity 平面，P4：什么时间 / 多长时间 / 什么工具 / 做什么 / 地点 / 通勤）——时间线列表（升序） -->
+      <div style="margin-bottom:12px">
+        <div class="kv" style="margin-bottom:4px">
+          <div class="muted" style="font-weight:600">生活轨迹</div>
+          <span class="muted" style="font-size:var(--fs-xs)">活动时间线（含 AI 抽取）</span>
+        </div>
+        <div v-if="activityLoading" class="muted">加载中…</div>
+        <template v-else>
+          <!-- 升序铺开（从早到晚）；活动是类别身份，列时间线而非画曲线 -->
+          <div v-for="a in activityRows" :key="a.id" class="seg">
+            <div class="seg-text">
+              <div>
+                <b>{{ a.activity }}</b>
+                <span class="chip" :style="a.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ a.source === 'llm' ? 'AI' : '人工' }}</span>
+                <span v-if="a.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+              </div>
+              <div class="muted" style="font-size:var(--fs-xs)">
+                {{ fmtEventDate(a.started_at, true) }}
+                <span v-if="a.duration_min"> · {{ a.duration_min }} 分钟</span>
+                <span v-if="a.tool"> · {{ a.tool }}</span>
+                <span v-if="a.location"> · {{ a.location }}</span>
+                <span v-if="a.commute_mode"> · {{ a.commute_mode }}</span>
+              </div>
+            </div>
+            <div style="display:flex; gap:4px; flex-shrink:0">
+              <template v-if="deletingActivityId === a.id">
+                <span class="muted">删除？</span>
+                <button class="btn mini danger" @click="confirmDeleteActivity">确认</button>
+                <button class="btn mini" @click="deletingActivityId=null">取消</button>
+              </template>
+              <button v-else class="btn mini danger" @click="askDeleteActivity(a)" title="删除活动">🗑</button>
+            </div>
+          </div>
+          <div v-if="!activityRows.length" class="muted" style="font-size:var(--fs-xs)">暂无活动记录。从对话自动抽取或手动添加。</div>
+        </template>
+        <!-- 手动添加（表单折叠） -->
+        <div class="edit-actions" style="margin-top:6px">
+          <button class="btn mini" @click="toggleAddActivity">{{ showAddActivity ? '收起添加' : '＋ 加活动' }}</button>
+        </div>
+        <div class="card sunken" v-if="showAddActivity" style="margin-top:8px">
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+            <input class="txt" v-model="addActivityForm.activity" placeholder="做什么（如 写代码/打球/通勤）*" style="flex:1; min-width:140px">
+            <input class="txt" v-model="addActivityForm.tool" placeholder="工具/载体（电脑/手机，可空）" style="flex:1; min-width:110px">
+            <input class="txt" v-model="addActivityForm.location" placeholder="地点（可空）" style="flex:1; min-width:100px">
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px">
+            <input class="txt" v-model="addActivityForm.commute_mode" placeholder="通勤方式（地铁/开车，可空）" style="flex:1; min-width:110px">
+            <input class="txt" v-model="addActivityForm.started_at" type="date" title="开始日期" style="width:auto; min-width:130px">
+            <input class="txt" v-model="addActivityForm.duration_min" type="number" min="1" step="1" placeholder="时长（分钟）" style="width:auto; min-width:100px">
+            <button class="btn primary" :disabled="addingActivity" @click="submitAddActivity">{{ addingActivity ? '保存中…' : '保存' }}</button>
+          </div>
+          <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">仅「做什么」必填；日期可空（默认对话当天/今天）。手动添加立即生效（来源=人工 · 置信度 100%）。</div>
+        </div>
+      </div>
 
       <!-- 加事件表单 -->
       <div class="card sunken" v-if="showAddEvent" style="margin-bottom:10px">
@@ -1445,14 +1605,19 @@
           <input class="txt" v-model="addEventForm.occurred_at" type="date" title="发生日期" style="width:auto; min-width:130px">
           <input class="txt" v-model="addEventForm.end_at" type="date" title="结束日期（旅行/会议等跨天事件）" style="width:auto; min-width:130px">
           <input class="txt" v-model="addEventForm.location" placeholder="地点（可空）" style="flex:1; min-width:100px">
-          <select class="txt" v-model="addEventForm.related_person_id" style="min-width:120px" title="同场主要人物">
-            <option value="">（同行人物，可空）</option>
+          <select class="txt" v-model="addEventForm.related_person_ids" multiple size="3" style="min-width:140px"
+                  title="同行人物，可多选（按住 Ctrl / ⌘ 点选多个）">
             <option v-for="p in persons.filter(x => x.id !== personDetail.person.id)" :key="p.id" :value="p.id">{{ p.display_name }}</option>
           </select>
+          <!-- 重要度三档（P7）：语义档位比数字更贴近「人生分量」；选中档位高亮（accent 底色） -->
+          <span class="muted" style="font-size:var(--fs-xs)">重要度</span>
+          <button v-for="lv in EVENT_IMPORTANCE_LEVELS" :key="lv.value" type="button" class="btn mini"
+                  :style="addEventForm.importance === lv.value ? { background:'var(--accent)', color:'#fff', borderColor:'var(--accent)' } : {}"
+                  @click="addEventForm.importance = lv.value">{{ lv.label }}</button>
           <button class="btn primary" :disabled="addingEvent" @click="submitAddEvent">{{ addingEvent ? '保存中…' : '保存' }}</button>
         </div>
         <input class="txt" v-model="addEventForm.description" placeholder="细节（可空）" style="width:100%; margin-top:8px">
-        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；日期可选，只知道大概时间可留空。</div>
+        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；同行人物可多选；日期可选，只知道大概时间可留空。</div>
       </div>
 
       <!-- 加指标表单（仿加事件表单）：选指标键 → 按 numeric 填数值/描述 + 单位 + 测量日期 -->
@@ -1477,11 +1642,24 @@
       <div class="card sunken" v-if="showAddAttr" style="margin-bottom:10px">
         <div class="kv" style="margin-bottom:8px"><b>加属性</b><button class="btn-link" @click="toggleAddAttr">✕</button></div>
         <div style="display:flex; gap:8px; flex-wrap:wrap">
-          <input class="txt" list="attr-keys" v-model="addAttrForm.attr_key" placeholder="属性 key（如 occupation）" style="flex:1; min-width:140px">
+          <input class="txt" list="attr-keys" v-model="addAttrForm.attr_key" @change="onAddAttrKeyChange" placeholder="属性 key（如 occupation）" style="flex:1; min-width:140px">
           <datalist id="attr-keys">
-            <option v-for="k in ATTR_KEYS" :key="k" :value="k"></option>
+            <option v-for="d in attrCatalog" :key="d.key" :value="d.key">{{ d.label }}</option>
           </datalist>
-          <input class="txt" v-model="addAttrForm.value" placeholder="值（如 后端工程师）" style="flex:1; min-width:140px">
+          <!-- 值输入按目录 value_type 切换受控控件（F4 配套）：enum→select（空选项+枚举） / bool→是否(映射 true/false) / date→日期选择器 / 其余(含目录外自造 key)→自由文本 -->
+          <select v-if="addAttrDef && addAttrDef.value_type === 'enum'" class="txt" v-model="addAttrForm.value" style="flex:1; min-width:140px">
+            <option value="">请选择</option>
+            <option v-for="opt in addAttrDef.enum_options" :key="opt" :value="opt">{{ opt }}</option>
+          </select>
+          <select v-else-if="addAttrDef && addAttrDef.value_type === 'bool'" class="txt" v-model="addAttrForm.value" style="flex:1; min-width:140px">
+            <!-- option 的 value 直接是后端接受的 true/false 线值（Task 1 归一后即小写 true/false），
+                 「是/否」仅作展示文案 → v-model 存的就是可直接提交的值，无需提交前额外映射 -->
+            <option value="">请选择</option>
+            <option value="true">是</option>
+            <option value="false">否</option>
+          </select>
+          <input v-else-if="addAttrDef && addAttrDef.value_type === 'date'" class="txt" type="date" v-model="addAttrForm.value" style="flex:1; min-width:140px">
+          <input v-else class="txt" v-model="addAttrForm.value" placeholder="值（如 后端工程师）" style="flex:1; min-width:140px">
           <button class="btn primary" :disabled="addingAttr" @click="submitAddAttr">{{ addingAttr ? '保存中…' : '保存' }}</button>
         </div>
         <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；单值属性重复添加 = 改值，旧值留痕可查历史。</div>
@@ -1544,6 +1722,28 @@
         <button class="btn mini" @click="toggleAddMetric">{{ showAddMetric ? '收起加指标' : '＋ 加指标' }}</button>
       </div>
     </div>
+    </template>
+
+    <!-- 已删除人物折叠区（dismissed 软删行，默认收起；对齐已忽略主题的交互）。
+         恢复=PATCH status=active：后端同一事务级联恢复删除时被连带清掉的六平面行
+         （手动删过的行无 pre_dismiss_status 标记，保持 dismissed 不被误恢复）。 -->
+    <template v-if="deletedPersons.length">
+      <div class="todo-group-title" style="cursor:pointer" @click="deletedCollapsed = !deletedCollapsed">
+        已删除（{{ deletedPersons.length }}）{{ deletedCollapsed ? ' ▸' : ' ▾' }}
+      </div>
+      <template v-if="!deletedCollapsed">
+        <div class="card" v-for="p in deletedPersons" :key="p.id" style="opacity:.62">
+          <div class="kv">
+            <div style="min-width:0">
+              <b><s>{{ p.display_name }}</s></b>
+              <span v-if="p.source === 'llm'" class="muted">自动识别</span>
+              <div class="muted" style="font-size:var(--fs-xs)">删除于 {{ fmtTime(p.updated_at) }} · 恢复将连带找回删除时被清掉的属性/关系等画像数据</div>
+            </div>
+            <button class="btn mini" @click="restorePerson(p)">恢复</button>
+          </div>
+        </div>
+      </template>
+    </template>
   </div>
 
   <!-- ============ 主题 ============ -->
@@ -1856,6 +2056,6 @@
   </template>
 </div>
 
-<script src="/app/app.21ddda0e.js"></script>
+<script src="/app/app.8d3869b7.js"></script>
 </body>
 </html>

@@ -25,6 +25,8 @@ type PersonHandler struct {
 	Relationships *repo.PersonRelationshipRepo
 	Events        *repo.PersonEventRepo
 	Metrics       *repo.PersonMetricRepo
+	Cycles        *repo.PersonCycleRepo
+	Activities    *repo.PersonActivityRepo
 	ChangeLogs    *repo.PersonChangeLogRepo
 	Service       *profile.Service
 }
@@ -47,12 +49,49 @@ func RegisterPerson(r chi.Router, h *PersonHandler) {
 	r.Get("/api/persons/{id}/metrics", h.ListMetrics)
 	r.Post("/api/persons/{id}/metrics", h.AddMetric)
 	r.Delete("/api/persons/{id}/metrics/{mid}", h.DeleteMetric)
+	r.Get("/api/persons/{id}/cycles", h.ListCycles)
+	r.Post("/api/persons/{id}/cycles", h.AddCycle)
+	r.Delete("/api/persons/{id}/cycles/{cid}", h.DeleteCycle)
+	r.Get("/api/persons/{id}/activities", h.ListActivities)
+	r.Post("/api/persons/{id}/activities", h.AddActivity)
+	r.Delete("/api/persons/{id}/activities/{aid}", h.DeleteActivity)
 	r.Get("/api/persons/{id}/history", h.History)
 
+	r.Get("/api/profile/catalog", h.Catalog)
 	r.Get("/api/profile/pending", h.ListPending)
 	r.Post("/api/profile/pending/{kind}/{id}/confirm", h.ConfirmPending)
 	r.Post("/api/profile/pending/{kind}/{id}/dismiss", h.DismissPending)
 	r.Post("/api/profile/extract", h.Extract)
+}
+
+// ---- 属性目录（F4 前端配套：受控输入元数据）----
+
+// catalogAttr 是 GET /api/profile/catalog 的单条目录项：把 profile.AttrDef 的导出形态
+// 转成 snake_case JSON 契约，供前端按 value_type 切换值输入控件（enum→select /
+// bool→是否 / date→日期选择器）。非 enum 项的 enum_options 为 null（前端只在 enum
+// 分支遍历它，null 天然安全）。
+type catalogAttr struct {
+	Key         string   `json:"key"`
+	Label       string   `json:"label"`
+	Group       string   `json:"group"`
+	ValueType   string   `json:"value_type"`
+	EnumOptions []string `json:"enum_options"`
+	Cardinality string   `json:"cardinality"`
+}
+
+// Catalog 返回属性目录全集（静态数据，无 DB 查询）。前端「加属性 / 就地改值」表单
+// 据此把自由文本输入切换为受控控件——Task 1 写入端上闸后（enum 须精确命中、bool 只认
+// true/false、date 须可解析），受控输入保证提交值天然合法，避免用户手输脏值被 400。
+func (h *PersonHandler) Catalog(w http.ResponseWriter, r *http.Request) {
+	defs := profile.All()
+	out := make([]catalogAttr, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, catalogAttr{
+			Key: d.Key, Label: d.Label, Group: d.Group,
+			ValueType: d.ValueType, EnumOptions: d.EnumOptions, Cardinality: d.Cardinality,
+		})
+	}
+	writeJSON(w, map[string]any{"catalog": out})
 }
 
 // validPersonStatuses 是 person 状态机的合法取值（Patch 状态流转白名单）。
@@ -62,15 +101,28 @@ var validPersonStatuses = map[string]bool{
 
 // validPendingKinds 是确认队列 kind 的合法取值（confirm/dismiss 端点白名单）。
 var validPendingKinds = map[string]bool{
-	"person": true, "attribute": true, "relationship": true, "event": true, "metric": true,
+	"person": true, "attribute": true, "relationship": true, "event": true,
+	"metric": true, "cycle": true, "activity": true,
 }
 
 // ---- 名册 ----
 
+// List 名册（active+pending）+ 每人 pending 角标计数。
+// ?dismissed=1 返回已删除人物（软删行，折叠区查看/恢复）；默认返回非 dismissed（活跃名册）。
+// 对齐 topics 的 ?dismissed=1 约定：两个视图分离，避免活跃名册混入已删数据。
 func (h *PersonHandler) List(w http.ResponseWriter, r *http.Request) {
 	uid, ok := auth.UserID(r.Context())
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.URL.Query().Get("dismissed") == "1" {
+		list, err := h.Persons.ListDismissed(r.Context(), uid.Int64())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"persons": list})
 		return
 	}
 	list, err := h.Persons.ListWithPending(r.Context(), uid.Int64())
@@ -252,6 +304,19 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	metricGroups, metricPending := buildMetricGroups(metrics)
 	pending += metricPending
+	// cycle/activity 平面的 pending 计入详情页角标（确认队列已含这两类，名册/详情角标须一致）；
+	// 详情不展示 cycle/activity 列表（时序/轨迹数据量大、有独立 GET 端点按需查询），故用轻量 COUNT。
+	cp, err := h.Cycles.CountPendingByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	ap, err := h.Activities.CountPendingByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	pending += cp + ap
 	writeJSON(w, personDetailResp{
 		Person: p, Groups: groups, Relationships: relShown, Events: evShown,
 		Metrics: metricGroups, RecentSessionIDs: sids, PendingCount: pending,
@@ -404,6 +469,11 @@ func (h *PersonHandler) AddAttribute(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "人物不存在", http.StatusNotFound)
 			return
 		}
+		// F4 校验错误（值域不合法）→ 400（对齐 metric 枚举校验的 400 口径）；其余 → 500。
+		if errors.Is(err, profile.ErrInvalidAttrValue) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -460,6 +530,11 @@ func (h *PersonHandler) PatchAttribute(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, profile.ErrNotFound) {
 			http.Error(w, "属性不存在", http.StatusNotFound)
+			return
+		}
+		// F4 校验错误（值域不合法）→ 400（对齐 AddAttribute）；其余 → 500。
+		if errors.Is(err, profile.ErrInvalidAttrValue) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -604,6 +679,9 @@ func (h *PersonHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 
 // AddEvent 手动加大事记（走 Service：active/manual/conf=1.0 + 审计）。
 // event_type 9 枚举校验；occurred_at/endAt 原始串由 Service 的 parseEventAt 尽力解析。
+// importance 可选（P2a①）：缺省/0 走事件类型默认，>0 由 Service clamp 到 (0,1]。
+// 同行人物（P2a②）：related_person_ids 数组为主，旧单字段 related_person_id 非空时并入
+// （向后兼容旧前端/调用方）；两者都空=无同行。任一 id 解析失败 → 400。
 func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 	uid, ok := auth.UserID(r.Context())
 	if !ok {
@@ -616,13 +694,15 @@ func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		EventType       string `json:"event_type"`
-		Title           string `json:"title"`
-		Description     string `json:"description"`
-		OccurredAt      string `json:"occurred_at"`
-		EndAt           string `json:"end_at"`
-		Location        string `json:"location"`
-		RelatedPersonID string `json:"related_person_id"`
+		EventType        string   `json:"event_type"`
+		Title            string   `json:"title"`
+		Description      string   `json:"description"`
+		OccurredAt       string   `json:"occurred_at"`
+		EndAt            string   `json:"end_at"`
+		Location         string   `json:"location"`
+		RelatedPersonID  string   `json:"related_person_id"`  // 单字段，向后兼容保留（P2a② 前）
+		RelatedPersonIDs []string `json:"related_person_ids"` // P2a②：多人同行数组（为主）
+		Importance       float64  `json:"importance"`         // P2a①：可选，0/缺省=事件类型默认，>0 clamp 到 (0,1]
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "请求体非法", http.StatusBadRequest)
@@ -636,17 +716,29 @@ func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "title 必填", http.StatusBadRequest)
 		return
 	}
-	var related *ids.ID
+	// 同行人物解析（P2a②）：数组为主，旧单字段非空时并入；两者都空 → related 为 nil（无同行）。
+	var related []ids.ID
+	for _, s := range req.RelatedPersonIDs {
+		if strings.TrimSpace(s) == "" {
+			continue // 容忍数组里的空串项
+		}
+		rid, err := ids.ParseID(s)
+		if err != nil {
+			http.Error(w, "related_person_ids 含非法 id", http.StatusBadRequest)
+			return
+		}
+		related = append(related, rid)
+	}
 	if req.RelatedPersonID != "" {
 		rid, err := ids.ParseID(req.RelatedPersonID)
 		if err != nil {
 			http.Error(w, "related_person_id 非法", http.StatusBadRequest)
 			return
 		}
-		related = &rid
+		related = append(related, rid)
 	}
 	e, err := h.Service.ManualAddEvent(r.Context(), uid.Int64(), pid, req.EventType, req.Title,
-		req.Description, req.OccurredAt, req.EndAt, req.Location, related)
+		req.Description, req.OccurredAt, req.EndAt, req.Location, related, req.Importance)
 	if err != nil {
 		if errors.Is(err, profile.ErrNotFound) {
 			http.Error(w, "人物不存在", http.StatusNotFound)
@@ -756,6 +848,22 @@ func parseMeasuredAt(s string) time.Time {
 	return time.Now()
 }
 
+// parseDateParam 解析时间窗查询参数（YYYY-MM-DD）→ 当日 00:00 UTC 指针。空串 → (nil, nil)
+// （不限该边界）；格式非法 → 返回错误（handler 转 400）。与 repo 半开区间 [from, to) 配合。
+// activity 平面时间窗查询用（metric 用 feat 分组契约、不走窗口）。
+func parseDateParam(s string) (*time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	// time.Parse 该 layout 无时区 → 直接得 UTC 当日零点，无需再 In(UTC)。
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 // ListMetrics 人物时序指标（分组结构，每组按 measured_at 升序）。只返回 active+pending
 // （repo ListByPerson 已过滤）。?metric_key=weight 只看单一指标（可选）。
 func (h *PersonHandler) ListMetrics(w http.ResponseWriter, r *http.Request) {
@@ -861,6 +969,247 @@ func (h *PersonHandler) DeleteMetric(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// ---- 周期/日程（cycle 平面 · P3，敏感）----
+
+// cyclesDisclaimer 周期「下次预测」免责文案（spec §9）：next_predicted_at 是按历史周期
+// （anchor+period）的纯时间估算，非医疗建议。随列表下发（响应体 note 字段），前端须展示。
+const cyclesDisclaimer = "周期下次时间为按历史周期估算，仅供参考，非医疗建议"
+
+// ListCycles 周期/日程列表（repo 按 cycle_type 分组、组内 id 排序）。默认只展示 active+pending
+// （对齐详情 events 的过滤语义——单值语义下 superseded/dismissed 历史版本混入会干扰）；
+// ?status= 显式过滤某状态。响应体带 note 免责文案（spec §9），前端展示「下次预测」时须一并呈现。
+func (h *PersonHandler) ListCycles(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	// 子表按 person_id 查询无 user 过滤，先确认 person 归属登录用户（越权 → 404）。
+	if p, err := h.Persons.Get(r.Context(), uid.Int64(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if p == nil {
+		http.Error(w, "人物不存在", http.StatusNotFound)
+		return
+	}
+	list, err := h.Cycles.ListByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// 默认只展示 active+pending（单值语义的历史版本 superseded/dismissed 混入会干扰）；
+	// ?status= 显式过滤（对齐 ListMetrics/ListEvents）。
+	if st := r.URL.Query().Get("status"); st != "" {
+		filtered := make([]repo.PersonCycle, 0, len(list))
+		for _, c := range list {
+			if c.Status == st {
+				filtered = append(filtered, c)
+			}
+		}
+		list = filtered
+	} else {
+		filtered := make([]repo.PersonCycle, 0, len(list))
+		for _, c := range list {
+			if c.Status == "active" || c.Status == "pending" {
+				filtered = append(filtered, c)
+			}
+		}
+		list = filtered
+	}
+	writeJSON(w, map[string]any{"cycles": list, "note": cyclesDisclaimer})
+}
+
+// AddCycle 手动加周期/日程（走 Service：active/manual/conf=1.0 + 审计）。
+// cycle_type 4 枚举校验；label 空→nil；anchor+period 齐时 Service 算 next_predicted_at。
+// 注意 Service 签名 (…, frequency, dosage, …) 的形参顺序与 body 字段顺序相反，勿传错位。
+func (h *PersonHandler) AddCycle(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	pid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		CycleType    string `json:"cycle_type"`
+		Label        string `json:"label"`
+		AnchorDate   string `json:"anchor_date"`
+		PeriodDays   int    `json:"period_days"`
+		DurationDays int    `json:"duration_days"`
+		Dosage       string `json:"dosage"`
+		Frequency    string `json:"frequency"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	if !profile.ValidCycleTypes[req.CycleType] {
+		http.Error(w, "cycle_type 非法", http.StatusBadRequest)
+		return
+	}
+	c, err := h.Service.ManualAddCycle(r.Context(), uid.Int64(), pid, req.CycleType, req.Label,
+		req.AnchorDate, req.Frequency, req.Dosage, req.PeriodDays, req.DurationDays)
+	if err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "人物不存在", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, c)
+}
+
+// DeleteCycle 手动删周期 → dismissed + delete 审计。
+func (h *PersonHandler) DeleteCycle(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	cid, err := ids.ParseID(chi.URLParam(r, "cid"))
+	if err != nil {
+		http.Error(w, "cid 非法", http.StatusBadRequest)
+		return
+	}
+	if err := h.Service.ManualDeleteCycle(r.Context(), uid.Int64(), cid); err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "周期不存在", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// ---- 生活轨迹（activity 平面 · P4 测点流）----
+
+// ListActivities 生活轨迹时间线（全状态，按开始时间升序——repo ListByPerson 已排序）。
+// query：from=/to=（YYYY-MM-DD）时间窗，半开区间 [from,to)（与 parseDateParam 语义——to 传当日
+// 00:00 即「不含 to 当日」）；解析失败 → 400。?status= 可选只看某状态。全状态返回（含 dismissed）：
+// 前端时间线用 status!==dismissed 客户端过滤，软删行仍随列表下发。
+func (h *PersonHandler) ListActivities(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	// 子表按 person_id 查询无 user 过滤，先确认 person 归属登录用户（越权 → 404）。
+	if p, err := h.Persons.Get(r.Context(), uid.Int64(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if p == nil {
+		http.Error(w, "人物不存在", http.StatusNotFound)
+		return
+	}
+	from, err := parseDateParam(r.URL.Query().Get("from"))
+	if err != nil {
+		http.Error(w, "from 非法（YYYY-MM-DD）", http.StatusBadRequest)
+		return
+	}
+	to, err := parseDateParam(r.URL.Query().Get("to"))
+	if err != nil {
+		http.Error(w, "to 非法（YYYY-MM-DD）", http.StatusBadRequest)
+		return
+	}
+	list, err := h.Activities.ListByPerson(r.Context(), id, from, to)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if st := r.URL.Query().Get("status"); st != "" {
+		filtered := make([]repo.PersonActivity, 0, len(list))
+		for _, a := range list {
+			if a.Status == st {
+				filtered = append(filtered, a)
+			}
+		}
+		list = filtered
+	}
+	writeJSON(w, map[string]any{"activities": list})
+}
+
+// AddActivity 手动加活动（走 Service：active/manual/conf=1.0 + 审计）。
+// activity 空 400；tool/location/commute_mode 可空（Service trim 空→NULL）；started_at 原始串
+// 透传 Service（parseEventAt 尽力解析，空/失败落 time.Now()）；duration_min 用 json int 的
+// 0=未给（Service ≤0 不落列）。返回裸行（对齐 AddMetric/AddCycle/AddEvent）。
+func (h *PersonHandler) AddActivity(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	pid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Activity    string `json:"activity"`
+		Tool        string `json:"tool"`
+		Location    string `json:"location"`
+		CommuteMode string `json:"commute_mode"`
+		StartedAt   string `json:"started_at"`
+		DurationMin int    `json:"duration_min"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Activity) == "" {
+		http.Error(w, "activity 必填", http.StatusBadRequest)
+		return
+	}
+	a, err := h.Service.ManualAddActivity(r.Context(), uid.Int64(), pid, req.Activity, req.Tool,
+		req.Location, req.CommuteMode, req.StartedAt, req.DurationMin)
+	if err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "人物不存在", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, a) // 返回裸行，对齐 AddMetric/AddCycle/AddEvent（列表端点才有 {activities:[...]} 包络）
+}
+
+// DeleteActivity 手动删活动 → dismissed + delete 审计（软删；全状态 GET 仍返回该行）。
+func (h *PersonHandler) DeleteActivity(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	aid, err := ids.ParseID(chi.URLParam(r, "aid"))
+	if err != nil {
+		http.Error(w, "aid 非法", http.StatusBadRequest)
+		return
+	}
+	if err := h.Service.ManualDeleteActivity(r.Context(), uid.Int64(), aid); err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "活动不存在", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 // ---- 修改历史 ----
 
 func (h *PersonHandler) History(w http.ResponseWriter, r *http.Request) {
@@ -894,7 +1243,7 @@ func (h *PersonHandler) History(w http.ResponseWriter, r *http.Request) {
 // ---- 确认队列（跨平面 pending 并集）----
 
 type pendingItem struct {
-	Kind          string     `json:"kind"` // attribute|relationship|person|event|metric
+	Kind          string     `json:"kind"` // attribute|relationship|person|event|metric|cycle|activity
 	ID            ids.ID     `json:"id"`
 	PersonID      ids.ID     `json:"person_id"`
 	PersonName    string     `json:"person_name"`
@@ -904,6 +1253,7 @@ type pendingItem struct {
 	RelationType  string     `json:"relation_type,omitempty"`
 	EventType     string     `json:"event_type,omitempty"`
 	MetricKey     string     `json:"metric_key,omitempty"`
+	CycleType     string     `json:"cycle_type,omitempty"`
 	OccurredAt    *time.Time `json:"occurred_at,omitempty"`
 	MeasuredAt    *time.Time `json:"measured_at,omitempty"`
 	Label         string     `json:"label,omitempty"`
@@ -997,6 +1347,41 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	cycles, err := h.Cycles.ListPending(ctx, uid.Int64())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, c := range cycles {
+		v := c.CycleType
+		if c.Label != nil {
+			v = c.CycleType + "·" + *c.Label
+		}
+		items = append(items, pendingItem{
+			Kind: "cycle", ID: c.ID, PersonID: c.PersonID, PersonName: nameOf[c.PersonID],
+			CycleType: c.CycleType, Value: v,
+			Confidence: c.Confidence, EpistemicType: c.EpistemicType,
+			SessionID: c.SessionID, SupersedesID: c.SupersedesID,
+		})
+	}
+
+	activities, err := h.Activities.ListPending(ctx, uid.Int64())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, a := range activities {
+		// StartedAt 是值类型（time.Time NOT NULL），取址局部副本填 OccurredAt（队列展示活动开始时刻）。
+		// activity 无 supersedes（测点流独立记录，无版本取代语义），故不填 SupersedesID。
+		at := a.StartedAt
+		items = append(items, pendingItem{
+			Kind: "activity", ID: a.ID, PersonID: a.PersonID, PersonName: nameOf[a.PersonID],
+			Value: a.Activity, OccurredAt: &at,
+			Confidence: a.Confidence, EpistemicType: a.EpistemicType,
+			SessionID: a.SessionID,
+		})
+	}
+
 	for _, p := range persons {
 		if p.Status == "pending" {
 			items = append(items, pendingItem{
@@ -1016,7 +1401,7 @@ func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := chi.URLParam(r, "kind")
 	if !validPendingKinds[kind] {
-		http.Error(w, "kind 非法（person|attribute|relationship|event|metric）", http.StatusBadRequest)
+		http.Error(w, "kind 非法（person|attribute|relationship|event|metric|cycle|activity）", http.StatusBadRequest)
 		return
 	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
@@ -1039,7 +1424,7 @@ func (h *PersonHandler) DismissPending(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := chi.URLParam(r, "kind")
 	if !validPendingKinds[kind] {
-		http.Error(w, "kind 非法（person|attribute|relationship|event|metric）", http.StatusBadRequest)
+		http.Error(w, "kind 非法（person|attribute|relationship|event|metric|cycle|activity）", http.StatusBadRequest)
 		return
 	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))

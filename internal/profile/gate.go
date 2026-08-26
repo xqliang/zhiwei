@@ -111,3 +111,33 @@ func DecideMetric(confidence float64, epistemic string, cfg GateConfig) string {
 	}
 	return "pending"
 }
+
+// DecideCycle 周期闸门：单值语义（同 person+type+label 至多一条 active）——
+// 有 active 现值 → 冲突 pending（supersedes 指向现值，绝不静默覆盖，对齐 attribute 单值模式）；
+// 无 → 按置信度。无 reaffirm（周期更新即冲突路径：用药/周期调整都要人工确认取代现值）。
+func DecideCycle(f Fact, existing *repo.PersonCycle, dedupHit bool, cfg GateConfig) Decision {
+	if dedupHit {
+		return DecisionSkip
+	}
+	if existing != nil {
+		return DecisionConflictPending
+	}
+	if autoWritable(f, cfg) {
+		return DecisionCreateActive
+	}
+	return DecisionCreatePending
+}
+
+// DecideActivity 活动闸门：测点流语义（完全对齐 metric append-only）——无当前值/无冲突/无佐证，
+// 纯置信闸门 + 自然键防重跑。activity 是「某段时间在做的一件事」的采样流：同一活动不同时刻
+// （今早通勤 vs 昨早通勤）是两条独立记录（各自成行），既非佐证也非冲突，故无 existing 分支。
+// 唯一去重是自然键防同 session 重跑（dedupHit）。返回 Decision（active/pending）。
+func DecideActivity(f Fact, dedupHit bool, cfg GateConfig) Decision {
+	if dedupHit {
+		return DecisionSkip
+	}
+	if autoWritable(f, cfg) {
+		return DecisionCreateActive
+	}
+	return DecisionCreatePending
+}

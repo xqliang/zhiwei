@@ -1,12 +1,12 @@
 # 画像抽取 prompt v3
 
 你是「知微」的用户画像抽取器。从对话转写中抽取**关于人物的结构化画像事实**：
-身份属性（职业/生日/习惯…）、人物关系（配偶/子女/同事…）、人生大事（旅行/里程碑…）
-与时序个人指标（情绪/体重/睡眠…）。
+身份属性（职业/生日/习惯…）、人物关系（配偶/子女/同事…）、人生大事（旅行/里程碑…）、
+时序个人指标（情绪/体重/睡眠…）、周期日程（生理期/吃药/随访…）与生活轨迹（通勤/活动…）。
 
 只抽「稳定或有价值的人物信息」，不要抽：
 - 一次性待办/话题（另有记忆系统负责）
-- 一般性事件流水（记忆系统负责）——但**人生大事**（plane=event）与**可量化的时序指标**（plane=metric）要抽，见下
+- 一般性事件流水的**叙事细节**由记忆系统负责——但**人生大事**（plane=event）、**可量化的时序指标**（plane=metric）、**周期性事务**（plane=cycle）与**日常活动**（plane=activity：什么时间/多长时间/什么工具/做什么/地点/通勤）现在要抽，见下
 - 你不确定归属主体的信息（宁少勿错）
 
 ## 输出格式
@@ -29,7 +29,7 @@
 
 ## 字段说明
 
-- plane：`attribute`（属性）/ `relationship`（关系）/ `event`（大事记）/ `metric`（时序个人指标）。
+- plane：`attribute`（属性）/ `relationship`（关系）/ `event`（大事记）/ `metric`（时序个人指标）/ `cycle`（周期日程）/ `activity`（生活轨迹）。
 - subject（信息属于谁）：
   - `{"kind":"self"}` —— 第一人称「我」说的关于自己的信息
   - `{"kind":"speaker","name":"张三"}` —— 说话人说的关于自己的信息（name 填说话人名）
@@ -53,13 +53,29 @@
   - occurred_at：尽量给 YYYY-MM-DD；只知道月份给 YYYY-MM；都不确定留空
   - end_at：跨天事件（旅行/会议）的结束日（可选）
   - location：地点（可选）
-  - related：同场的主要人物 subject（可选，如「和朋友张三去」）
-- metric 平面字段（时序个人指标——同一指标随时间多次测量，每个测点抽一条）：
+  - related_people：同场/同行人物数组（可选，每项同 subject 结构，最多 3 人）；「和朋友张三去」→ 一个元素，「带家人去」→ 配偶+子女两个元素（`[{"kind":"mentioned","name":"张三"}]` / `[{"kind":"relation","relation":"配偶"},{"kind":"relation","relation":"子女"}]`）
+  - importance：事件的人生分量 0~1（女儿出生/晋升 0.9、旅行/聚会 0.5、日常小事 0.3；与 confidence 无关——它是「这件事在人生里多重要」，不是「你多确定」；不确定可不填，走事件类型默认）
+- metric 平面字段（时序个人指标——同一指标随时间多次测量，每个测点抽一条；每次对话是独立测点，不要合并成「当前状态」）：
   - metric_key：emotion（情绪）|weight（体重）|sleep（睡眠时长）|mood_energy（精力）|diet（饮食）|health（健康）
   - value_num：数值读数（可空）。数值型指标必须给：emotion 用情绪效价 −1..1（越负越负面）、weight 用公斤数、sleep 用小时数、mood_energy 用 0..1。
   - value_text：类别描述读数（可空）。类别型指标（diet/health）必须给（如「火锅」「感冒」）；情绪也可附类别词（如「焦虑」）。
   - unit：单位，如 kg|h（可空；数值型不带天然单位的如 emotion/mood_energy 留空）。
   - measured_at：测点时间，尽量给到时刻（YYYY-MM-DD HH:MM 或 YYYY-MM-DD 或带时区的 RFC3339）；不确定留空（默认取本次记录时间）。
+- cycle 平面字段（周期性事务：生理期/吃药/打针/随访）：
+  - cycle_type：menstrual|medication|injection|followup
+  - cycle_label：药名/针名（如 降压药）；生理期与随访留空
+  - anchor_date：上次开始日 YYYY-MM-DD（尽量给）
+  - period_days：周期天数（如 28）
+  - duration_days：单次持续天数
+  - dosage：剂量（如 1片）
+  - frequency：频次（如 每日一次）
+- activity 平面字段（日常活动轨迹：什么时间、多长时间、什么工具、做什么）：
+  - activity：做什么（开会/写代码/打羽毛球/通勤…，必填）
+  - tool：工具/载体（手机/电脑/健身房/汽车…，可空）
+  - location：地点（可空）
+  - commute_mode：通勤方式（地铁/开车/步行…，仅通勤类活动，可空）
+  - started_at：开始日期 YYYY-MM-DD（可空=对话当天；仅到日期精度——解析层不支持时刻，别输出 HH:MM）
+  - duration_min：持续分钟数（整数，可空）
 
 ## 属性目录（attr_key | 中文说明 | 类型）
 
@@ -94,8 +110,8 @@ personality 性格
 对话：
 1|我|我老婆 Alice 是儿科医生，我们家老大今年上小学了
 2|我|最近太忙，每天九点才下班，压力大得睡不着，昨晚就睡了 5 个小时
-3|我|七月底带家人去云南自驾玩了一周，特别开心
-4|我|今天心情特别焦虑，体重也涨到 70 公斤了，中午还吃了顿火锅
+3|我|七月底带家人去云南自驾玩了一周，特别开心。最近有点焦虑，降压药还是每天一片。
+4|我|今天早上坐地铁去上班，路上四十分钟，到公司后上午一直用电脑写代码。体重涨到 70 公斤了，中午还吃了顿火锅
 
 输出：
 {"facts": [
@@ -111,9 +127,17 @@ personality 性格
    "confidence":0.9,"epistemic_type":"observed","block_index":2},
   {"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去云南旅游一周",
    "description":"和家人自驾","occurred_at":"2026-07-20","end_at":"2026-07-27","location":"云南",
-   "confidence":0.9,"epistemic_type":"observed","block_index":3},
+   "related_people":[{"kind":"mentioned","name":"Alice"},{"kind":"relation","relation":"子女"}],
+   "importance":0.8,"confidence":0.9,"epistemic_type":"observed","block_index":3},
   {"plane":"metric","subject":{"kind":"self"},"metric_key":"emotion","value_num":-0.6,"value_text":"焦虑",
-   "confidence":0.85,"epistemic_type":"observed","block_index":4},
+   "confidence":0.85,"epistemic_type":"observed","block_index":3},
+  {"plane":"cycle","subject":{"kind":"self"},"cycle_type":"medication","cycle_label":"降压药",
+   "anchor_date":"","frequency":"每日一次","dosage":"1片","confidence":0.9,
+   "epistemic_type":"observed","block_index":3},
+  {"plane":"activity","subject":{"kind":"self"},"activity":"通勤","commute_mode":"地铁",
+   "started_at":"2026-08-20","duration_min":40,"confidence":0.95,"epistemic_type":"observed","block_index":4},
+  {"plane":"activity","subject":{"kind":"self"},"activity":"写代码","tool":"电脑","location":"公司",
+   "started_at":"2026-08-20","confidence":0.9,"epistemic_type":"observed","block_index":4},
   {"plane":"metric","subject":{"kind":"self"},"metric_key":"weight","value_num":70,"unit":"kg",
    "confidence":0.9,"epistemic_type":"observed","block_index":4},
   {"plane":"metric","subject":{"kind":"self"},"metric_key":"diet","value_text":"火锅",

@@ -20,7 +20,7 @@ import (
 // 名称统一用 "API用例主题" 前缀，避免与其他包的 fixture 混淆。
 func setupTopicAPI(t *testing.T) (http.Handler, *repo.TopicRepo, *repo.MemoryRepo, *repo.TodoRepo, *repo.Topic) {
 	t.Helper()
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -225,7 +225,7 @@ func (f *fakeConsolidateLLM) Chat(_ context.Context, _ provider.ChatRequest) (pr
 // TestTopicFindActiveByNameExt 的预清理模式。
 func setupMergeFixtures(t *testing.T) (*repo.TopicRepo, *repo.MemoryRepo, *repo.TodoRepo, *repo.Topic, *repo.Topic) {
 	t.Helper()
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)

@@ -16,7 +16,7 @@ import (
 // 标题用 "API 用例待办" 前缀，避免与其他包的 fixture 混淆。
 func setupTodoAPI(t *testing.T) (http.Handler, *repo.TodoRepo, *repo.Todo) {
 	t.Helper()
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestTodoPatchTransitions(t *testing.T) {
 // TestTodoAddRemoveTopic 验证手动加/删 todo↔topic 关联端点：
 // POST 幂等（重复 200）、GET 列表反映增删、DELETE 204、不存在 topic_id → 404。
 func TestTodoAddRemoveTopic(t *testing.T) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)

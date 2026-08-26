@@ -35,7 +35,7 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ids.Init(1); err != nil {
+	if err := ids.InitForTest(); err != nil {
 		t.Fatal(err)
 	}
 	svc := &profile.Service{
@@ -44,8 +44,10 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 		Memories: &repo.MemoryRepo{DB: db}, Speakers: &repo.SpeakerRepo{DB: db},
 		Persons: &repo.PersonRepo{DB: db}, Attributes: &repo.PersonAttributeRepo{DB: db},
 		Relationships: &repo.PersonRelationshipRepo{DB: db}, ChangeLogs: &repo.PersonChangeLogRepo{DB: db},
-		Events: &repo.PersonEventRepo{DB: db}, Metrics: &repo.PersonMetricRepo{DB: db},
-		LLM: &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
+		Events:  &repo.PersonEventRepo{DB: db},
+		Metrics: &repo.PersonMetricRepo{DB: db}, Cycles: &repo.PersonCycleRepo{DB: db},
+		Activities: &repo.PersonActivityRepo{DB: db},
+		LLM:        &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
 		Gate: profile.GateConfig{AutoConf: 0.75},
 	}
 	if err := repo.EnsurePersonBootstrap(context.Background(), svc.Persons, svc.Speakers); err != nil {
@@ -55,7 +57,8 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 	RegisterPerson(r, &PersonHandler{
 		Persons: svc.Persons, Attributes: svc.Attributes,
 		Relationships: svc.Relationships, ChangeLogs: svc.ChangeLogs,
-		Events: svc.Events, Metrics: svc.Metrics, Service: svc,
+		Events: svc.Events, Metrics: svc.Metrics, Cycles: svc.Cycles,
+		Activities: svc.Activities, Service: svc,
 	})
 	return r, svc
 }
@@ -383,6 +386,10 @@ func TestPersonEventAPI(t *testing.T) {
 	if ev.Status != "active" || ev.Source != "manual" || ev.OccurredAt == nil {
 		t.Fatalf("手动事件错误: %+v", ev)
 	}
+	// P2a①：未给 importance 的「旅行」事件 → 事件类型默认 0.5（不再是旧代偿的 confidence/固定 1.0）
+	if ev.Importance < 0.49 || ev.Importance > 0.51 {
+		t.Fatalf("旅行事件未给 importance 应走类型默认 0.5，实得 %v", ev.Importance)
+	}
 	// M1 回归：+08:00 05:00 → 存库日期 07-20
 	if ev.OccurredAt.Format("2006-01-02") != "2026-07-20" {
 		t.Fatalf("occurred_at 日期错误: %v", ev.OccurredAt)
@@ -477,6 +484,422 @@ func TestPersonEventAPI(t *testing.T) {
 	}
 	if d, _ := svc.Events.Get(ctx, ev.ID); d.Status != "dismissed" {
 		t.Fatalf("删除后应 dismissed: %+v", d)
+	}
+
+	// P2a①：body 带 importance=0.9 → 落库 0.9（显式值优先于类型默认）
+	rec = doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "旅行", "title": "API 测试-重要旅行", "importance": 0.9})
+	if rec.Code != 200 {
+		t.Fatalf("加事件(带 importance)失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var evImp repo.PersonEvent
+	_ = json.Unmarshal(rec.Body.Bytes(), &evImp)
+	if evImp.Importance < 0.89 || evImp.Importance > 0.91 {
+		t.Fatalf("body importance=0.9 应落库 0.9，实得 %v", evImp.Importance)
+	}
+}
+
+// TestPersonEventMultiRelatedAPI 覆盖 P2a② API 层同行人物：related_person_ids 数组落多元素、
+// 旧单字段 related_person_id 向后兼容、数组含非法 id → 400。跨包非自隔离：cleanup 删掉 owner 的
+// person_event/event 审计与两名被引用人物（含其 person 审计）。
+func TestPersonEventMultiRelatedAPI(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+
+	a, err := svc.ManualCreatePerson(ctx, 1, "API多人同行甲", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := svc.ManualCreatePerson(ctx, 1, "API多人同行乙", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_event WHERE person_id = ?", owner.ID.Int64())
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'", owner.ID.Int64())
+		for _, id := range []ids.ID{a.ID, b.ID} {
+			_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_change_log WHERE person_id = ?", id.Int64())
+			_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person WHERE id = ?", id.Int64())
+		}
+	})
+
+	// ① related_person_ids 数组两人 → 落两元素（顺序同入参）
+	rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "旅行", "title": "API多人-数组两人",
+			"related_person_ids": []string{a.ID.String(), b.ID.String()}})
+	if rec.Code != 200 {
+		t.Fatalf("加事件(数组)失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var ev repo.PersonEvent
+	_ = json.Unmarshal(rec.Body.Bytes(), &ev)
+	if len(ev.RelatedPersonIDs) != 2 || ev.RelatedPersonIDs[0] != a.ID || ev.RelatedPersonIDs[1] != b.ID {
+		t.Fatalf("related_person_ids 两人应落 [甲,乙]，实得 %v", ev.RelatedPersonIDs)
+	}
+
+	// ② 旧单字段 related_person_id 向后兼容 → 落 1 元素
+	rec = doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "会议", "title": "API多人-旧单字段", "related_person_id": a.ID.String()})
+	if rec.Code != 200 {
+		t.Fatalf("加事件(单字段)失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var ev2 repo.PersonEvent
+	_ = json.Unmarshal(rec.Body.Bytes(), &ev2)
+	if len(ev2.RelatedPersonIDs) != 1 || ev2.RelatedPersonIDs[0] != a.ID {
+		t.Fatalf("旧单字段应落 1 元素（甲），实得 %v", ev2.RelatedPersonIDs)
+	}
+
+	// ③ 数组含非法 id → 400
+	if rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "旅行", "title": "API多人-非法id",
+			"related_person_ids": []string{"not-an-id"}}); rec.Code != 400 {
+		t.Fatalf("数组含非法 id 应 400: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPersonCycleAPI 覆盖周期/日程 API 全链路：手动加周期（anchor+period 算 next_predicted_at）、
+// cycle_type 枚举校验、列表带 note 免责文案（spec §9）、确认队列含 cycle 条目并 HTTP 确认、
+// 删除转 dismissed。跨包非自隔离：t.Cleanup 删掉 owner 的 person_cycle 行 + entity_kind='cycle'
+// 审计行，防污染 profile 包同库断言。
+func TestPersonCycleAPI(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+	t.Cleanup(func() {
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_cycle WHERE person_id = ?", owner.ID.Int64())
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'cycle'", owner.ID.Int64())
+	})
+
+	// 手动加周期（medication + anchor 2026-08-01 + period 30 → next_predicted_at = 08-31）
+	rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/cycles",
+		map[string]any{"cycle_type": "medication", "label": "API 测试-降压药",
+			"anchor_date": "2026-08-01", "period_days": 30, "dosage": "5mg", "frequency": "每日一次"})
+	if rec.Code != 200 {
+		t.Fatalf("加周期失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var c repo.PersonCycle
+	_ = json.Unmarshal(rec.Body.Bytes(), &c)
+	if c.Status != "active" || c.Source != "manual" {
+		t.Fatalf("手动周期错误: %+v", c)
+	}
+	// anchor 2026-08-01 + period 30 天 = 2026-08-31（估算非医疗建议）
+	if c.NextPredictedAt == nil || c.NextPredictedAt.Format("2006-01-02") != "2026-08-31" {
+		t.Fatalf("next_predicted_at 应为 2026-08-31: %v", c.NextPredictedAt)
+	}
+
+	// 非法 cycle_type → 400
+	if rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/cycles",
+		map[string]any{"cycle_type": "健身"}); rec.Code != 400 {
+		t.Fatalf("非法 cycle_type 应 400: %d", rec.Code)
+	}
+
+	// 列表带 note 免责文案（spec §9）
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/cycles", nil)
+	if rec.Code != 200 {
+		t.Fatalf("列表失败: %d", rec.Code)
+	}
+	var listR struct {
+		Cycles []repo.PersonCycle `json:"cycles"`
+		Note   string             `json:"note"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if listR.Note == "" {
+		t.Fatal("cycles 响应应含 note 免责文案")
+	}
+	if len(listR.Cycles) < 1 {
+		t.Fatalf("列表应含 1 条: %d", len(listR.Cycles))
+	}
+
+	// 造一条 pending（低置信、不同 type/label 避免撞上面 active 的冲突路径）→ 队列含 cycle → 确认
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []profile.Fact{
+		{Plane: "cycle", Subject: profile.Subject{Kind: "self"}, CycleType: "followup",
+			CycleLabel: "API 测试-复诊", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = doReq(t, h, "GET", "/api/profile/pending", nil)
+	var pend struct {
+		Items []map[string]any `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pend)
+	var cItemID string
+	for _, it := range pend.Items {
+		if it["kind"] == "cycle" && it["cycle_type"] == "followup" {
+			cItemID, _ = it["id"].(string)
+		}
+	}
+	if cItemID == "" {
+		t.Fatalf("队列缺 cycle 条目: %+v", pend.Items)
+	}
+	// 详情 PendingCount 应含该 pending cycle（此刻 owner 仅此一条 pending）
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String(), nil)
+	var detail struct {
+		PendingCount int `json:"pending_count"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail)
+	if detail.PendingCount < 1 {
+		t.Fatalf("详情 PendingCount 应含 pending cycle: %d", detail.PendingCount)
+	}
+	if rec := doReq(t, h, "POST", "/api/profile/pending/cycle/"+cItemID+"/confirm", nil); rec.Code != 200 {
+		t.Fatalf("周期确认失败: %d %s", rec.Code, rec.Body.String())
+	}
+	cid2, _ := ids.ParseID(cItemID)
+	if got, _ := svc.Cycles.Get(ctx, cid2); got == nil || got.Status != "active" {
+		t.Fatalf("确认后应 active: %+v", got)
+	}
+
+	// 删除不存在的周期 → 404
+	if rec := doReq(t, h, "DELETE", "/api/persons/"+owner.ID.String()+"/cycles/"+ids.New().String(), nil); rec.Code != 404 {
+		t.Fatalf("删除不存在周期应 404: %d %s", rec.Code, rec.Body.String())
+	}
+	// 删除周期 → dismissed
+	if rec := doReq(t, h, "DELETE", "/api/persons/"+owner.ID.String()+"/cycles/"+c.ID.String(), nil); rec.Code != 200 {
+		t.Fatalf("删除失败: %d", rec.Code)
+	}
+	if d, _ := svc.Cycles.Get(ctx, c.ID); d == nil || d.Status != "dismissed" {
+		t.Fatalf("删除后应 dismissed: %+v", d)
+	}
+
+	// ListCycles 默认滤历史版本：c 已 dismissed，默认列表（无 status）不应含它
+	// （json.Unmarshal 会先把 listR.Cycles 长度重置为 0 再 append，可安全复用）。
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/cycles", nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	for _, cy := range listR.Cycles {
+		if cy.ID == c.ID {
+			t.Fatalf("默认列表不应含 dismissed 周期 c(id=%s): %+v", c.ID, listR.Cycles)
+		}
+	}
+	// ?status=dismissed 显式过滤时才含（对齐 ListMetrics/ListEvents 的 status 语义）
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String()+"/cycles?status=dismissed", nil)
+	var dismissedR struct {
+		Cycles []repo.PersonCycle `json:"cycles"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &dismissedR)
+	foundDismissed := false
+	for _, cy := range dismissedR.Cycles {
+		if cy.ID == c.ID {
+			foundDismissed = true
+		}
+	}
+	if !foundDismissed {
+		t.Fatalf("?status=dismissed 应含刚删除的周期 c(id=%s): %+v", c.ID, dismissedR.Cycles)
+	}
+}
+
+// TestPersonActivityAPI 覆盖生活轨迹 API 全链路：手动加活动（含可空 tool/location/commute_mode/
+// duration_min）、activity 空值校验、时间线升序（乱序录入→GET 断言升序）、时间窗半开区间、确认
+// 队列含 activity 条目（带 occurred_at）+ 详情 pending 计数 + HTTP 确认、删除转 dismissed（软删，
+// 全状态 GET 仍返回该行——前端靠 status!==dismissed 客户端过滤）。跨包非自隔离：t.Cleanup 删掉
+// owner 的 person_activity 行 + entity_kind='activity' 审计行，防污染 profile 包同库断言。
+func TestPersonActivityAPI(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+	t.Cleanup(func() {
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_activity WHERE person_id = ?", owner.ID.Int64())
+		_, _ = svc.DB.ExecContext(context.Background(), "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'activity'", owner.ID.Int64())
+	})
+
+	base := "/api/persons/" + owner.ID.String() + "/activities"
+
+	// 手动加活动（通勤·地铁·40分钟）——含可空 commute_mode/duration_min。POST 返回裸行（对齐 AddMetric/AddCycle）。
+	rec := doReq(t, h, "POST", base,
+		map[string]any{"activity": "通勤", "commute_mode": "地铁", "started_at": "2026-08-20", "duration_min": 40})
+	if rec.Code != 200 {
+		t.Fatalf("加活动失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var a1 repo.PersonActivity
+	_ = json.Unmarshal(rec.Body.Bytes(), &a1)
+	if a1.Status != "active" || a1.Source != "manual" {
+		t.Fatalf("手动活动错误: %+v", a1)
+	}
+	if a1.CommuteMode == nil || *a1.CommuteMode != "地铁" {
+		t.Fatalf("commute_mode 应为 地铁: %v", a1.CommuteMode)
+	}
+	if a1.DurationMin == nil || *a1.DurationMin != 40 {
+		t.Fatalf("duration_min 应为 40: %v", a1.DurationMin)
+	}
+
+	// activity 空 → 400（handler 层校验，非 Service 500）
+	if rec := doReq(t, h, "POST", base, map[string]any{"activity": "  "}); rec.Code != 400 {
+		t.Fatalf("空 activity 应 400: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 乱序再加两条不同日期活动（08-25、08-18）→ 后续 GET 断言按 started_at 升序
+	if rec := doReq(t, h, "POST", base, map[string]any{"activity": "打球", "started_at": "2026-08-25"}); rec.Code != 200 {
+		t.Fatalf("加活动2失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(t, h, "POST", base,
+		map[string]any{"activity": "写代码", "tool": "电脑", "location": "公司", "started_at": "2026-08-18"}); rec.Code != 200 {
+		t.Fatalf("加活动3失败: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// GET 全部 → 3 条且按 started_at 升序（08-18 写代码 / 08-20 通勤 / 08-25 打球）
+	rec = doReq(t, h, "GET", base, nil)
+	if rec.Code != 200 {
+		t.Fatalf("列表失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var listR struct {
+		Activities []repo.PersonActivity `json:"activities"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if len(listR.Activities) != 3 {
+		t.Fatalf("应 3 条: %d", len(listR.Activities))
+	}
+	for i := 1; i < len(listR.Activities); i++ {
+		if listR.Activities[i].StartedAt.Before(listR.Activities[i-1].StartedAt) {
+			t.Fatalf("活动应按 started_at 升序: %+v", listR.Activities)
+		}
+	}
+	if listR.Activities[0].Activity != "写代码" || listR.Activities[2].Activity != "打球" {
+		t.Fatalf("升序首尾错误: %s ... %s", listR.Activities[0].Activity, listR.Activities[2].Activity)
+	}
+
+	// 时间窗查询：半开区间 [2026-08-20, 2026-08-21) 命中 08-20 通勤 → 1 条
+	rec = doReq(t, h, "GET", base+"?from=2026-08-20&to=2026-08-21", nil)
+	if rec.Code != 200 {
+		t.Fatalf("时间窗查询失败: %d %s", rec.Code, rec.Body.String())
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if len(listR.Activities) != 1 || listR.Activities[0].Activity != "通勤" {
+		t.Fatalf("时间窗应命中 1 条通勤: %+v", listR.Activities)
+	}
+	// from 烂串 → 400
+	if rec := doReq(t, h, "GET", base+"?from=abc", nil); rec.Code != 400 {
+		t.Fatalf("from 烂串应 400: %d", rec.Code)
+	}
+
+	// 造一条 pending（低置信 0.5<0.75）→ 队列含 activity 条目（带 occurred_at）→ 详情计数 → HTTP 确认 → active
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []profile.Fact{
+		{Plane: "activity", Subject: profile.Subject{Kind: "self"}, ActivityText: "游泳",
+			StartedAt: "2026-08-22", Confidence: 0.5, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = doReq(t, h, "GET", "/api/profile/pending", nil)
+	var pend struct {
+		Items []map[string]any `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pend)
+	var aItemID, aOccurredAt string
+	for _, it := range pend.Items {
+		if it["kind"] == "activity" && it["value"] == "游泳" {
+			aItemID, _ = it["id"].(string)
+			aOccurredAt, _ = it["occurred_at"].(string)
+		}
+	}
+	if aItemID == "" {
+		t.Fatalf("队列缺 activity 条目: %+v", pend.Items)
+	}
+	// 队列条目补 started_at（occurred_at 字段）——前端时间线依赖（对齐 metric 队列条目）
+	if aOccurredAt == "" {
+		t.Fatalf("activity 队列条目应含 occurred_at: %+v", pend.Items)
+	}
+	// 详情 PendingCount 应含该 pending activity（此刻 owner 仅此一条 pending）
+	rec = doReq(t, h, "GET", "/api/persons/"+owner.ID.String(), nil)
+	var detail struct {
+		PendingCount int `json:"pending_count"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail)
+	if detail.PendingCount < 1 {
+		t.Fatalf("详情 PendingCount 应含 pending activity: %d", detail.PendingCount)
+	}
+	// 名册角标（ListWithPending SQL 求和）应同样含该 pending activity——roster/详情角标须一致
+	// （person.go 注释不变量）。直接覆盖 ListWithPending 的 person_activity 子查询。
+	rec = doReq(t, h, "GET", "/api/persons", nil)
+	var roster struct {
+		Persons []repo.PersonWithPending `json:"persons"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &roster)
+	ownerBadge := -1
+	for _, p := range roster.Persons {
+		if p.ID == owner.ID {
+			ownerBadge = p.PendingCount
+		}
+	}
+	if ownerBadge < 1 {
+		t.Fatalf("名册角标应含 pending activity: %d", ownerBadge)
+	}
+	if rec := doReq(t, h, "POST", "/api/profile/pending/activity/"+aItemID+"/confirm", nil); rec.Code != 200 {
+		t.Fatalf("活动确认失败: %d %s", rec.Code, rec.Body.String())
+	}
+	aid2, _ := ids.ParseID(aItemID)
+	if got, _ := svc.Activities.Get(ctx, aid2); got == nil || got.Status != "active" {
+		t.Fatalf("确认后应 active: %+v", got)
+	}
+
+	// 删除不存在的活动（合法 id 但库中无此行）→ 404
+	if rec := doReq(t, h, "DELETE", base+"/"+ids.New().String(), nil); rec.Code != 404 {
+		t.Fatalf("删除不存在活动应 404: %d %s", rec.Code, rec.Body.String())
+	}
+	// 删除活动 → dismissed（软删）
+	if rec := doReq(t, h, "DELETE", base+"/"+a1.ID.String(), nil); rec.Code != 200 {
+		t.Fatalf("删除失败: %d", rec.Code)
+	}
+	if d, _ := svc.Activities.Get(ctx, a1.ID); d == nil || d.Status != "dismissed" {
+		t.Fatalf("删除后应 dismissed: %+v", d)
+	}
+	// 软删后「全状态」GET 仍返回该行（前端靠 status!==dismissed 客户端过滤，非后端剔除）
+	rec = doReq(t, h, "GET", base, nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	foundDismissed := false
+	for _, a := range listR.Activities {
+		if a.ID == a1.ID {
+			if a.Status != "dismissed" {
+				t.Fatalf("软删行状态应 dismissed: %+v", a)
+			}
+			foundDismissed = true
+		}
+	}
+	if !foundDismissed {
+		t.Fatalf("全状态 GET 应仍含软删行(id=%s): %+v", a1.ID, listR.Activities)
+	}
+}
+
+// TestAddAttributeF4Status 锁死 F4 校验错误的 HTTP 状态码映射：脏值（值域不合法）→ 400
+// （对齐 metric 枚举校验的 400 口径），合法但需归一的值 → 200 且返回值已规范化。
+// AddAttribute 与 PatchAttribute 两条手动写入路径都覆盖。
+func TestAddAttributeF4Status(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			pk := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_attribute WHERE person_id = ? AND attr_key IN ('gender','birthday')`, pk)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind='attribute' AND attr_key IN ('gender','birthday')`, pk)
+		}
+	})
+
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+	base := "/api/persons/" + owner.ID.String() + "/attributes"
+
+	// 脏枚举 → 400（而非 500）
+	if rec := doReq(t, h, "POST", base, map[string]any{"attr_key": "gender", "value": "男性"}); rec.Code != 400 {
+		t.Fatalf("脏枚举应 400: %d %s", rec.Code, rec.Body.String())
+	}
+	// 脏日期 → 400
+	if rec := doReq(t, h, "POST", base, map[string]any{"attr_key": "birthday", "value": "八月三号"}); rec.Code != 400 {
+		t.Fatalf("脏日期应 400: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 合法但需重排的日期 → 200，返回值已规范化
+	rec := doReq(t, h, "POST", base, map[string]any{"attr_key": "birthday", "value": "2026/08/03"})
+	if rec.Code != 200 {
+		t.Fatalf("合法日期应 200: %d %s", rec.Code, rec.Body.String())
+	}
+	var attr repo.PersonAttribute
+	_ = json.Unmarshal(rec.Body.Bytes(), &attr)
+	if attr.ValueText != "2026-08-03" {
+		t.Fatalf("日期应规范化为 2026-08-03: %+v", attr)
+	}
+
+	// PatchAttribute 路径同样把脏值映射为 400（改成非目录枚举值）
+	if rec := doReq(t, h, "PATCH", base+"/"+attr.ID.String(),
+		map[string]any{"attr_key": "birthday", "value": "不是日期"}); rec.Code != 400 {
+		t.Fatalf("PATCH 脏值应 400: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

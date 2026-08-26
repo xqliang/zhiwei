@@ -78,7 +78,24 @@ func (s *Service) ManualUpdatePerson(ctx context.Context, userID int64, id ids.I
 	return tx.Commit()
 }
 
-// ManualSetPersonStatus 人物状态流转（归档=dismissed 等）。
+// ManualSetPersonStatus 人物状态流转（删除=dismissed 等）。
+//
+// F5（spec §13）删除级联：status=="dismissed"（删除人物）时，在**同一事务**内把该人物六个平面
+// （属性/关系/大事记/指标/周期/活动）上所有 active|pending 的行一并置 dismissed——否则名册里人物
+// 虽已隐藏，其平面行仍会进抽取闸门/确认队列，留下孤儿引用。**另加**反向边补充（P6）：他人指向
+// 本人的 pending 关系边也一并级联 dismissed（active 反向边刻意保留，那是对端画像）。级联时行
+// dismiss 前的状态记入 pre_dismiss_status 列（active|pending），供下面的恢复级联回查。
+// 级联行数**汇总**记入 person 的 change_log Note（一行审计），**不逐平面、不逐行**写审计条目，
+// 这是刻意取舍：
+//   - 删除是「显式用户意图」——用户已明确要清掉这个人的全部画像数据，无需逐行留痕来还原意图；
+//   - 六平面可能有成百上千行（metric/activity 是测点流），逐行写审计会让 change_log 爆量、得不偿失。
+//     故只在 person 行上留一条带级联计数的汇总审计（可审计「删除时清了多少」，够用）。
+//
+// 恢复级联（000015 迁移后支持）：**从 dismissed 流转为其他状态**（即恢复，典型 active）时，
+// 在同一事务内把六平面上 pre_dismiss_status 非空的级联行翻回原状态并清标记，**以及**被
+// DismissPendingReverseExt 清掉的指向本人的反向 pending 边（RestoreReverseArchivedExt）——
+// 手动删除的行 pre_dismiss_status 为 NULL，天然不被误恢复。非 dismissed 之间的流转
+// （如 active→pending）不触发级联。
 func (s *Service) ManualSetPersonStatus(ctx context.Context, userID int64, id ids.ID, status string) error {
 	p, err := s.Persons.Get(ctx, userID, id) // 按登录用户过滤：越权命中 0 行 → nil → ErrNotFound
 	if err != nil {
@@ -95,10 +112,87 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, userID int64, id id
 	if err := s.Persons.SetStatusExt(ctx, tx, id, status); err != nil {
 		return err
 	}
+
+	// 默认审计备注；删除/恢复时改写为带六平面级联计数的汇总备注。
+	note := "人物状态流转"
+	if status == "dismissed" {
+		// 六平面各自把该人物的 active/pending 行级联置 dismissed（只动活跃态，终态不动——见各 repo
+		// DismissAllByPersonExt 注释）。全部在本事务内执行，任一步失败经 defer Rollback 整体回滚，
+		// 不会留下「人物已删除但平面未级联」的中间态。
+		nAttr, err := s.Attributes.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nRel, err := s.Relationships.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nEvt, err := s.Events.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nMet, err := s.Metrics.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nCyc, err := s.Cycles.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nAct, err := s.Activities.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		// 反向边补充（F5，P6）：他人指向本人（related_person_id=id）的 pending 关系边——删除本人后
+		// 这些「待确认关系」成了确认队列里的孤儿噪声，一并级联 dismissed。active 反向边刻意不动
+		// （那是对端人物画像，删除不替对端做主——见 DismissPendingReverseExt 注释）。行数并入汇总审计。
+		nRevRel, err := s.Relationships.DismissPendingReverseExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		note = fmt.Sprintf("人物删除：级联 dismissed 属性 %d/关系 %d/大事记 %d/指标 %d/周期 %d/活动 %d 行；反向 pending 关系边 %d 条",
+			nAttr, nRel, nEvt, nMet, nCyc, nAct, nRevRel)
+	} else if p.Status == "dismissed" {
+		// 恢复级联：六平面各自把删除时被级联置 dismissed 的行翻回原状态（pre_dismiss_status）。
+		// 手动删的行没有标记、保持 dismissed。同样全在本事务内，任一步失败整体回滚。
+		nAttr, err := s.Attributes.RestoreArchivedExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nRel, err := s.Relationships.RestoreArchivedExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nEvt, err := s.Events.RestoreArchivedExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nMet, err := s.Metrics.RestoreArchivedExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nCyc, err := s.Cycles.RestoreArchivedExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nAct, err := s.Activities.RestoreArchivedExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		// 反向边对称恢复（P6 反向级联的逆）：被清掉的反向 pending 边翻回 pending，
+		// 重新回到确认队列。
+		nRevRel, err := s.Relationships.RestoreReverseArchivedExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		note = fmt.Sprintf("人物恢复：级联恢复 属性 %d/关系 %d/大事记 %d/指标 %d/周期 %d/活动 %d 行；反向 pending 关系边 %d 条（手动删过的行不恢复）",
+			nAttr, nRel, nEvt, nMet, nCyc, nAct, nRevRel)
+	}
+
 	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
 		PersonID: id, EntityKind: "person", EntityID: &id,
 		ChangeType: "update", ChangedBy: "user", OldValue: snap(p.Status), NewValue: snap(status),
-		Note: strPtr("人物状态流转"),
+		Note: strPtr(note),
 	}); err != nil {
 		return err
 	}
@@ -110,6 +204,7 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, userID int64, id id
 // 自持事务：BeginTxx → ManualAddAttributeExt → Commit（行为/签名与历史一致，
 // 现有 api/person.go 调用面零改）。真正的写逻辑在 Ext 变体里，便于并入他人的事务
 // （如 agent 提议确认闸门的单事务 apply-once，见 internal/agent/proposals.go）。
+// F4 写入端校验/规范化在 Ext 单写点做（覆盖 API 与 agent 两条路径）。
 func (s *Service) ManualAddAttribute(ctx context.Context, userID int64, personID ids.ID, attrKey, value string) (*repo.PersonAttribute, error) {
 	tx, err := s.DB.BeginTxx(ctx, nil)
 	if err != nil {
@@ -136,6 +231,16 @@ func (s *Service) ManualAddAttributeExt(ctx context.Context, tx *sqlx.Tx, userID
 		return nil, ErrNotFound
 	}
 	d := Def(attrKey)
+	// F4 写入端校验/规范化（单点闸，见 validate.go）：手动/agent 路径录入的脏值（gender=「男性」、
+	// smokes=「是」、birthday=「八月三号」）在此拦下，error 原样透传 API 层（handler errors.Is
+	// ErrInvalidAttrValue → 400）。与 LLM 路径共用 NormalizeAttrValue，规范化后的值贯穿后续
+	// existing 查询、幂等比较与落库。放在 Ext 单写点，API（经 ManualAddAttribute）与 agent 提议
+	// 确认（直接调 Ext）两条路径都过校验。合并对账（全范围）：从 main 的 ManualAddAttribute 移植而来。
+	norm, verr := NormalizeAttrValue(d, value)
+	if verr != nil {
+		return nil, verr
+	}
+	value = norm
 
 	var existing *repo.PersonAttribute
 	var err error
@@ -318,18 +423,22 @@ func (s *Service) ManualDeleteRelationship(ctx context.Context, userID int64, id
 // ---- event 平面手动 CRUD（P2 大事记）----
 
 // ManualAddEvent 手动加大事记（active/manual conf=1.0 + create 审计）。
-// relatedPersonID 可空；occurredAt/endAt 是原始字符串（YYYY-MM-DD/YYYY-MM/RFC3339，
-// parseEventAt 尽力解析，失败存 NULL）；参数多，调用方为 API handler。
+// ManualAddEvent 手动加大事记（active/manual conf=1.0 + create 审计）。
+// relatedPersonIDs 可空/空切片（无同行人物）——P2a② 支持多人同行，逐个落 RelatedPersonIDs 数组；
+// occurredAt/endAt 是原始字符串（YYYY-MM-DD/YYYY-MM/RFC3339，parseEventAt 尽力解析，失败存 NULL）；
+// importance 为事件人生分量（P2a①）——传 0 走事件类型默认（defaultImportance），>0 clamp 到 (0,1]，
+// 不再固定 1.0（手动录入的日常事件不该天然「满分重要」，与 LLM 路径共用同一取值链
+// eventImportanceOrDefault）；参数多，调用方为 API handler。
 // 自持事务：BeginTxx → ManualAddEventExt → Commit（行为/签名与历史一致）。
 func (s *Service) ManualAddEvent(ctx context.Context, userID int64, personID ids.ID, eventType, title,
-	description, occurredAt, endAt, location string, relatedPersonID *ids.ID) (*repo.PersonEvent, error) {
+	description, occurredAt, endAt, location string, relatedPersonIDs []ids.ID, importance float64) (*repo.PersonEvent, error) {
 
 	tx, err := s.DB.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }() // Commit 后为 no-op
-	row, err := s.ManualAddEventExt(ctx, tx, userID, personID, eventType, title, description, occurredAt, endAt, location, relatedPersonID)
+	row, err := s.ManualAddEventExt(ctx, tx, userID, personID, eventType, title, description, occurredAt, endAt, location, relatedPersonIDs, importance)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +449,7 @@ func (s *Service) ManualAddEvent(ctx context.Context, userID int64, personID ids
 // 供调用方（如 agent 提议确认闸门）把「事件写 + Proposals.Resolve」原子并进同一事务（D1）。
 // 校验与落库语义与 ManualAddEvent 完全一致（event_type 合法 + title 非空 + 审计 changed_by=user）。
 func (s *Service) ManualAddEventExt(ctx context.Context, tx *sqlx.Tx, userID int64, personID ids.ID, eventType, title,
-	description, occurredAt, endAt, location string, relatedPersonID *ids.ID) (*repo.PersonEvent, error) {
+	description, occurredAt, endAt, location string, relatedPersonIDs []ids.ID, importance float64) (*repo.PersonEvent, error) {
 
 	// IDOR 校验：确认 person 归属登录用户（越权命中 0 行 → nil → ErrNotFound）。
 	if p, err := s.Persons.Get(ctx, userID, personID); err != nil {
@@ -357,7 +466,7 @@ func (s *Service) ManualAddEventExt(ctx context.Context, tx *sqlx.Tx, userID int
 	row := &repo.PersonEvent{
 		UserID: userID, PersonID: personID, EventType: eventType, Title: strings.TrimSpace(title),
 		Confidence: 1.0, EpistemicType: "observed", Source: "manual", Status: "active",
-		Importance: 1.0,
+		Importance: eventImportanceOrDefault(importance, eventType),
 	}
 	if strings.TrimSpace(description) != "" {
 		row.Description = strPtr(strings.TrimSpace(description))
@@ -371,8 +480,8 @@ func (s *Service) ManualAddEventExt(ctx context.Context, tx *sqlx.Tx, userID int
 	if strings.TrimSpace(location) != "" {
 		row.Location = strPtr(strings.TrimSpace(location))
 	}
-	if relatedPersonID != nil {
-		row.RelatedPersonIDs = ids.List{*relatedPersonID}
+	if len(relatedPersonIDs) > 0 {
+		row.RelatedPersonIDs = ids.List(relatedPersonIDs)
 	}
 	if err := s.Events.CreateExt(ctx, tx, row); err != nil {
 		return nil, err
@@ -525,6 +634,166 @@ func (s *Service) ManualDeleteMetric(ctx context.Context, userID int64, id ids.I
 	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
 		PersonID: m.PersonID, EntityKind: "metric", EntityID: &id,
 		ChangeType: "delete", ChangedBy: "user", OldValue: snap(metricSummary(m)),
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ---- cycle 平面手动 CRUD（P3 周期/日程，敏感）----
+
+// ManualAddCycle 手动加周期/日程（active/manual conf=1.0 + create 审计）。label 空→nil；
+// next_predicted_at 经 applyCycleParams 与 LLM 路径共用同一算法（anchor+period）；period/
+// duration<=0 不落列（同 LLM 路径「未给不设」）。参数多，调用方为 API handler。
+func (s *Service) ManualAddCycle(ctx context.Context, userID int64, personID ids.ID, cycleType, label, anchorDate,
+	frequency, dosage string, periodDays, durationDays int) (*repo.PersonCycle, error) {
+
+	if !ValidCycleTypes[cycleType] {
+		return nil, fmt.Errorf("非法周期类型: %s", cycleType)
+	}
+	// IDOR 校验：确认 person 归属登录用户（越权命中 0 行 → nil → ErrNotFound）。
+	if p, err := s.Persons.Get(ctx, userID, personID); err != nil {
+		return nil, err
+	} else if p == nil {
+		return nil, ErrNotFound
+	}
+	row := &repo.PersonCycle{
+		UserID: userID, PersonID: personID, CycleType: cycleType,
+		Confidence: 1.0, EpistemicType: "observed", Source: "manual", Status: "active",
+	}
+	if l := strings.TrimSpace(label); l != "" {
+		row.Label = &l
+	}
+	applyCycleParams(row, anchorDate, periodDays, durationDays, dosage, frequency)
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Cycles.CreateExt(ctx, tx, row); err != nil {
+		return nil, err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "cycle", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "user", NewValue: snap(row.CycleType),
+		Confidence: fp(1.0),
+	}); err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualDeleteCycle 手动删周期 → dismissed + delete 审计。
+func (s *Service) ManualDeleteCycle(ctx context.Context, userID int64, id ids.ID) error {
+	c, err := s.Cycles.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if c == nil {
+		return ErrNotFound
+	}
+	// IDOR 校验：子表行 Get 无 user 过滤，先按行的 person_id 确认归属登录用户。
+	if p, err := s.Persons.Get(ctx, userID, c.PersonID); err != nil {
+		return err
+	} else if p == nil {
+		return ErrNotFound
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Cycles.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
+		return err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: c.PersonID, EntityKind: "cycle", EntityID: &id,
+		ChangeType: "delete", ChangedBy: "user", OldValue: snap(c.CycleType),
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ---- activity 平面手动 CRUD（P4 生活轨迹，测点流语义）----
+
+// ManualAddActivity 手动加活动（active/manual conf=1.0 + create 审计）。activity trim 非空校验；
+// tool/location/commuteMode trim 空→nil（走 repo <=> NULL 匹配，同 LLM 路径 applyActivityFact）；
+// duration>0 才落（≤0 视为未给，不臆造 0 分钟）；startedAt 解析失败 → time.Now() 兜底：手动录入
+// 没有「对话发生时刻」可依，不知道时间就记当下（区别于 LLM 路径的 fallbackAt——那里能用
+// session.created_at）。参数多，调用方为 API handler。
+func (s *Service) ManualAddActivity(ctx context.Context, userID int64, personID ids.ID, activity, tool, location,
+	commuteMode, startedAt string, durationMin int) (*repo.PersonActivity, error) {
+
+	act := strings.TrimSpace(activity)
+	if act == "" {
+		return nil, fmt.Errorf("activity 不能为空")
+	}
+	// IDOR 校验：确认 person 归属登录用户（越权命中 0 行 → nil → ErrNotFound）。
+	if p, err := s.Persons.Get(ctx, userID, personID); err != nil {
+		return nil, err
+	} else if p == nil {
+		return nil, ErrNotFound
+	}
+	at := time.Now()
+	if t, ok := parseEventAt(startedAt); ok {
+		at = t
+	}
+	row := &repo.PersonActivity{
+		UserID: userID, PersonID: personID, Activity: act, StartedAt: at,
+		Tool:        trimToPtr(tool),
+		Location:    trimToPtr(location),
+		CommuteMode: trimToPtr(commuteMode),
+		Confidence:  1.0, EpistemicType: "observed", Source: "manual", Status: "active",
+	}
+	if durationMin > 0 {
+		dm := durationMin
+		row.DurationMin = &dm
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Activities.CreateExt(ctx, tx, row); err != nil {
+		return nil, err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "activity", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "user", NewValue: snap(row.Activity),
+		Confidence: fp(1.0),
+	}); err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualDeleteActivity 手动删活动 → dismissed + delete 审计。
+func (s *Service) ManualDeleteActivity(ctx context.Context, userID int64, id ids.ID) error {
+	a, err := s.Activities.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if a == nil {
+		return ErrNotFound
+	}
+	// IDOR 校验：子表行 Get 无 user 过滤，先按行的 person_id 确认归属登录用户。
+	if p, err := s.Persons.Get(ctx, userID, a.PersonID); err != nil {
+		return err
+	} else if p == nil {
+		return ErrNotFound
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Activities.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
+		return err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: a.PersonID, EntityKind: "activity", EntityID: &id,
+		ChangeType: "delete", ChangedBy: "user", OldValue: snap(a.Activity),
 	}); err != nil {
 		return err
 	}

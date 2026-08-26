@@ -3,11 +3,13 @@ package profile
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/memory"
 	"zhiwei/internal/provider"
+	"zhiwei/internal/repo"
 )
 
 // ExtractStats 是一次 Extract 的调用统计（写 job.trace 用）。
@@ -29,7 +31,7 @@ type PersonRef struct {
 type Extractor struct {
 	LLM    provider.LLMProvider
 	Model  string // 模型名（Tier 1 flash）
-	Prompt string // prompts/profile_extraction_v2.md 内容
+	Prompt string // prompts/profile_extraction_v3.md 内容
 	Window int    // 窗口大小（块数），<=0 时 memory.SplitWindows 内部回退默认 10
 
 	// stats 记录最近一次 Extract 的统计（每个 stage 各自 new 一个，无并发共享）。
@@ -88,25 +90,68 @@ func factProvenance(win []memory.Block, idx int) []ids.ID {
 	return segs
 }
 
-// factKey 批内去重自然键：平面 + 主体身份(kind/name/relation) + 内容(attr_key/value)
-// + 关系类型 + 关系对端身份(kind/name/relation) + 事件判别(event_type/title)。
+// factKey 批内去重自然键：**按平面镜像各自的 DB 自然键**（各平面只取该平面的判别字段），
+// 与 ParseFacts 的 plane switch 对称演进——新增平面须同时加两处 case（此处 + ParseFacts）。
 //
-// 主体与对端的 Relation 字段必须纳入：kind=relation 的指代其身份藏在 Relation 里
-// （「我老婆」→ Relation=配偶，Name 为空）。若只取 Kind+Name，「我老婆是老师」与
-// 「我妈是老师」的键都会退化成 attribute|relation||occupation|老师 而被误判为同一条、
-// 静默塌缩——这比下游 DB 自然键（含 resolveSubject 解析后的 person_id，两个不同人）
-// 更激进，去重方向反了。故补 Subject.Relation / Related.Kind / Related.Relation 三个判别字段。
+// 为何按平面而非统一全字段 join：统一 join 会不断追加字段，某个字段选错就静默塌缩或
+// 过度区分（cycle 曾误纳 AnchorDate，与 DB 自然键 (session,person,type,label) 不一致——
+// 同 type/label 不同 anchor 的两条在此不塌缩、却在 Service 单事务里被 DB 自然键 dedup 成
+// 「先到的赢」而非「高置信赢」）。按平面镜像 DB 自然键根除此类漂移。各平面的键：
 //
-// event 平面同理：主体多为 self、attr/relation 字段全空，若不纳入 event_type/title
-// 判别，「旅行·去云南」与「聚会·同学会」两条都会塌缩成 event|self||... 被误判同一条。
-// 故末尾追加 EventType/EventTitle 两个判别字段（防批内塌缩：同 key 不同事件）。
+//	attribute    : subject + attr_key + value
+//	relationship : subject + related(subject) + relation_type
+//	event        : subject + event_type + NormalizeTitle(title)（P2a③：与 DB 自然键同步归一化）
+//	metric       : subject + metric_key + metric_value + measured_at（测点流：同键多采样各自成行）
+//	cycle        : subject + cycle_type + cycle_label（镜像 DB 自然键，**不含 anchor**）
+//	activity     : subject + activity + tool + location + commute_mode + started_at + duration_min（测点流：同活动不同时刻各自成行）
+//
+// subjectKey 纳入 Kind/Name/Relation 三段：kind=relation 的指代身份藏在 Relation 里
+// （「我老婆」→ Relation=配偶，Name 空）。若只取 Kind+Name，「我老婆是老师」与「我妈是老师」
+// 会塌缩成同键——比下游 DB 自然键（resolveSubject 解析后是两个不同 person_id）更激进，方向反了。
+//
+// default 兜底：未来新增平面若漏写 case，用全字段 join 而非塌缩成某个已知平面的键——
+// 宁可过度区分（漏去重）也不静默误判两条不同事实为同一条（错误模式更安全、更易发现）。
 func factKey(f Fact) string {
-	return f.Plane + "\x00" +
-		f.Subject.Kind + "\x00" + f.Subject.Name + "\x00" + f.Subject.Relation + "\x00" +
-		f.AttrKey + "\x00" + f.Value + "\x00" +
-		f.RelationType + "\x00" +
-		f.Related.Kind + "\x00" + f.Related.Name + "\x00" + f.Related.Relation + "\x00" +
-		f.EventType + "\x00" + f.EventTitle
+	subj := subjectKey(f.Subject)
+	switch f.Plane {
+	case "attribute":
+		return "attribute\x00" + subj + "\x00" + f.AttrKey + "\x00" + f.Value
+	case "relationship":
+		return "relationship\x00" + subj + "\x00" + subjectKey(f.Related) + "\x00" + f.RelationType
+	case "event":
+		// P2a③：title 归一化后入键——须与 DB 自然键同步归一化（Service.applyEventFact 用
+		// FindActiveByNormalizedTitleExt 按归一化标题判佐证）。若此处用原始 title 而 DB 用归一化，
+		// 跨窗口字面近重复标题（「去云南旅游」/「去云南旅游！」）在批内不塌缩、到 Service 又被归一化
+		// reaffirm 吞掉，统计口径漂移（P3a「factKey 镜像 DB 自然键」教训）。
+		return "event\x00" + subj + "\x00" + f.EventType + "\x00" + repo.NormalizeTitle(f.EventTitle)
+	case "metric":
+		return "metric\x00" + subj + "\x00" + f.MetricKey + "\x00" + metricValStr(f) + "\x00" + f.MeasuredAt
+	case "cycle":
+		return "cycle\x00" + subj + "\x00" + f.CycleType + "\x00" + f.CycleLabel
+	case "activity":
+		return "activity\x00" + subj + "\x00" + f.ActivityText + "\x00" + f.Tool + "\x00" +
+			f.Location + "\x00" + f.CommuteMode + "\x00" + f.StartedAt + "\x00" + strconv.Itoa(f.DurationMin)
+	default:
+		return f.Plane + "\x00" + subj + "\x00" + f.AttrKey + f.Value + f.RelationType + f.Related.Name +
+			f.EventType + f.EventTitle + f.MetricKey + metricValStr(f) + f.CycleType + f.CycleLabel
+	}
+}
+
+// metricValStr 把 metric 事实的值拼成稳定去重串（镜像 DB 自然键 FindByPointExt 的 value_num+value_text）。
+// 合并对账（全范围）：feat 用 ValueNum(*float64)/MetricValueText 分列，取代 main 的单串 MetricValue；
+// 数值型以最短十进制表示（与 formatMetricValue 一致），\x01 分隔避免与文本粘连。
+func metricValStr(f Fact) string {
+	s := f.MetricValueText
+	if f.ValueNum != nil {
+		s += "\x01" + strconv.FormatFloat(*f.ValueNum, 'g', -1, 64)
+	}
+	return s
+}
+
+// subjectKey Subject 的去重序列化（Subject 与 Related 共用）：Kind/Name/Relation 三段
+// 均纳入——见 factKey 顶注释对 kind=relation 指代的说明。
+func subjectKey(s Subject) string {
+	return s.Kind + "\x00" + s.Name + "\x00" + s.Relation
 }
 
 // buildProfileUserMessage 组装用户消息：对话块 + 已知人物名单。

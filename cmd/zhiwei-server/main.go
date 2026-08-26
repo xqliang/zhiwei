@@ -79,6 +79,8 @@ func main() {
 	personRels := &repo.PersonRelationshipRepo{DB: db}
 	personEvents := &repo.PersonEventRepo{DB: db}
 	personMetrics := &repo.PersonMetricRepo{DB: db}
+	personCycles := &repo.PersonCycleRepo{DB: db}
+	personActivities := &repo.PersonActivityRepo{DB: db}
 	personLogs := &repo.PersonChangeLogRepo{DB: db}
 	// 画像回填：owner「我」+ speaker→person（幂等，见 repo.EnsurePersonBootstrap）
 	if err := repo.EnsurePersonBootstrap(context.Background(), persons, speakers); err != nil {
@@ -193,8 +195,8 @@ func main() {
 		DB: db, Sessions: sessions, Transcripts: transcripts, Memories: memories,
 		Speakers: speakers, Persons: persons, Attributes: personAttrs,
 		Relationships: personRels, Events: personEvents, ChangeLogs: personLogs,
-		Metrics: personMetrics,
-		LLM:     llm, Model: cfg.LLMFastModel, Prompt: string(profilePromptBytes),
+		Metrics: personMetrics, Cycles: personCycles, Activities: personActivities,
+		LLM: llm, Model: cfg.LLMFastModel, Prompt: string(profilePromptBytes),
 		PromptVersion: profilePromptVersion,
 		Window:        cfg.ProfileExtractWindow, Gate: profile.GateConfig{AutoConf: cfg.ProfileAutoConfidence},
 	}
@@ -246,6 +248,7 @@ func main() {
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,
 		SpeakerNameCandidates: nameCandidates,
+		VoiceprintThreshold:   cfg.VoiceprintThreshold, // timeline 列表「整段声纹」两级判定用
 	})
 	api.RegisterSpeaker(r, &api.SpeakerHandler{
 		Speakers: speakers, Transcripts: transcripts,
@@ -267,8 +270,8 @@ func main() {
 	api.RegisterReviews(r, reviewer)
 	api.RegisterPerson(r, &api.PersonHandler{
 		Persons: persons, Attributes: personAttrs, Relationships: personRels,
-		Events: personEvents, ChangeLogs: personLogs, Service: profileSvc,
-		Metrics: personMetrics,
+		Events: personEvents, Metrics: personMetrics, Cycles: personCycles,
+		Activities: personActivities, ChangeLogs: personLogs, Service: profileSvc,
 	})
 
 	// MCP 工具端点（仅供本机 dsh 边车经 streamable-http 连回；不对外）。

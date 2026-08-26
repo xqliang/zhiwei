@@ -37,6 +37,8 @@ func newTestService(t *testing.T) *Service {
 		Relationships: &repo.PersonRelationshipRepo{DB: db},
 		Events:        &repo.PersonEventRepo{DB: db},
 		Metrics:       &repo.PersonMetricRepo{DB: db},
+		Cycles:        &repo.PersonCycleRepo{DB: db},
+		Activities:    &repo.PersonActivityRepo{DB: db},
 		ChangeLogs:    &repo.PersonChangeLogRepo{DB: db},
 		Gate:          GateConfig{AutoConf: 0.75},
 	}
@@ -289,14 +291,14 @@ func TestApplyEventFacts(t *testing.T) {
 	if st5.Active != 2 {
 		t.Fatalf("扩展格式两条应 active: %+v", st5)
 	}
-	rev, _ := svc.Events.FindActiveByKeyExt(ctx, svc.DB, oid, "会议", "季度评审会")
+	rev, _ := svc.Events.FindActiveByNormalizedTitleExt(ctx, svc.DB, oid, "会议", "季度评审会")
 	if rev == nil || rev.OccurredAt == nil {
 		t.Fatalf("会议事件应有 occurred_at: %+v", rev)
 	}
 	if got := rev.OccurredAt.UTC().Format("2006-01-02"); got != "2026-07-20" {
 		t.Fatalf("M1 时区截断回归：+08:00 凌晨应落库 2026-07-20，实得 %s", got)
 	}
-	party, _ := svc.Events.FindActiveByKeyExt(ctx, svc.DB, oid, "聚会", "老友饭局")
+	party, _ := svc.Events.FindActiveByNormalizedTitleExt(ctx, svc.DB, oid, "聚会", "老友饭局")
 	if party == nil || party.OccurredAt == nil {
 		t.Fatalf("M2 斜杠日期应解析成功（非 NULL）: %+v", party)
 	}
@@ -305,7 +307,7 @@ func TestApplyEventFacts(t *testing.T) {
 	}
 
 	// 手动加/删事件
-	me, err := svc.ManualAddEvent(ctx, 1, oid, "健康", "确诊高血压", "长期服药", "2025-06-01", "", "北京协和", nil)
+	me, err := svc.ManualAddEvent(ctx, 1, oid, "健康", "确诊高血压", "长期服药", "2025-06-01", "", "北京协和", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

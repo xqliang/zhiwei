@@ -47,7 +47,7 @@ func setupQueryAPI(t *testing.T, s *repo.SessionRepo, j *repo.JobRepo,
 }
 
 func TestSessionsAndDetail(t *testing.T) {
-	_ = ids.Init(1) // 幂等初始化，避免依赖其它测试先跑
+	_ = ids.InitForTest() // 幂等初始化，避免依赖其它测试先跑
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestSessionsAndDetail(t *testing.T) {
 // 段已解析到登记说话人 → segment 带 speaker_id + 登记名（非回退 "说话人 N"），
 // 顶层 speakers 列表含该说话人。
 func TestGetSessionSpeakerEnrichment(t *testing.T) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +220,7 @@ func TestGetSessionSpeakerEnrichment(t *testing.T) {
 // speakers[] 由 ListSpeakersForTranscript 按本 transcript 段归属聚合，天然作用域到本会话，
 // 不受脏库其它说话人干扰，因此无需清表。
 func TestGetSessionNameCandidates(t *testing.T) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -400,7 +400,7 @@ func TestServeAudio(t *testing.T) {
 // 供 ListSessions 富化与 DeleteSession 级联测试共用。返回 router+session id+SessionRepo
 // （含 DB 句柄供断言）。
 func buildEnrichedSession(t *testing.T) (http.Handler, ids.ID, *repo.SessionRepo) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
@@ -621,11 +621,194 @@ func TestReextract(t *testing.T) {
 	}
 }
 
+// TestListSessionsVoiceTop 验证 timeline 列表「整段声纹」富化（2026-08-26 需求）：
+//   - 单人会话（1 个 ASR 标签）→ basis=whole，top3 由全部段向量均值算出；
+//   - 多人会话 → basis=longest，用时长最长一段的向量；
+//   - 判定走两级规则（voiceprint.Matched）：top1≥0.8 强命中 / ≥0.72 且领先 0.06 弱命中。
+// 场景构造：库中甲=e1、乙=0.6e1+0.8e2（与 e1 余弦 0.6）、丙=e3（正交）。
+func TestListSessionsVoiceTop(t *testing.T) {
+	_ = ids.InitForTest()
+	db, err := repo.NewDB(repo.TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	jobs := &repo.JobRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	memories := &repo.MemoryRepo{DB: db}
+	todos := &repo.TodoRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+
+	// 共享库隔离：清历史说话人（one-hot 向量残留会干扰 top-3 精确断言，同 TestGetSessionVoiceMatches）
+	for _, q := range []string{`DELETE FROM speaker_name_candidate`, `DELETE FROM speaker`} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e1, e3 := make([]float32, 256), make([]float32, 256)
+	e1[0], e3[2] = 1, 1
+	ab := make([]float32, 256)
+	ab[0], ab[1] = 0.6, 0.8 // 已归一，与 e1 的余弦 = 0.6
+	ji := &repo.Speaker{Name: "甲", Source: "enrolled", Embedding: float32BlobAPI(e1), SampleCount: 1}
+	yi := &repo.Speaker{Name: "乙", Source: "enrolled", Embedding: float32BlobAPI(ab), SampleCount: 1}
+	bing := &repo.Speaker{Name: "丙", Source: "enrolled", Embedding: float32BlobAPI(e3), SampleCount: 1}
+	for _, sp := range []*repo.Speaker{ji, yi, bing} {
+		if err := speakers.Create(ctx, sp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, sp := range []*repo.Speaker{ji, yi, bing} {
+			_ = speakers.Delete(context.Background(), sp.ID)
+		}
+	})
+
+	// 会话一（单人）：两段同为 label "1"，向量均 e1 → 整段均值=e1 → top3=[甲1.0, 乙0.6, 丙0]
+	sid1 := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid1, Source: "web_upload", Filename: "single.wav",
+		StoragePath: "/tmp/single.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr1 := &repo.Transcript{SessionID: sid1, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr1); err != nil {
+		t.Fatal(err)
+	}
+	segs1 := []repo.TranscriptSegment{
+		{TranscriptID: tr1.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "你好", StartMS: 0, EndMS: 2000},
+		{TranscriptID: tr1.ID, SequenceNo: 2, SpeakerLabel: "1", Text: "在的", StartMS: 2100, EndMS: 4000},
+	}
+	if err := transcripts.InsertSegments(ctx, segs1); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.SaveSegmentEmbeddings(ctx, tr1.ID, map[ids.ID][]byte{
+		segs1[0].ID: float32BlobAPI(e1), segs1[1].ID: float32BlobAPI(e1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 会话二（多人）：label "1" 短段向量 e1、label "2" 长段（时长最长）向量 e3
+	// → basis=longest、用 e3 → top3=[丙1.0, 甲0, 乙0] 强命中丙
+	sid2 := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid2, Source: "web_upload", Filename: "multi.wav",
+		StoragePath: "/tmp/multi.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr2 := &repo.Transcript{SessionID: sid2, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr2); err != nil {
+		t.Fatal(err)
+	}
+	segs2 := []repo.TranscriptSegment{
+		{TranscriptID: tr2.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "短", StartMS: 0, EndMS: 1000},
+		{TranscriptID: tr2.ID, SequenceNo: 2, SpeakerLabel: "2", Text: "最长段", StartMS: 2000, EndMS: 9000},
+	}
+	if err := transcripts.InsertSegments(ctx, segs2); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.SaveSegmentEmbeddings(ctx, tr2.ID, map[ids.ID][]byte{
+		segs2[0].ID: float32BlobAPI(e1), segs2[1].ID: float32BlobAPI(e3),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newAuthedRouter()
+	RegisterQuery(r, &QueryHandler{
+		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
+		Memories: memories, Todos: todos, Speakers: speakers,
+		VoiceprintThreshold: 0.8,
+	})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Sessions []struct {
+			ID       string `json:"id"`
+			VoiceTop *struct {
+				Basis       string `json:"basis"`
+				Matched     bool   `json:"matched"`
+				Rule        string `json:"rule"`
+				SpeakerName string `json:"speaker_name"`
+				Matches     []struct {
+					Name       string  `json:"name"`
+					Similarity float64 `json:"similarity"`
+				} `json:"matches"`
+			} `json:"voice_top"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v %s", err, rec.Body.String())
+	}
+	byID := map[string]*struct {
+		Basis       string `json:"basis"`
+		Matched     bool   `json:"matched"`
+		Rule        string `json:"rule"`
+		SpeakerName string `json:"speaker_name"`
+		Matches     []struct {
+			Name       string  `json:"name"`
+			Similarity float64 `json:"similarity"`
+		} `json:"matches"`
+	}{}
+	for _, s := range resp.Sessions {
+		if s.VoiceTop != nil {
+			byID[s.ID] = s.VoiceTop
+		}
+	}
+
+	// 单人会话：basis=whole，top1=甲/1.0 强命中
+	vt1 := byID[sid1.String()]
+	if vt1 == nil {
+		t.Fatalf("单人会话缺 voice_top: %s", rec.Body.String())
+	}
+	if vt1.Basis != "whole" {
+		t.Fatalf("单人 basis 应 whole，实际 %s", vt1.Basis)
+	}
+	if len(vt1.Matches) != 3 || vt1.Matches[0].Name != "甲" || math.Abs(vt1.Matches[0].Similarity-1) > 1e-6 {
+		t.Fatalf("单人 top3 应 [甲1.0,...]，实际 %+v", vt1.Matches)
+	}
+	if math.Abs(vt1.Matches[1].Similarity-0.6) > 1e-6 || vt1.Matches[1].Name != "乙" {
+		t.Fatalf("top2 应 乙/0.6，实际 %+v", vt1.Matches[1])
+	}
+	if !vt1.Matched || vt1.Rule != "strong" || vt1.SpeakerName != "甲" {
+		t.Fatalf("单人应强命中甲（strong），实际 matched=%v rule=%s name=%s", vt1.Matched, vt1.Rule, vt1.SpeakerName)
+	}
+
+	// 多人会话：basis=longest，用最长段向量 e3 → 强命中丙
+	vt2 := byID[sid2.String()]
+	if vt2 == nil {
+		t.Fatalf("多人会话缺 voice_top: %s", rec.Body.String())
+	}
+	if vt2.Basis != "longest" {
+		t.Fatalf("多人 basis 应 longest，实际 %s", vt2.Basis)
+	}
+	if len(vt2.Matches) == 0 || vt2.Matches[0].Name != "丙" || math.Abs(vt2.Matches[0].Similarity-1) > 1e-6 {
+		t.Fatalf("多人 top1 应 丙/1.0（最长段向量），实际 %+v", vt2.Matches)
+	}
+	if !vt2.Matched || vt2.Rule != "strong" || vt2.SpeakerName != "丙" {
+		t.Fatalf("多人应强命中丙，实际 matched=%v rule=%s name=%s", vt2.Matched, vt2.Rule, vt2.SpeakerName)
+	}
+
+	// 清理：删两测试会话的段/转写/会话（共享库非自隔离；repo 无 Transcript.Delete，用原生 SQL）
+	t.Cleanup(func() {
+		cctx := context.Background()
+		for _, sid := range []ids.ID{sid1, sid2} {
+			_, _ = db.ExecContext(cctx, `DELETE FROM transcript_segment WHERE transcript_id IN (SELECT id FROM transcript WHERE session_id = ?)`, sid.Int64())
+			_, _ = db.ExecContext(cctx, `DELETE FROM transcript WHERE session_id = ?`, sid.Int64())
+			_, _ = db.ExecContext(cctx, `DELETE FROM audio_session WHERE id = ?`, sid.Int64())
+		}
+	})
+}
+
 // TestGetSessionVoiceMatches 验证详情接口 segments[] 附「段级声纹相似度 top-3」：
 // 用 speaker stage 落库的逐段向量与全库声纹（灾备 BLOB）算余弦取前三。
 // 用途：一句话可能混多个人——段级 top-1 不是归属说话人即该段可能被切错/归错。
 func TestGetSessionVoiceMatches(t *testing.T) {
-	_ = ids.Init(1)
+	_ = ids.InitForTest()
 	db, err := repo.NewDB(repo.TestDSN(t))
 	if err != nil {
 		t.Fatal(err)
