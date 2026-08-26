@@ -287,7 +287,7 @@ func proposeProfileAttrHandler(d MCPDeps, userID int64) func(context.Context, *m
 		}
 		payload, _ := json.Marshal(payloadMap)
 		oid := owner.ID // target_id = owner person id（confirm 时作 personID）
-		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: "profile_attr", TargetKind: "profile", TargetID: &oid,
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})
@@ -326,7 +326,7 @@ func proposeProfileEventHandler(d MCPDeps, userID int64) func(context.Context, *
 		}
 		payload, _ := json.Marshal(map[string]any{"new": newFields})
 		oid := owner.ID
-		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: "profile_event", TargetKind: "profile", TargetID: &oid,
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})
@@ -410,7 +410,7 @@ func proposeProfileRelationshipHandler(d MCPDeps, userID int64) func(context.Con
 		}
 		payload, _ := json.Marshal(map[string]any{"new": newFields})
 		oid := owner.ID // target_id = owner person id（confirm 时作 personID）
-		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: "profile_relationship", TargetKind: "profile", TargetID: &oid,
 			Payload: json.RawMessage(payload), Rationale: rationale,
 		})
@@ -470,7 +470,7 @@ func proposeProfileMetricHandler(d MCPDeps, userID int64) func(context.Context, 
 		}
 		payload, _ := json.Marshal(map[string]any{"new": newFields})
 		oid := owner.ID // target_id = owner person id（confirm 时作 personID）
-		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: "profile_metric", TargetKind: "profile", TargetID: &oid,
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})

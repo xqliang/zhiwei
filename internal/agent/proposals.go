@@ -196,6 +196,9 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if p.TargetID == nil {
 			return nil, fmt.Errorf("memory_update 缺 target_id")
 		}
+		if err := d.ownsTarget(ctx, p, *p.TargetID); err != nil { // C1 纵深防御：复核 target 归属
+			return nil, err
+		}
 		m, err := d.Memories.GetExt(ctx, tx, *p.TargetID)
 		if err != nil {
 			return nil, err
@@ -215,6 +218,9 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if p.TargetID == nil {
 			return nil, fmt.Errorf("memory_dismiss 缺 target_id")
 		}
+		if err := d.ownsTarget(ctx, p, *p.TargetID); err != nil { // C1 纵深防御：复核 target 归属
+			return nil, err
+		}
 		m, err := d.Memories.GetExt(ctx, tx, *p.TargetID)
 		if err != nil {
 			return nil, err
@@ -229,6 +235,9 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if p.TargetID == nil {
 			return nil, fmt.Errorf("topic_rename 缺 target_id")
 		}
+		if err := d.ownsTarget(ctx, p, *p.TargetID); err != nil { // C1 纵深防御：复核 target 归属
+			return nil, err
+		}
 		name := newStr("name")
 		if name == "" {
 			return nil, fmt.Errorf("topic_rename 缺 new.name")
@@ -241,6 +250,9 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if p.TargetID == nil {
 			return nil, fmt.Errorf("topic_confirm 缺 target_id")
 		}
+		if err := d.ownsTarget(ctx, p, *p.TargetID); err != nil { // C1 纵深防御：复核 target 归属
+			return nil, err
+		}
 		if err := d.Topics.UpdateStatusExt(ctx, tx, *p.TargetID, "active"); err != nil {
 			return nil, err
 		}
@@ -248,6 +260,9 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 	case "topic_dismiss":
 		if p.TargetID == nil {
 			return nil, fmt.Errorf("topic_dismiss 缺 target_id")
+		}
+		if err := d.ownsTarget(ctx, p, *p.TargetID); err != nil { // C1 纵深防御：复核 target 归属
+			return nil, err
 		}
 		if err := d.Topics.UpdateStatusExt(ctx, tx, *p.TargetID, "dismissed"); err != nil {
 			return nil, err
@@ -258,7 +273,9 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		if title == "" {
 			return nil, fmt.Errorf("todo_create 缺 new.title")
 		}
-		td := &repo.Todo{Title: title, Status: "confirmed", Confidence: 1} // 用户确认→confirmed
+		// C1：新待办归属发起提议的用户（p.UserID）。此前不设 UserID → InsertExt 默认落 user 1，
+		// user≠1 的确认会把待办误挂到 user 1（非 owner 功能损坏 / 误 attribution）。
+		td := &repo.Todo{UserID: p.UserID, Title: title, Status: "confirmed", Confidence: 1} // 用户确认→confirmed
 		if s := newStr("due_at"); s != "" {
 			if t, err := time.Parse(time.RFC3339, s); err == nil {
 				td.DueAt = &t
@@ -279,6 +296,9 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 	case "todo_status":
 		if p.TargetID == nil {
 			return nil, fmt.Errorf("todo_status 缺 target_id")
+		}
+		if err := d.ownsTarget(ctx, p, *p.TargetID); err != nil { // C1 纵深防御：复核 target 归属
+			return nil, err
 		}
 		st := newStr("status")
 		if st == "" {
@@ -393,6 +413,30 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		return &row.ID, nil
 	default:
 		return nil, fmt.Errorf("未知提议 kind: %s", p.Kind)
+	}
+}
+
+// ownsTarget 是 C1 的纵深防御：在按 p.TargetID 落库前，用 p.UserID 复核 target 归属（带 user
+// 过滤的 Get）。越权（target 属他人）或不存在都会因 user_id 不匹配返回 sql.ErrNoRows，据此中止
+// confirm（confirmProposal 将 applyInTx 错误映射为 502），杜绝「误 attribution 的提议」演变成对
+// 他人 memory/topic/todo 的跨写。
+//
+// 说明：这是一次只读归属校验（autocommit，非事务连接）。target 归属在创建后不可变，故读已提交数据
+// 即权威；校验在各分支的 *Ext 加锁读改写之前完成，不与其争锁。profile 分支的 owner 复核已在
+// profile.Service 的 ManualAdd*Ext 内按 p.UserID 事务内完成，故不经此处（见各 profile_* case）。
+func (d ProposalDeps) ownsTarget(ctx context.Context, p *repo.AgentProposal, targetID ids.ID) error {
+	switch p.TargetKind {
+	case "memory":
+		_, err := d.Memories.Get(ctx, p.UserID, targetID)
+		return err
+	case "topic":
+		_, err := d.Topics.Get(ctx, p.UserID, targetID)
+		return err
+	case "todo":
+		_, err := d.Todos.Get(ctx, p.UserID, targetID)
+		return err
+	default:
+		return fmt.Errorf("ownsTarget: 未知 target_kind %q", p.TargetKind)
 	}
 }
 

@@ -3,7 +3,9 @@ package agent
 import (
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -152,5 +154,86 @@ func TestMCPRouterTokenRouting(t *testing.T) {
 	_ = r2.serverFor(httptest.NewRequest("POST", "/internal/mcp/tok-alice", nil)) // 缓存命中，不再 customize
 	if calls != 1 {
 		t.Errorf("customize 应对每个 server 恰调一次, got %d", calls)
+	}
+}
+
+// blockingCloseRuntime 是 Close 会阻塞（直到 release 被关闭）的运行时：进入 Close 时先关 started
+// 发信号，再阻塞在 <-release。用于 I2 用例断言「回收时的 Close 不持池锁」。
+type blockingCloseRuntime struct {
+	FakeRuntime
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingCloseRuntime) Close() error {
+	b.once.Do(func() { close(b.started) }) // 通知：已进入 Close
+	<-b.release                            // 阻塞，模拟 dsh Close 的有界 5s shutdown
+	return nil
+}
+
+// TestRuntimePoolEvictClosesOutsideLock 锁定 I2：LRU 回收被淘汰运行时时，Close 必须在【锁外】执行。
+// 此前 evictLocked 在持 p.mu 期间调 e.rt.Close()（dsh 有界 5s），会阻塞所有并发 Get/TokenUserID。
+// 本用例让被淘汰者的 Close 阻塞，断言阻塞期间并发 TokenUserID/Get 仍能立即返回（证明锁已释放）。
+func TestRuntimePoolEvictClosesOutsideLock(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var relOnce sync.Once
+	releaseClose := func() { relOnce.Do(func() { close(release) }) }
+	defer releaseClose() // 兜底：即便断言提前失败也解除阻塞，避免泄漏 goroutine
+
+	// cap=1：每新增一个用户都会淘汰旧用户。第一个运行时是阻塞 Close 的，其余用普通 Fake。
+	made := 0 // makeRT 恒在 p.mu 下调用（Get 锁内），故普通计数无需额外同步
+	p := NewRuntimePool(RuntimeConfig{}, "http://x/internal/mcp", 1, func(c RuntimeConfig) AgentRuntime {
+		made++
+		if made == 1 {
+			return &blockingCloseRuntime{started: started, release: release}
+		}
+		return &FakeRuntime{Cfg: c}
+	})
+
+	_ = p.Get(1) // 建 user1（阻塞 Close 运行时）
+
+	// 后台 Get(2)：超 cap → 淘汰 user1；新代码应「锁内摘表、锁外 Close」，故此调用会阻塞在锁外的 Close。
+	getDone := make(chan struct{})
+	go func() {
+		_ = p.Get(2)
+		close(getDone)
+	}()
+
+	// 等 user1 的 Close 真正开始
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("回收未触发被淘汰运行时的 Close")
+	}
+
+	// 关键断言：Close 阻塞期间，并发 TokenUserID + Get(命中缓存) 必须立即返回（锁未被 Close 占用）。
+	done := make(chan struct{})
+	go func() {
+		_, _ = p.TokenUserID("no-such")
+		_ = p.Get(2) // user2 已在表中，命中缓存路径
+		close(done)
+	}()
+	select {
+	case <-done: // 好：锁是空闲的
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close 阻塞期间并发 TokenUserID/Get 被阻塞——Close 仍在持锁（I2 未修复）")
+	}
+
+	// 释放 Close，等待 Get(2) 收尾
+	releaseClose()
+	select {
+	case <-getDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close 释放后 Get(2) 未返回")
+	}
+
+	// user1 已被淘汰、池维持在 cap=1
+	if _, ok := p.runtimes[1]; ok {
+		t.Error("user1 应已被淘汰移除")
+	}
+	if len(p.runtimes) != 1 {
+		t.Errorf("池应维持 cap=1, got %d", len(p.runtimes))
 	}
 }

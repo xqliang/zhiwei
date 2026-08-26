@@ -88,8 +88,15 @@ func ensureOwner(t *testing.T, persons *repo.PersonRepo) *repo.Person {
 // 注入 uid=1（模拟 authGate；测试里的提议默认归 user 1），使 2B-B 的鉴权 + IDOR 归属校验放行。
 func postProposal(t *testing.T, pd ProposalDeps, id ids.ID, action string) (int, repo.AgentProposal) {
 	t.Helper()
+	return postProposalAs(t, pd, id, action, 1)
+}
+
+// postProposalAs 同 postProposal，但可指定注入的 uid（模拟不同登录用户）。C1 端到端隔离用例
+// 用它以 uid=2 确认自己的提议、以 uid=1 确认他人的提议断言 404。
+func postProposalAs(t *testing.T, pd ProposalDeps, id ids.ID, action string, uid int64) (int, repo.AgentProposal) {
+	t.Helper()
 	r := chi.NewRouter()
-	r.Use(injectUser(1))
+	r.Use(injectUser(uid))
 	RegisterProposals(r, pd)
 	req := httptest.NewRequest("POST", "/api/agent/proposals/"+id.String()+"/"+action, nil)
 	rec := httptest.NewRecorder()
@@ -97,6 +104,21 @@ func postProposal(t *testing.T, pd ProposalDeps, id ids.ID, action string) (int,
 	var p repo.AgentProposal
 	_ = json.Unmarshal(rec.Body.Bytes(), &p)
 	return rec.Code, p
+}
+
+// listPendingHas 断言某用户的 ListPending 是否含指定提议 id（C1 隔离用例的读侧断言）。
+func listPendingHas(t *testing.T, pd ProposalDeps, userID int64, id ids.ID) bool {
+	t.Helper()
+	rows, err := pd.Proposals.ListPending(t.Context(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func seedMemory(t *testing.T, mem *repo.MemoryRepo, title, content string) *repo.Memory {
@@ -144,6 +166,120 @@ func TestProposalIDORCrossUser(t *testing.T) {
 	}
 	if got.Status != "pending" {
 		t.Errorf("越权尝试后提议应仍 pending, got %q", got.Status)
+	}
+}
+
+// TestProposalUserIsolationEndToEnd 是 C1 的回归护栏（经真实 propose handler，非手工建行）：
+// 现有 TestProposalIDORCrossUser 手工 new AgentProposal{UserID:2} 绕过了 handler，无法守护
+// 「handler 是否把 UserID 设成发起用户」——而这正是 C1 的根 bug（handler 从不设 UserID，全部误挂
+// user 1）。本用例经 proposeTodoCreateHandler(md, 2) 建提议，断言：
+//
+//	① 提议确实归属 user 2（而非误挂 user 1）；
+//	② ListPending(1) 不含它、ListPending(2) 含它（读侧租户隔离）；
+//	③ user 1 confirm 它 → 404 且提议仍 pending（跨租户写被挡，不经 applyInTx 落库）；
+//	④ user 2（owner）confirm 它 → 200 applied（owner 功能未因 C1 修复受损）。
+func TestProposalUserIsolationEndToEnd(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	const otherUID = int64(2)
+
+	// 经真实 handler 以 userID=2 建提议。todo_create 不读任何用户域数据，最干净地隔离 UserID 注入这一点。
+	res, _, err := proposeTodoCreateHandler(md, otherUID)(ctx, nil, proposeTodoCreateArgs{
+		Title: "user2的待办ISO", Rationale: "隔离回归",
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	if err := json.Unmarshal([]byte(mcpText(t, res)), &p); err != nil {
+		t.Fatalf("解析提议: %v", err)
+	}
+	cleanupProposal(t, pd, p.ID)
+
+	// ① 提议归属 user 2（C1 核心：handler 必须把 UserID 设成发起用户，不再误挂 1）
+	if p.UserID != otherUID {
+		t.Fatalf("提议应归属 user 2, got UserID=%d", p.UserID)
+	}
+
+	// ② ListPending 租户隔离
+	if listPendingHas(t, pd, 1, p.ID) {
+		t.Error("user1 的 ListPending 不应含 user2 的提议（跨租户泄漏）")
+	}
+	if !listPendingHas(t, pd, otherUID, p.ID) {
+		t.Error("user2 的 ListPending 应含自己的提议")
+	}
+
+	// ③ 跨用户 confirm：user1 确认 user2 的提议 → 404，且提议仍 pending（未 applied、不落 todo）
+	if code, _ := postProposalAs(t, pd, p.ID, "confirm", 1); code != http.StatusNotFound {
+		t.Errorf("user1 跨用户 confirm 应 404, got %d", code)
+	}
+	if after, _ := pd.Proposals.Get(ctx, p.ID); after.Status != "pending" {
+		t.Errorf("跨用户 confirm 后提议应仍 pending, got %q", after.Status)
+	}
+
+	// ④ owner confirm：user2 确认自己的提议 → 200 applied
+	code, p1 := postProposalAs(t, pd, p.ID, "confirm", otherUID)
+	if code != http.StatusOK || p1.Status != "applied" {
+		t.Fatalf("owner(user2) confirm 应成功, code=%d status=%s", code, p1.Status)
+	}
+	if p1.AppliedRef != nil { // 清理 confirm 落库的 todo
+		t.Cleanup(func() { _, _ = pd.DB.Exec("DELETE FROM todo WHERE id = ?", p1.AppliedRef.Int64()) })
+	}
+	// 落库的 todo 必须归属 user2（Todo.Get 带 user 过滤：若被误挂 user1 则此处读不到）。
+	// 守护 applyInTx 的 todo_create 分支已把新待办 UserID 设为 p.UserID（否则 InsertExt 默认落 1）。
+	if p1.AppliedRef == nil {
+		t.Fatal("owner confirm 应回填 applied_ref")
+	}
+	if td, err := md.Todo.Get(ctx, otherUID, *p1.AppliedRef); err != nil || td.Title != "user2的待办ISO" {
+		t.Errorf("confirm 落库的 todo 应归属 user2, err=%v td=%+v", err, td)
+	}
+}
+
+// TestApplyInTxRejectsCrossUserTarget 锁定 C1 纵深防御（applyInTx 复核 target 归属）：即便一条提议
+// 被误 attribution——UserID 与其 TargetID 归属不一致（如提议归 user1 却指向 user2 的 memory）——
+// confirm 也必须在 applyInTx 内按 p.UserID 复核 target 归属并中止，绝不跨写他人数据。此前 applyInTx
+// 用不带 user 过滤的 GetExt 落库，误 attribution 会直接演变成跨用户写（C1 的「条件跨写」一症）。
+func TestApplyInTxRejectsCrossUserTarget(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+
+	// user 2 拥有的 memory
+	m := &repo.Memory{
+		UserID: 2, Type: "fact", Title: "user2记忆XW", Content: "user2内容XW",
+		EpistemicType: "observed", Confidence: 0.8, Status: "active", TranscriptSegmentIDs: ids.List{},
+	}
+	if err := md.Memory.InsertExt(ctx, md.Memory.DB, []*repo.Memory{m}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = md.Memory.DB.Exec("DELETE FROM memory WHERE id = ?", m.ID.Int64()) })
+
+	// 误 attribution 的提议：归 user 1，却指向 user 2 的 memory（模拟未来不 gate 的提议源 / 篡改）。
+	// 手工建行以精确构造这一非法组合（正常 propose handler 已 gate，产生不了它）。
+	p := &repo.AgentProposal{
+		UserID: 1, Kind: "memory_update", TargetKind: "memory", TargetID: &m.ID,
+		Payload: json.RawMessage(`{"new":{"title":"跨写标题XW"}}`), Rationale: "跨写尝试",
+	}
+	if err := pd.Proposals.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	cleanupProposal(t, pd, p.ID)
+
+	// user 1 confirm：主 IDOR 校验放行(p.UserID==1==uid)，但 applyInTx 须复核 target 归属 → 中止
+	code, _ := postProposalAs(t, pd, p.ID, "confirm", 1)
+	if code == http.StatusOK {
+		t.Fatalf("误 attribution 提议不应确认成功(会跨写 user2 的 memory), code=%d", code)
+	}
+	// 关键：user 2 的 memory 未被跨写
+	got, err := md.Memory.Get(ctx, 2, m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "user2记忆XW" {
+		t.Errorf("跨用户 target 不应被写, title=%q", got.Title)
+	}
+	// 提议仍 pending（未 applied）
+	if after, _ := pd.Proposals.Get(ctx, p.ID); after.Status != "pending" {
+		t.Errorf("中止后提议应仍 pending, got %q", after.Status)
 	}
 }
 

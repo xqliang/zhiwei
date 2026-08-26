@@ -30,6 +30,7 @@ func TestAgentProposalCRUDAndResolve(t *testing.T) {
 
 	target := ids.New()
 	p := &AgentProposal{
+		UserID:     1, // C1: UserID 必填（Create 不再静默默认 1）
 		Kind:       "memory_update",
 		TargetKind: "memory",
 		TargetID:   &target,
@@ -91,5 +92,41 @@ func TestAgentProposalCRUDAndResolve(t *testing.T) {
 		if x.ID == p.ID {
 			t.Error("applied 提议不应再在 pending 列表")
 		}
+	}
+}
+
+// TestAgentProposalCreateRequiresUserID 锁定 C1 加固：Create 对 UserID==0 直接报错，
+// 绝不再静默落 user 1（静默默认 1 正是「agent 提议未设 UserID → 全部误挂 user 1」跨租户
+// 泄漏 bug 被长期掩盖的根因）。设了非 0 UserID 才放行。
+func TestAgentProposalCreateRequiresUserID(t *testing.T) {
+	db, err := NewDB(TestDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := &AgentProposalRepo{DB: db}
+	ctx := t.Context()
+
+	// UserID==0（未设）→ 报错，且不落库
+	p0 := &AgentProposal{Kind: "todo_create", TargetKind: "todo", Rationale: "缺 UserID"}
+	if err := pr.Create(ctx, p0); err == nil {
+		t.Fatal("Create 对 UserID==0 应报错（不再静默默认 1）")
+	}
+	if p0.ID != 0 {
+		// 未落库：不应生成可查询的行（即便本地赋了 ID 也无 INSERT）
+		t.Cleanup(func() { _, _ = db.Exec("DELETE FROM agent_proposal WHERE id = ?", p0.ID.Int64()) })
+	}
+
+	// 设了非 0 UserID → 正常落库
+	p1 := &AgentProposal{UserID: 7, Kind: "todo_create", TargetKind: "todo", Rationale: "有 UserID"}
+	if err := pr.Create(ctx, p1); err != nil {
+		t.Fatalf("Create 带 UserID 应成功: %v", err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec("DELETE FROM agent_proposal WHERE id = ?", p1.ID.Int64()) })
+	got, err := pr.Get(ctx, p1.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.UserID != 7 {
+		t.Errorf("落库 UserID 应为 7, got %d", got.UserID)
 	}
 }

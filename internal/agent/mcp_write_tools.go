@@ -92,7 +92,7 @@ func proposeMemoryEditHandler(d MCPDeps, userID int64) func(context.Context, *mc
 			"old": map[string]any{"title": m.Title, "content": m.Content},
 			"new": newFields,
 		})
-		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: "memory_update", TargetKind: "memory", TargetID: &id,
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})
@@ -119,7 +119,7 @@ func proposeMemoryDismissHandler(d MCPDeps, userID int64) func(context.Context, 
 			"old": map[string]any{"status": m.Status, "title": m.Title},
 			"new": map[string]any{"status": "dismissed"},
 		})
-		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: "memory_dismiss", TargetKind: "memory", TargetID: &id,
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})
@@ -150,7 +150,7 @@ func proposeTopicRenameHandler(d MCPDeps, userID int64) func(context.Context, *m
 			"old": map[string]any{"name": t.Name},
 			"new": map[string]any{"name": a.NewName},
 		})
-		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: "topic_rename", TargetKind: "topic", TargetID: &id,
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})
@@ -177,7 +177,7 @@ func proposeTopicStatusHandler(d MCPDeps, userID int64, kind, newStatus string) 
 			"old": map[string]any{"status": t.Status, "name": t.Name},
 			"new": map[string]any{"status": newStatus},
 		})
-		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: kind, TargetKind: "topic", TargetID: &id,
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})
@@ -192,9 +192,10 @@ type proposeTodoCreateArgs struct {
 	Rationale string `json:"rationale,omitempty" jsonschema:"新建理由"`
 }
 
-// proposeTodoCreateHandler：新建类无 target 行、也不读任何用户域数据，故第二参 userID 未用
-// （取 _ 保持与其它工厂签名一致，便于 registerWriteTools 统一透传）。归属 owner 在 confirm 侧落库。
-func proposeTodoCreateHandler(d MCPDeps, _ int64) func(context.Context, *mcp.CallToolRequest, proposeTodoCreateArgs) (*mcp.CallToolResult, any, error) {
+// proposeTodoCreateHandler：新建类无 target 行、也不读任何用户域数据，但 C1 起提议必须归属发起
+// 用户，故第二参恢复为 userID 并经 proposeAndReturn 注入 AgentProposal.UserID（归属 owner 仍在
+// confirm 侧按该 UserID 落库）。
+func proposeTodoCreateHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, proposeTodoCreateArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a proposeTodoCreateArgs) (*mcp.CallToolResult, any, error) {
 		if a.Title == "" {
 			return nil, nil, fmt.Errorf("propose_todo_create 需给出 title")
@@ -213,7 +214,7 @@ func proposeTodoCreateHandler(d MCPDeps, _ int64) func(context.Context, *mcp.Cal
 			newFields["topic_id"] = a.TopicID
 		}
 		payload, _ := json.Marshal(map[string]any{"new": newFields})
-		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: "todo_create", TargetKind: "todo", // TargetID 空：新建类无目标行
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})
@@ -246,7 +247,7 @@ func proposeTodoStatusHandler(d MCPDeps, userID int64) func(context.Context, *mc
 			"old": map[string]any{"status": td.Status, "title": td.Title},
 			"new": map[string]any{"status": a.NewStatus},
 		})
-		return proposeAndReturn(ctx, d, &repo.AgentProposal{
+		return proposeAndReturn(ctx, d, userID, &repo.AgentProposal{
 			Kind: "todo_status", TargetKind: "todo", TargetID: &id,
 			Payload: json.RawMessage(payload), Rationale: a.Rationale,
 		})
@@ -254,7 +255,11 @@ func proposeTodoStatusHandler(d MCPDeps, userID int64) func(context.Context, *mc
 }
 
 // proposeAndReturn 落一条 pending 提议并返回给前端渲染确认卡。工具永不 mutate 领域行。
-func proposeAndReturn(ctx context.Context, d MCPDeps, p *repo.AgentProposal) (*mcp.CallToolResult, any, error) {
+// C1：所有 propose handler 经此统一注入 UserID=userID（透传自 NewMCPServer 的每用户 server），
+// 提议天然归属发起该工具调用的用户；绝不再依赖 repo 侧的默认值（已改为对 UserID==0 报错）。
+// 这是「跨租户泄漏 / 非 owner 功能损坏 / 条件跨写」三症的统一根治点。
+func proposeAndReturn(ctx context.Context, d MCPDeps, userID int64, p *repo.AgentProposal) (*mcp.CallToolResult, any, error) {
+	p.UserID = userID
 	if err := d.Proposals.Create(ctx, p); err != nil {
 		return nil, nil, err
 	}

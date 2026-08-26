@@ -41,12 +41,15 @@ func ValidProposalStatus(s string) bool {
 
 type AgentProposalRepo struct{ DB *sqlx.DB }
 
-// Create 新建提议：生成 ID，UserID 默认 1，Status 强制 pending，Payload 空时置 "{}"。
+// Create 新建提议：生成 ID，Status 强制 pending，Payload 空时置 "{}"。
+// C1 加固：UserID 必填。曾经的「UserID==0 → 默认 1」是「agent 提议未设 UserID → 全部误挂
+// user 1」跨租户泄漏 bug 被长期掩盖的根因（静默落 1，非 owner 功能损坏、条件跨写都无从暴露）。
+// 现改为直接报错，强制所有调用点（propose handlers + 测试）显式设 UserID。
 func (r *AgentProposalRepo) Create(ctx context.Context, p *AgentProposal) error {
-	p.ID = ids.New()
 	if p.UserID == 0 {
-		p.UserID = 1
+		return fmt.Errorf("agent_proposal.UserID 必填（不能为 0）")
 	}
+	p.ID = ids.New()
 	p.Status = "pending"
 	if len(p.Payload) == 0 {
 		p.Payload = json.RawMessage("{}")

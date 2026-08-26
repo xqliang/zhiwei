@@ -20,9 +20,10 @@ import (
 //
 // 并发模型：所有导出方法都在 mu 保护下操作三张表（runtimes/byToken/lru）。makeRT 只构造结构体
 // （NewDSHRuntime 惰性 spawn，真正起进程在首次 Prompt），故 Get 持锁期间不做 I/O、很快返回。
-// 唯一的例外是 LRU 回收时对被淘汰运行时的 Close()——dsh 的 Close 会做 shutdown RPC + kill（有界
-// 5s），此处仍在锁内完成（保证「关停 + 从表中移除」原子，杜绝与并发 Get 的竞态）；回收是罕见路径
-// （仅当在线用户数超过 cap 时才触发），可接受这一短暂持锁。测试用的 FakeRuntime.Close 是瞬时的。
+// LRU 回收（I2）：dsh 的 Close 会做 shutdown RPC + kill（有界 5s），若在锁内执行会阻塞所有并发
+// Get/TokenUserID；故回收分两步——锁内只把被淘汰条目从三表原子摘除并收集其运行时（与并发 Get 无
+// 竞态），释放锁后再逐个 Close（见 Get / evictLocked / closeAll）。条目移出三表后其它 goroutine
+// 再也查不到它，只有本次调用去 Close，无竞态、无 double-close。测试用的 FakeRuntime.Close 是瞬时的。
 type RuntimePool struct {
 	mu sync.Mutex
 
@@ -66,12 +67,14 @@ func NewRuntimePool(base RuntimeConfig, mcpBaseURL string, capN int, makeRT func
 }
 
 // Get 返回 userID 的运行时：已存在则更新 LRU 后返回；不存在则铸 token、派生每用户配置、makeRT 建
-// 运行时并登记，随后若超 cap 触发 LRU 回收（关停 + 移除最久未用者，连同其 token）。全程持 mu。
+// 运行时并登记，随后若超 cap 触发 LRU 回收（从三表摘除最久未用者，连同其 token）。
+// I2：被淘汰运行时的 Close() 在【锁外】执行——回收只在锁内摘表并收集待关运行时，释放锁后再逐个
+// Close，避免 dsh 的有界 5s Close 阻塞所有并发 Get/TokenUserID。
 func (p *RuntimePool) Get(userID int64) AgentRuntime {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if e, ok := p.runtimes[userID]; ok {
 		p.touchLocked(userID)
+		p.mu.Unlock()
 		return e.rt
 	}
 	token := p.mintTokenLocked()
@@ -82,7 +85,9 @@ func (p *RuntimePool) Get(userID int64) AgentRuntime {
 	p.runtimes[userID] = &poolEntry{rt: rt, token: token}
 	p.byToken[token] = userID
 	p.lru = append(p.lru, userID) // 新建即最近使用（队尾）
-	p.evictLocked()               // 超 cap 才回收；新建者在队尾，绝不会被本次回收误杀
+	victims := p.evictLocked()    // 超 cap 才回收；新建者在队尾，绝不会被本次回收误杀
+	p.mu.Unlock()
+	closeAll(victims) // 锁外 Close，不阻塞并发 Get/TokenUserID
 	return rt
 }
 
@@ -121,9 +126,13 @@ func (p *RuntimePool) touchLocked(userID int64) {
 	p.lru = append(p.lru, userID)
 }
 
-// evictLocked 在超 cap 时从 LRU 队首起关停并移除最久未用的运行时（连同其 token），直到不超 cap。
-// 调用者须持 mu。Close 在锁内完成，保证「关停 + 移除」对并发 Get 原子（见类型注释的权衡）。
-func (p *RuntimePool) evictLocked() {
+// evictLocked 在超 cap 时从 LRU 队首起摘除最久未用的运行时（连同其 token），直到不超 cap，并把被
+// 摘除的运行时收集返回，供调用方在【锁外】Close（见 Get / closeAll）。调用者须持 mu。
+// I2：锁内只做「从 runtimes/byToken/lru 三表移除条目」这一原子操作（与并发 Get 无竞态），绝不在锁内
+// Close（dsh Close 是 shutdown RPC + kill，有界 5s，会阻塞所有并发 Get/TokenUserID）。条目一旦移出
+// 三表，其它 goroutine 再也查不到它，只有本次调用持有其引用去 Close，故无竞态、无 double-close。
+func (p *RuntimePool) evictLocked() []AgentRuntime {
+	var victims []AgentRuntime
 	for len(p.runtimes) > p.cap && len(p.lru) > 0 {
 		oldest := p.lru[0]
 		p.lru = p.lru[1:]
@@ -131,9 +140,18 @@ func (p *RuntimePool) evictLocked() {
 		if !ok {
 			continue // lru 与 runtimes 理论恒一致；防御性跳过悬挂项
 		}
-		_ = e.rt.Close()
+		victims = append(victims, e.rt)
 		delete(p.runtimes, oldest)
 		delete(p.byToken, e.token)
+	}
+	return victims
+}
+
+// closeAll 在【锁外】逐个关停回收下来的运行时，忽略各自的 Close 错误（回收是尽力而为的罕见路径）。
+// 必须在释放 p.mu 之后调用——这正是 I2 的要点：把有界 5s 的 Close 挪出临界区。
+func closeAll(rts []AgentRuntime) {
+	for _, rt := range rts {
+		_ = rt.Close()
 	}
 }
 

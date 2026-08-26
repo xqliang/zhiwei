@@ -135,6 +135,11 @@ func getTimelineHandler(d MCPDeps, userID int64) func(context.Context, *mcp.Call
 			if err != nil {
 				return nil, nil, err
 			}
+			// I1 IDOR 修复：带 session_id 读转写前，先按 userID 校验会话归属（SessionRepo.Get 带
+			// user 过滤，越权/不存在返回 sql.ErrNoRows）。绝不凭 session_id 直读他人转写分段。
+			if _, err := d.Session.Get(ctx, userID, sid); err != nil {
+				return nil, nil, err
+			}
 			tr, err := d.Transcript.GetBySession(ctx, sid)
 			if err != nil {
 				return nil, nil, err
