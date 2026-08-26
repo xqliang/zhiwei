@@ -68,18 +68,44 @@ base 到 `000008_event`；两边 000009-000011 三重撞号。**推荐**（画�
 
 ---
 
-## 五、必须你拍板的 7 点（附推荐）
+## 五、7 决策点 —— 已定（2026-08-26 用户确认）
+1. **平面范围**：**缩范围**——首次合并**不引入** cycle/activity；集成分支里剔除/存根 main 的这两个平面（migrations 000009_metric_cycle 的 person_cycle 部分 + 000010_activity + 000011_person_restore 里针对 cycle/activity 的 ALTER，以及 fact/gate/service/confirm/api/web 里的 cycle/activity 代码）。cycle/activity 随后单独一轮移植。
+2. person_metric：**保 feat** + 移植 main 运营特性（pre_dismiss_status 列并进 feat CREATE + dismiss/restore 级联 + CountPending）。
+3. metric_key 词表：以 feat 为准（emotion/weight/sleep/mood_energy/diet/health），按需补 main 的 state/sleep_late。
+4. 数值存法：**feat num/text 分存**（与 catalog Numeric 一致）。
+5. 多用户为合并后默认：**是**——main 带来的代码（person_restore/事件重要度/多人事件相关的 repo/service/api 调用）须补 `userID`（编译强制暴露，尤其 `Persons.Get(ctx,userID,id)`）。
+6. person_restore 级联扩到 feat metric：**是**（cycle/activity 因决策 1 不含）。
+7. profile_extraction_v3.md：以 feat 版为基（4 平面 num/text），保留 main 的事件重要度/多人事件抽取（related_people 数组 + 事件 importance）。
 
-1. **平面范围（最大分叉）**：合并后是否要 main 的 **cycle + activity** 两平面？
-   - 要 → 得把它们从 main 单用户 6 平面 service 移植到 feat 多用户+catalog service（fact 字段/gate/applyXFact/confirm/api/前端全套，**工作量大**）。
-   - 不要 → 三平面（含 restore 对它们的 ALTER）搁置，迁移最简；但 main 已提交的 cycle/activity 代码合并时仍会带入 → 需删除或存根（也是活）。
-   - **推荐**：本轮**先不引入 cycle/activity**（把它们的代码/迁移在集成分支里剔除或存根），只合并"两边的 person_metric 统一 + feat 全部子系统 + main 的事件重要度/多人事件/person_restore(对 metric 的部分)"，让首次合并可控；cycle/activity 作为随后单独一轮移植（它们是独立新平面，不阻塞）。
-2. **person_metric 取舍**：采纳"保 feat + 移植 main 运营特性(pre_dismiss_status/级联/CountPending)"？**推荐 是**。
-3. **metric_key 词表**：`state/sleep_late`(main) vs `sleep/mood_energy`(feat) 统一口径（影响历史数据+prompt）。**推荐**取并集或以 feat 为准 + 补 `state/sleep_late`（无历史数据包袱侧优先）。
-4. **数值存法**：feat num/text 分存（与 catalog Numeric 一致，**推荐**）vs main 双存。
-5. **多用户为合并后默认**：**推荐 是**（本会话核心）；则 main 带来的所有新代码补 userID。
-6. **person_restore 级联**扩到 feat metric（**推荐 是**）及（若引入）cycle/activity。
-7. **profile_extraction_v3.md** 最终抽取 schema（随 1-4 定）。
+**缩范围后的迁移重编号（最简）**：base 到 000008；main 的 000009_metric_cycle/000010_activity/000011_person_restore **不整体带入**（其 person_metric 定义丢弃、cycle/activity 剔除、person_restore 只保留对 feat metric 有用的 pre_dismiss_status→并进 feat metric CREATE）；feat 四迁移直接顺延 **000009_agent / 000010_conversation_memory / 000011_metric(含 pre_dismiss_status) / 000012_auth**。（即最终迁移与 feat 现状基本一致，只在 000011_metric 补一列。）
+
+## 七、仓库根执行脚本（由用户在 `zhiwei-water18-0822/` 跑；隔离 worktree 无法执行）
+> 分叉大、需人工解冲突，脚本给骨架，冲突处按 §一/§二/§五 手解。
+
+```
+cd /Users/jyxc-dz-0100360/work/fun/zhiwei-water18-0822      # main 所在的主 checkout
+git fetch --all
+git switch -c integrate/merge-main feat/agent-chatbot        # 集成分支，勿动 main/feat
+git merge main                                               # 一次性 merge commit；下面手解冲突
+# 手解（参照本计划）：
+#  - profile 五件套(fact/gate/service/service_manual/confirm)：取 feat 的 4 平面+多用户+catalog，
+#    剔除 cycle/activity；保留 main 的事件重要度/多人事件(related_people)。
+#  - repo/person_metric.go & person_metric_test.go(add/add)：取 feat 版，补 pre_dismiss_status
+#    列 + DismissAll/RestoreArchived 级联 + CountPending。
+#  - api/person.go：取 feat metric 内嵌契约；剔除 cycle/activity handler；保留 main 事件重要度/多人。
+#  - web/app.js & index.html：取 feat（含 agent 聊天/报告/metric 面板）；剔除 cycle/activity 面板；
+#    合入 main 的事件重要度视觉分层+多人录入。
+#  - prompts/profile_extraction_v3.md(add/add)：feat 版为基 + main 事件重要度/多人事件抽取。
+#  - cmd/main.go：并 feat 全套装配；剔除 Cycles/Activities 字段。
+#  - 迁移：删掉 merge 带入的 000009_metric_cycle/000010_activity/000011_person_restore；
+#    给 000011_metric.up.sql 加 `pre_dismiss_status VARCHAR(16) NULL`；确认最终 000009_agent..000012_auth 连续。
+#  - repo/person.go：Get 用 feat 多用户签名；main 带来的所有 Get 调用补 userID（编译报错处逐一改）。
+# 解完：
+go build ./... && go vet ./...
+# fresh 库验证 migrate 000001-000012 连续、各包测试绿（隔离库 -p 1）
+git switch main && git merge --ff-only integrate/merge-main    # 集成分支验证通过后 FF 回 main
+```
+
 
 ---
 
