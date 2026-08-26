@@ -1136,13 +1136,23 @@ const app = createApp({
     }
 
     // ---------- 人物属性手动管理（加 / 改(留痕) / 删 / 修改历史抽屉） ----------
-    // 常用属性 key 建议（datalist；与 internal/profile/catalog.go 的 47 键一致，可自由输入目录外 key）
-    const ATTR_KEYS = ['aliases','birthday','gender','zodiac','mbti','education','school','city','address','phone',
-      'occupation','industry','office_location','work_start_time','work_end_time','commute_mode','often_travel','current_projects',
-      'meal_time','cuisine','eats_spicy','eats_numbing','smokes','drinks','wears_makeup','perfume',
-      'hobbies','skills','reading_now','books_read','movies_watched','music_listened','games_played','fav_celebrities','fav_anime','fav_movie_genres','catchphrases','invests_stocks',
-      'cities_visited','places_traveled','has_car','car_brand','phone_brand',
-      'recent_concerns','attention_topics','personality','chronic_diseases'];
+    // 属性目录（F4 前端配套）：GET /api/profile/catalog → [{key,label,group,value_type,enum_options,cardinality}]。
+    // 懒加载缓存，模式照 loadNewPersonSpeakers：人物 tab 首次进入拉一次（静态数据，无需重拉）。
+    // 加属性/改值表单据此把值输入按 value_type 切成受控控件（enum→select / bool→是否 / date→日期选择器）——
+    // Task 1 写入端上闸后，受控输入保证提交值天然合法（enum 精确命中、bool 只认 true/false、date 可解析），
+    // 免去用户手输脏值被 400。目录同时作 attr_key 输入的 datalist 数据源（key + 中文 label 建议）。
+    const attrCatalog = ref([]);
+    const attrCatalogLoaded = ref(false);
+    async function loadAttrCatalog() {
+      if (attrCatalogLoaded.value) return; // 已加载：跳过（静态目录，缓存标志）
+      try {
+        const d = await api('GET', '/api/profile/catalog');
+        attrCatalog.value = d.catalog || [];
+        attrCatalogLoaded.value = true;
+      } catch (e) { showError(e); } // 失败不阻塞：目录空 → 值输入回退全部自由文本、datalist 无建议，仍可手输
+    }
+    // attrDefOf：按 key 查目录定义；目录外 key（自造）或目录未加载时返回 null → 前端回退自由文本输入。
+    function attrDefOf(key) { return attrCatalog.value.find(d => d.key === key) || null; }
 
     const showAddAttr = ref(false);          // 加属性表单开合
     const addAttrForm = reactive({ attr_key: '', value: '' });
@@ -1151,6 +1161,14 @@ const app = createApp({
     const deletingAttrId = ref(null);        // 2 步删除确认
     const attrHistory = ref(null);           // { attr_key, items }：历史抽屉
     const attrHistoryLoading = ref(false);
+
+    // 加属性表单 / 就地改值当前 key 的目录定义（受控输入据其 value_type 切控件）。
+    // addAttrForm.attr_key 是 reactive 字段、editingAttr 是 ref，computed 会自动追踪其变化。
+    const addAttrDef = computed(() => attrDefOf(addAttrForm.attr_key));
+    const editAttrDef = computed(() => (editingAttr.value ? attrDefOf(editingAttr.value.attr_key) : null));
+    // 加属性表单 key 变更（datalist 选中/失焦触发 change）时清空已填值：旧值可能不符合新 key 的
+    // 值类型（如已填的文本值留在切到 bool/enum 的受控控件里，select 无匹配项却仍在 model 里 → 提交非法值被 400）。
+    function onAddAttrKeyChange() { addAttrForm.value = ''; }
 
     async function submitAddAttr() {
       if (addingAttr.value) return;
@@ -1916,8 +1934,8 @@ const app = createApp({
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; loadTopics(); loadTodos(); loadDismissedTodos(); }
       // 声纹 tab：进入时复位本 tab 的临时态（收起录入表单/展开项/改名/播放）并拉全量名册。
       if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; loadAllSpeakers(); }
-      // 人物 tab：进入时复位详情/归档确认态，拉名册 + 确认队列（跨平面 pending 并集，独立刷新）。
-      if (name === 'persons') { closePersonDetail(); archivingPersonId.value = null; loadPersons(); loadPending(); }
+      // 人物 tab：进入时复位详情/归档确认态，拉名册 + 确认队列（跨平面 pending 并集，独立刷新）+ 属性目录（受控输入元数据，懒加载缓存）。
+      if (name === 'persons') { closePersonDetail(); archivingPersonId.value = null; loadPersons(); loadPending(); loadAttrCatalog(); }
     }
     loadSessions();
     // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
@@ -1961,7 +1979,7 @@ const app = createApp({
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
       epiText, personNameOf,
-      ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
+      attrCatalog, attrDefOf, addAttrDef, editAttrDef, onAddAttrKeyChange, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
       EVENT_TYPES, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
       METRIC_KEYS, metricKey, metricRows, metricLoading, metricIsNumeric, metricDef, switchMetric, showAddMetric, addMetricForm, addingMetric, toggleAddMetric, submitAddMetric, deletingMetricId, askDeleteMetric, confirmDeleteMetric, metricChart, metricHover, onMetricChartMove, CHART_W, CHART_H, metricNumericRows, metricCategoryRows, showMetricList,

@@ -842,7 +842,19 @@
           </div>
           <div style="display:flex; gap:4px; flex-shrink:0">
             <template v-if="editingAttr && editingAttr.id === a.id">
-              <input class="txt inline" v-model="editingAttr.value" @keyup.enter="commitEditAttr" @keyup.esc="editingAttr=null">
+              <!-- 就地改值同样按该行 attr_key 的 value_type 切受控控件（F4 配套，规则同加属性表单） -->
+              <select v-if="editAttrDef && editAttrDef.value_type === 'enum'" class="txt inline" v-model="editingAttr.value">
+                <option value="">请选择</option>
+                <option v-for="opt in editAttrDef.enum_options" :key="opt" :value="opt">{{ opt }}</option>
+              </select>
+              <select v-else-if="editAttrDef && editAttrDef.value_type === 'bool'" class="txt inline" v-model="editingAttr.value">
+                <!-- option value 即后端 true/false 线值，「是/否」仅展示文案（同加属性表单，无需提交前映射） -->
+                <option value="">请选择</option>
+                <option value="true">是</option>
+                <option value="false">否</option>
+              </select>
+              <input v-else-if="editAttrDef && editAttrDef.value_type === 'date'" class="txt inline" type="date" v-model="editingAttr.value">
+              <input v-else class="txt inline" v-model="editingAttr.value" @keyup.enter="commitEditAttr" @keyup.esc="editingAttr=null">
               <button class="btn primary" style="padding:6px 12px" @click="commitEditAttr">存</button>
               <button class="btn mini" @click="editingAttr=null">取消</button>
             </template>
@@ -1175,11 +1187,24 @@
       <div class="card sunken" v-if="showAddAttr" style="margin-bottom:10px">
         <div class="kv" style="margin-bottom:8px"><b>加属性</b><button class="btn-link" @click="toggleAddAttr">✕</button></div>
         <div style="display:flex; gap:8px; flex-wrap:wrap">
-          <input class="txt" list="attr-keys" v-model="addAttrForm.attr_key" placeholder="属性 key（如 occupation）" style="flex:1; min-width:140px">
+          <input class="txt" list="attr-keys" v-model="addAttrForm.attr_key" @change="onAddAttrKeyChange" placeholder="属性 key（如 occupation）" style="flex:1; min-width:140px">
           <datalist id="attr-keys">
-            <option v-for="k in ATTR_KEYS" :key="k" :value="k"></option>
+            <option v-for="d in attrCatalog" :key="d.key" :value="d.key">{{ d.label }}</option>
           </datalist>
-          <input class="txt" v-model="addAttrForm.value" placeholder="值（如 后端工程师）" style="flex:1; min-width:140px">
+          <!-- 值输入按目录 value_type 切换受控控件（F4 配套）：enum→select（空选项+枚举） / bool→是否(映射 true/false) / date→日期选择器 / 其余(含目录外自造 key)→自由文本 -->
+          <select v-if="addAttrDef && addAttrDef.value_type === 'enum'" class="txt" v-model="addAttrForm.value" style="flex:1; min-width:140px">
+            <option value="">请选择</option>
+            <option v-for="opt in addAttrDef.enum_options" :key="opt" :value="opt">{{ opt }}</option>
+          </select>
+          <select v-else-if="addAttrDef && addAttrDef.value_type === 'bool'" class="txt" v-model="addAttrForm.value" style="flex:1; min-width:140px">
+            <!-- option 的 value 直接是后端接受的 true/false 线值（Task 1 归一后即小写 true/false），
+                 「是/否」仅作展示文案 → v-model 存的就是可直接提交的值，无需提交前额外映射 -->
+            <option value="">请选择</option>
+            <option value="true">是</option>
+            <option value="false">否</option>
+          </select>
+          <input v-else-if="addAttrDef && addAttrDef.value_type === 'date'" class="txt" type="date" v-model="addAttrForm.value" style="flex:1; min-width:140px">
+          <input v-else class="txt" v-model="addAttrForm.value" placeholder="值（如 后端工程师）" style="flex:1; min-width:140px">
           <button class="btn primary" :disabled="addingAttr" @click="submitAddAttr">{{ addingAttr ? '保存中…' : '保存' }}</button>
         </div>
         <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；单值属性重复添加 = 改值，旧值留痕可查历史。</div>

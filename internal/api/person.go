@@ -55,10 +55,41 @@ func RegisterPerson(r chi.Router, h *PersonHandler) {
 	r.Delete("/api/persons/{id}/activities/{aid}", h.DeleteActivity)
 	r.Get("/api/persons/{id}/history", h.History)
 
+	r.Get("/api/profile/catalog", h.Catalog)
 	r.Get("/api/profile/pending", h.ListPending)
 	r.Post("/api/profile/pending/{kind}/{id}/confirm", h.ConfirmPending)
 	r.Post("/api/profile/pending/{kind}/{id}/dismiss", h.DismissPending)
 	r.Post("/api/profile/extract", h.Extract)
+}
+
+// ---- 属性目录（F4 前端配套：受控输入元数据）----
+
+// catalogAttr 是 GET /api/profile/catalog 的单条目录项：把 profile.AttrDef 的导出形态
+// 转成 snake_case JSON 契约，供前端按 value_type 切换值输入控件（enum→select /
+// bool→是否 / date→日期选择器）。非 enum 项的 enum_options 为 null（前端只在 enum
+// 分支遍历它，null 天然安全）。
+type catalogAttr struct {
+	Key         string   `json:"key"`
+	Label       string   `json:"label"`
+	Group       string   `json:"group"`
+	ValueType   string   `json:"value_type"`
+	EnumOptions []string `json:"enum_options"`
+	Cardinality string   `json:"cardinality"`
+}
+
+// Catalog 返回属性目录全集（静态数据，无 DB 查询）。前端「加属性 / 就地改值」表单
+// 据此把自由文本输入切换为受控控件——Task 1 写入端上闸后（enum 须精确命中、bool 只认
+// true/false、date 须可解析），受控输入保证提交值天然合法，避免用户手输脏值被 400。
+func (h *PersonHandler) Catalog(w http.ResponseWriter, r *http.Request) {
+	defs := profile.All()
+	out := make([]catalogAttr, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, catalogAttr{
+			Key: d.Key, Label: d.Label, Group: d.Group,
+			ValueType: d.ValueType, EnumOptions: d.EnumOptions, Cardinality: d.Cardinality,
+		})
+	}
+	writeJSON(w, map[string]any{"catalog": out})
 }
 
 // validPersonStatuses 是 person 状态机的合法取值（Patch 状态流转白名单）。
