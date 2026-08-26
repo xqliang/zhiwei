@@ -16,6 +16,7 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // setupQueryAPI 构造挂载了查询路由的测试 handler。
@@ -33,7 +34,7 @@ func setupQueryAPI(t *testing.T, s *repo.SessionRepo, j *repo.JobRepo,
 
 func TestSessionsAndDetail(t *testing.T) {
 	_ = ids.InitForTest() // 幂等初始化，避免依赖其它测试先跑
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestSessionsAndDetail(t *testing.T) {
 // 顶层 speakers 列表含该说话人。
 func TestGetSessionSpeakerEnrichment(t *testing.T) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +207,7 @@ func TestGetSessionSpeakerEnrichment(t *testing.T) {
 // 不受脏库其它说话人干扰，因此无需清表。
 func TestGetSessionNameCandidates(t *testing.T) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +332,7 @@ func TestGetSessionNameCandidates(t *testing.T) {
 
 // ServeAudio 流式返回原始音频文件，支持点击播放
 func TestServeAudio(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +387,7 @@ func TestServeAudio(t *testing.T) {
 // （含 DB 句柄供断言）。
 func buildEnrichedSession(t *testing.T) (http.Handler, ids.ID, *repo.SessionRepo) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,10 +611,11 @@ func TestReextract(t *testing.T) {
 //   - 单人会话（1 个 ASR 标签）→ basis=whole，top3 由全部段向量均值算出；
 //   - 多人会话 → basis=longest，用时长最长一段的向量；
 //   - 判定走两级规则（voiceprint.Matched）：top1≥0.8 强命中 / ≥0.72 且领先 0.06 弱命中。
+//
 // 场景构造：库中甲=e1、乙=0.6e1+0.8e2（与 e1 余弦 0.6）、丙=e3（正交）。
 func TestListSessionsVoiceTop(t *testing.T) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -794,7 +796,7 @@ func TestListSessionsVoiceTop(t *testing.T) {
 // 用途：一句话可能混多个人——段级 top-1 不是归属说话人即该段可能被切错/归错。
 func TestGetSessionVoiceMatches(t *testing.T) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

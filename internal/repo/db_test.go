@@ -1,9 +1,12 @@
 package repo
 
-import "testing"
+import (
+	"testing"
+	"zhiwei/internal/repotest"
+)
 
 func TestNewDBPing(t *testing.T) {
-	dsn := TestDSN(t) // 无 TEST_MYSQL_DSN 时 Skip
+	dsn := repotest.DSN(t) // 无 TEST_MYSQL_DSN 时 Skip
 	db, err := NewDB(dsn)
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)

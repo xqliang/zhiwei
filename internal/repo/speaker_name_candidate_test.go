@@ -7,12 +7,13 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 // testDB 返回测试库连接（无 TEST_MYSQL_DSN 时 skip）。
 func testDB(t *testing.T) *sqlx.DB {
 	t.Helper()
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,6 +11,7 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 	"zhiwei/internal/voiceprint"
 )
 
@@ -67,7 +68,7 @@ var _ voiceprint.Client = (*fakeVoiceprint)(nil) // 编译期接口符合性
 func seedSpeakerStage(t *testing.T) (ids.ID, *repo.Transcript, string, *repo.TranscriptRepo, *repo.SpeakerRepo) {
 	t.Helper()
 	requireFFmpeg(t)
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +331,7 @@ func TestStageSpeakerSavesSegmentEmbeddings(t *testing.T) {
 func seedCleanSegStage(t *testing.T, overlapC bool) (ids.ID, *repo.Transcript, *repo.TranscriptRepo, *repo.SpeakerRepo, string) {
 	t.Helper()
 	requireFFmpeg(t)
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

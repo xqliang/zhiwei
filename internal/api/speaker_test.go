@@ -19,6 +19,7 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 	"zhiwei/internal/voiceprint"
 )
 
@@ -42,7 +43,7 @@ var _ voiceprint.Client = fakeVoiceprintAPI{}
 
 func setupSpeakerAPI(t *testing.T) (http.Handler, *repo.SpeakerRepo, *repo.TranscriptRepo, string) {
 	t.Helper()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +189,7 @@ func TestSpeakerSegments(t *testing.T) {
 // TestSpeakerListWithCandidates 名册接口富化候选名：随机名说话人带 name_candidates
 // （倒排 + 置信度数值），已确认真名者带空数组。
 func TestSpeakerListWithCandidates(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +255,7 @@ func TestSpeakerListWithCandidates(t *testing.T) {
 
 // TestSpeakerRenameClearsCandidates 改名（=用户采纳候选或手动命名）后清空该说话人候选。
 func TestSpeakerRenameClearsCandidates(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +289,7 @@ func TestSpeakerRenameClearsCandidates(t *testing.T) {
 
 // TestSpeakerDeleteNameCandidate 忽略单个候选端点：删该行、幂等、缺 name 400。
 func TestSpeakerDeleteNameCandidate(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

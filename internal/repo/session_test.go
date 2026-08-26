@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 func newTestSession(id ids.ID) *AudioSession {
@@ -15,7 +16,7 @@ func newTestSession(id ids.ID) *AudioSession {
 }
 
 func TestSessionCreateGet(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +37,7 @@ func TestSessionCreateGet(t *testing.T) {
 }
 
 func TestSessionListAndUpdateStatus(t *testing.T) {
-	db, _ := NewDB(TestDSN(t))
+	db, _ := NewDB(repotest.DSN(t))
 	r := &SessionRepo{DB: db}
 	id := ids.New()
 	ctx := context.Background()

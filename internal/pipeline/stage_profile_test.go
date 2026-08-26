@@ -14,6 +14,7 @@ import (
 	"zhiwei/internal/profile"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // fakeLLM 按序返回预置响应（每次 Chat 弹出一条）。pipeline 包已有 fakeExtractLLM
@@ -39,7 +40,7 @@ func (f *fakeLLM) Chat(_ context.Context, _ provider.ChatRequest) (provider.Chat
 var _ provider.LLMProvider = (*fakeLLM)(nil)
 
 func TestStageProfile(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +127,7 @@ func TestStageProfileNilService(t *testing.T) {
 // 的 trace 后返回 nil 放行。transcript/memory 已落库完好，画像只是增强数据，可事后从
 // 历史回填端点重跑（ApplyFacts 幂等）。
 func TestStageProfileNonFatal(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +141,8 @@ func TestStageProfileNonFatal(t *testing.T) {
 		Memories: &repo.MemoryRepo{DB: db}, Speakers: &repo.SpeakerRepo{DB: db},
 		Persons: &repo.PersonRepo{DB: db}, Attributes: &repo.PersonAttributeRepo{DB: db},
 		Relationships: &repo.PersonRelationshipRepo{DB: db}, ChangeLogs: &repo.PersonChangeLogRepo{DB: db},
-		LLM:    &fakeLLM{err: errors.New("模拟 LLM 超时")},
-		Model:  "test", Prompt: "sys", PromptVersion: "profile_extraction_v3",
+		LLM:   &fakeLLM{err: errors.New("模拟 LLM 超时")},
+		Model: "test", Prompt: "sys", PromptVersion: "profile_extraction_v3",
 		Window: 10, Gate: profile.GateConfig{AutoConf: 0.75},
 	}
 
