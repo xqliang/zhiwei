@@ -897,3 +897,49 @@ func TestPersonActivityAPI(t *testing.T) {
 		t.Fatalf("全状态 GET 应仍含软删行(id=%s): %+v", a1.ID, listR.Activities)
 	}
 }
+
+// TestAddAttributeF4Status 锁死 F4 校验错误的 HTTP 状态码映射：脏值（值域不合法）→ 400
+// （对齐 metric 枚举校验的 400 口径），合法但需归一的值 → 200 且返回值已规范化。
+// AddAttribute 与 PatchAttribute 两条手动写入路径都覆盖。
+func TestAddAttributeF4Status(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			pk := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_attribute WHERE person_id = ? AND attr_key IN ('gender','birthday')`, pk)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind='attribute' AND attr_key IN ('gender','birthday')`, pk)
+		}
+	})
+
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+	base := "/api/persons/" + owner.ID.String() + "/attributes"
+
+	// 脏枚举 → 400（而非 500）
+	if rec := doReq(t, h, "POST", base, map[string]any{"attr_key": "gender", "value": "男性"}); rec.Code != 400 {
+		t.Fatalf("脏枚举应 400: %d %s", rec.Code, rec.Body.String())
+	}
+	// 脏日期 → 400
+	if rec := doReq(t, h, "POST", base, map[string]any{"attr_key": "birthday", "value": "八月三号"}); rec.Code != 400 {
+		t.Fatalf("脏日期应 400: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 合法但需重排的日期 → 200，返回值已规范化
+	rec := doReq(t, h, "POST", base, map[string]any{"attr_key": "birthday", "value": "2026/08/03"})
+	if rec.Code != 200 {
+		t.Fatalf("合法日期应 200: %d %s", rec.Code, rec.Body.String())
+	}
+	var attr repo.PersonAttribute
+	_ = json.Unmarshal(rec.Body.Bytes(), &attr)
+	if attr.ValueText != "2026-08-03" {
+		t.Fatalf("日期应规范化为 2026-08-03: %+v", attr)
+	}
+
+	// PatchAttribute 路径同样把脏值映射为 400（改成非目录枚举值）
+	if rec := doReq(t, h, "PATCH", base+"/"+attr.ID.String(),
+		map[string]any{"attr_key": "birthday", "value": "不是日期"}); rec.Code != 400 {
+		t.Fatalf("PATCH 脏值应 400: %d %s", rec.Code, rec.Body.String())
+	}
+}

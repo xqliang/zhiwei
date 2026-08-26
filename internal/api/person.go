@@ -365,6 +365,11 @@ func (h *PersonHandler) AddAttribute(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err := h.Service.ManualAddAttribute(r.Context(), pid, key, val)
 	if err != nil {
+		// F4 校验错误（值域不合法）→ 400（对齐 metric 枚举校验的 400 口径）；其余 → 500。
+		if errors.Is(err, profile.ErrInvalidAttrValue) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -414,6 +419,11 @@ func (h *PersonHandler) PatchAttribute(w http.ResponseWriter, r *http.Request) {
 	// 手动改值 = 同 key 写新值（ManualAddAttribute 内部 supersede 旧 active 行）
 	na, err := h.Service.ManualAddAttribute(r.Context(), pid, a.AttrKey, val)
 	if err != nil {
+		// F4 校验错误（值域不合法）→ 400（对齐 AddAttribute）；其余 → 500。
+		if errors.Is(err, profile.ErrInvalidAttrValue) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -141,6 +141,16 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, id ids.ID, status s
 // 新行 supersedes_id 指向旧行（即手动改值）；列表型纯叠加新行。
 func (s *Service) ManualAddAttribute(ctx context.Context, personID ids.ID, attrKey, value string) (*repo.PersonAttribute, error) {
 	d := Def(attrKey)
+	// F4 写入端校验/规范化（单点闸，见 validate.go）：手动录入的脏值直接报错，error 原样
+	// 透传 API 层——handler 用 errors.Is(err, ErrInvalidAttrValue) 命中后回 400（对齐 metric
+	// 枚举校验的 400 口径），而非 500。与 LLM 路径共用 NormalizeAttrValue，规范化后的值贯穿
+	// 后续 existing 查询、幂等比较与落库。
+	norm, err := NormalizeAttrValue(d, value)
+	if err != nil {
+		return nil, err
+	}
+	value = norm
+
 	tx, err := s.DB.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err

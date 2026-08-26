@@ -178,10 +178,23 @@ func (s *Service) applyAttributeFact(ctx context.Context, tx *sqlx.Tx, userID in
 	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
 
 	d := Def(f.AttrKey)
+
+	// F4 写入端校验/规范化（单点闸，见 validate.go）：gender=「男性」、smokes=「是」、
+	// birthday=「八月三号」这类脏值在此拦下。规范化后的值贯穿后续 existing/dedup 查询、
+	// DecideAttribute 闸门比较与 attrRow 落库——闸门比较链全程用同一规范值，避免「按原值比较、
+	// 按规范值落库」的口径漂移（f 是值传递的本地副本，改 f.Value 只影响本次调用链）。
+	// 校验失败 → Skipped 且不落库不进队列（宁少勿错：脏值不入库、不制造确认噪声；后续会话
+	// 若抽到规范值仍可正常落）。
+	norm, err := NormalizeAttrValue(d, f.Value)
+	if err != nil {
+		st.Skipped++
+		return nil
+	}
+	f.Value = norm
+
 	isList := d.Cardinality == CardinalityList
 
 	var existing *repo.PersonAttribute
-	var err error
 	if isList {
 		existing, err = s.Attributes.FindActiveByKeyValueExt(ctx, tx, personID, f.AttrKey, f.Value)
 	} else {
