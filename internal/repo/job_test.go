@@ -38,9 +38,9 @@ func TestJobLifecycle(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// ClaimNext 领取「最老的 pending 任务」——共享测试库被并行测试二进制
-	// （如 pipeline 包的 pool 测试）使用时，可能先抢到别人的任务。
-	// 重试领取：抢到外任务就还原为 pending（不破坏对方测试），直到领到本任务的。
+	// ClaimNext 领取「最老的 pending 任务」——库已按包隔离（F6，本包独占 zhiwei_test_repo），
+	// 正常不会再有「别人的任务」；但开头清理若漏（如异常退出遗留），仍可能先领到旧 job。
+	// 重试领取：抢到外任务就还原为 pending（不破坏数据），直到领到本任务的（带 deadline 兜底）。
 	var claimed *Job
 	deadline := time.Now().Add(10 * time.Second)
 	for claimed == nil {
