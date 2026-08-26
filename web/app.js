@@ -1030,6 +1030,7 @@ const app = createApp({
       try {
         personDetail.value = await api('GET', '/api/persons/' + id);
         await loadMetrics(); // 详情拉取成功后加载「状态&健康」测点（对齐 loadPending 的挂接方式）
+        await loadActivities(); // 同步加载「生活轨迹」活动时间线（对齐 loadMetrics 的挂接）
       }
       catch (e) { showError(e); }
     }
@@ -1048,6 +1049,8 @@ const app = createApp({
       showAddMetric.value = false; resetAddMetricForm(); deletingMetricId.value = null; metricHover.value = null; showMetricList.value = false;
       // 健康周期临时态（P3b Task 2，敏感区）：折叠+清列表/免责文案 / 加周期表单(含草稿) / 删除确认一并清空
       healthOpen.value = false; cycles.value = []; cyclesNote.value = ''; showAddCycle.value = false; resetAddCycleForm(); deletingCycleId.value = null;
+      // 生活轨迹临时态（P4）：清列表/加载态 / 加活动表单(含草稿) / 提交态 / 删除确认一并清空
+      activities.value = []; activityLoading.value = false; showAddActivity.value = false; resetAddActivityForm(); addingActivity.value = false; deletingActivityId.value = null;
     }
     async function reloadPersonDetail() {
       if (!personDetail.value) return;
@@ -1486,6 +1489,71 @@ const app = createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 生活轨迹（activity 平面，P4：什么时间 / 多长时间 / 什么工具 / 做什么 / 地点 / 通勤） ----------
+    // 测点流语义（同 metric 平面）：追加式、无「当前值」、无冲突——每条 = 某时开始的一次活动。
+    // 画成时间线列表（升序，从早到晚）而非曲线：活动是「类别身份」，画连续线是撒谎（dataviz 结论，P3b 已引用）。
+    const activities = ref([]);              // 当前人物的全状态活动（后端升序返回）
+    const activityLoading = ref(false);
+    const showAddActivity = ref(false);
+    const addActivityForm = reactive({ activity: '', tool: '', location: '', commute_mode: '', started_at: '', duration_min: '' });
+    const addingActivity = ref(false);
+    const deletingActivityId = ref(null);    // 2 步删除确认
+
+    async function loadActivities() {
+      if (!personDetail.value) return;
+      // 记下请求时的人物 id，await 回来后校验——快速切人时晚到的旧响应直接丢弃，
+      // 防止过期数据渲染且粘住（镜像 loadMetrics 的 pid guard）。
+      const pid = personDetail.value.person.id;
+      activityLoading.value = true;
+      try {
+        const d = await api('GET', '/api/persons/' + pid + '/activities');
+        if (personDetail.value?.person?.id !== pid) return;
+        activities.value = d.activities || [];
+      } catch (e) { showError(e); }
+      finally { activityLoading.value = false; }
+    }
+    // 展示视图：排除 dismissed（软删不显示，镜像 metricCategoryRows）。
+    const activityRows = computed(() => activities.value.filter(a => a.status !== 'dismissed'));
+    function resetAddActivityForm() {
+      addActivityForm.activity = ''; addActivityForm.tool = ''; addActivityForm.location = '';
+      addActivityForm.commute_mode = ''; addActivityForm.started_at = ''; addActivityForm.duration_min = '';
+    }
+    function toggleAddActivity() {
+      if (showAddActivity.value) { showAddActivity.value = false; resetAddActivityForm(); return; }
+      showAddActivity.value = true;
+    }
+    async function submitAddActivity() {
+      if (addingActivity.value) return;
+      const act = addActivityForm.activity.trim();
+      if (!act) { toast.value = '请输入活动'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingActivity.value = true;
+      try {
+        // 可选字段非空才发（后端 trim 空→NULL）；duration_min 表单是字符串，Number() 转数字。
+        const body = { activity: act };
+        if (addActivityForm.tool.trim()) body.tool = addActivityForm.tool.trim();
+        if (addActivityForm.location.trim()) body.location = addActivityForm.location.trim();
+        if (addActivityForm.commute_mode.trim()) body.commute_mode = addActivityForm.commute_mode.trim();
+        if (addActivityForm.started_at) body.started_at = addActivityForm.started_at;
+        if (addActivityForm.duration_min) body.duration_min = Number(addActivityForm.duration_min);
+        // POST 返回裸行不消费，直接 reload（对齐 submitAddMetric）；名册角标可能变故一并刷新。
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/activities', body);
+        showAddActivity.value = false;
+        resetAddActivityForm();
+        await loadActivities(); await loadPersons();
+      } catch (e) { showError(e); }
+      finally { addingActivity.value = false; }
+    }
+    function askDeleteActivity(a) { deletingActivityId.value = a.id; }
+    async function confirmDeleteActivity() {
+      const id = deletingActivityId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/activities/' + id);
+        deletingActivityId.value = null;
+        await loadActivities(); await loadPersons();
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 确认队列（跨平面 pending 并集；与名册/详情独立刷新） ----------
     const pendingItems = ref([]);
     const pendingLoading = ref(false);
@@ -1536,10 +1604,11 @@ const app = createApp({
         const v = it.value || '';
         return it.cycle_type ? v.replace(it.cycle_type, cycleTypeLabel(it.cycle_type)) : v;
       }
+      if (it.kind === 'activity') return it.value || ''; // activity：value = activity 串（做什么）
       return it.value || it.person_name; // person：名字
     }
     function pendingKindText(k) {
-      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记', metric: '指标', cycle: '周期' }[k] || k;
+      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记', metric: '指标', cycle: '周期', activity: '活动' }[k] || k;
     }
 
     // ---------- 从历史回填抽取（POST /api/profile/extract：不带 session_id = 最近 50 个 completed，同步） ----------
@@ -1862,6 +1931,7 @@ const app = createApp({
       EVENT_TYPES, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
       METRIC_KEYS, metricKey, metricRows, metricLoading, metricIsNumeric, metricDef, switchMetric, showAddMetric, addMetricForm, addingMetric, toggleAddMetric, submitAddMetric, deletingMetricId, askDeleteMetric, confirmDeleteMetric, metricChart, metricHover, onMetricChartMove, CHART_W, CHART_H, metricNumericRows, metricCategoryRows, showMetricList,
       CYCLE_TYPES, healthOpen, cycles, cyclesNote, cycleLoading, toggleHealth, showAddCycle, addCycleForm, addingCycle, toggleAddCycle, submitAddCycle, deletingCycleId, askDeleteCycle, confirmDeleteCycle, cycleTypeLabel, fmtDateOnly,
+      activities, activityRows, activityLoading, showAddActivity, addActivityForm, addingActivity, toggleAddActivity, submitAddActivity, deletingActivityId, askDeleteActivity, confirmDeleteActivity,
       pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
       backfilling, backfillInfo, runBackfill,
     };
