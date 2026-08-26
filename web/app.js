@@ -1046,6 +1046,8 @@ const app = createApp({
       showAddEvent.value = false; resetAddEventForm(); deletingEventId.value = null;
       // 状态&健康临时态（P3b Task 1）：录入表单(含草稿) / 删除确认 / hover / 管理列表一并清空
       showAddMetric.value = false; resetAddMetricForm(); deletingMetricId.value = null; metricHover.value = null; showMetricList.value = false;
+      // 健康周期临时态（P3b Task 2，敏感区）：折叠+清列表/免责文案 / 加周期表单(含草稿) / 删除确认一并清空
+      healthOpen.value = false; cycles.value = []; cyclesNote.value = ''; showAddCycle.value = false; resetAddCycleForm(); deletingCycleId.value = null;
     }
     async function reloadPersonDetail() {
       if (!personDetail.value) return;
@@ -1397,6 +1399,88 @@ const app = createApp({
       if (best) metricHover.value = { x: best.x, y: best.y, text: fmtEventDate(best.at, true) + ' · ' + best.v + (c.unit || '') };
     }
 
+    // ---------- 健康周期（cycle 平面，P3，敏感：默认折叠 + 免责直显） ----------
+    const CYCLE_TYPES = [
+      { key: 'menstrual', label: '生理期' },
+      { key: 'medication', label: '用药' },
+      { key: 'injection', label: '注射' },
+      { key: 'followup', label: '随访' },
+    ];
+    const healthOpen = ref(false);        // 敏感区默认折叠
+    const cycles = ref([]);
+    const cyclesNote = ref('');           // 后端免责文案（响应 note 字段直显）
+    const cycleLoading = ref(false);
+    const showAddCycle = ref(false);
+    const addCycleForm = reactive({ cycle_type: '', label: '', anchor_date: '', period_days: '', duration_days: '', dosage: '', frequency: '' });
+    const addingCycle = ref(false);
+    const deletingCycleId = ref(null);
+
+    function cycleTypeLabel(k) { const t = CYCLE_TYPES.find(x => x.key === k); return t ? t.label : k; }
+    // 日期仅显示 YYYY-MM-DD（DATE 列的 ISO 串截取）
+    function fmtDateOnly(iso) { return iso ? String(iso).slice(0, 10) : '—'; }
+    // 敏感区懒加载：首次展开才拉数据（含免责 note）；再点收起并清列表
+    async function toggleHealth() {
+      if (healthOpen.value) {
+        healthOpen.value = false; cycles.value = []; cyclesNote.value = '';
+        showAddCycle.value = false; resetAddCycleForm(); deletingCycleId.value = null;
+        return;
+      }
+      healthOpen.value = true;
+      cycleLoading.value = true;
+      try {
+        const d = await api('GET', '/api/persons/' + personDetail.value.person.id + '/cycles');
+        cycles.value = d.cycles || [];
+        cyclesNote.value = d.note || '';
+      } catch (e) { showError(e); }
+      finally { cycleLoading.value = false; }
+    }
+    async function reloadCycles() {
+      if (!healthOpen.value) return;
+      try {
+        const d = await api('GET', '/api/persons/' + personDetail.value.person.id + '/cycles');
+        cycles.value = d.cycles || [];
+        cyclesNote.value = d.note || '';
+      } catch (e) { showError(e); }
+    }
+    function resetAddCycleForm() {
+      addCycleForm.cycle_type = ''; addCycleForm.label = ''; addCycleForm.anchor_date = '';
+      addCycleForm.period_days = ''; addCycleForm.duration_days = ''; addCycleForm.dosage = ''; addCycleForm.frequency = '';
+    }
+    function toggleAddCycle() {
+      if (showAddCycle.value) { showAddCycle.value = false; resetAddCycleForm(); return; }
+      showAddCycle.value = true;
+    }
+    async function submitAddCycle() {
+      if (addingCycle.value) return;
+      const ct = addCycleForm.cycle_type;
+      if (!ct) { toast.value = '请选择周期类型'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingCycle.value = true;
+      try {
+        const body = { cycle_type: ct };
+        if (addCycleForm.label.trim()) body.label = addCycleForm.label.trim();
+        if (addCycleForm.anchor_date) body.anchor_date = addCycleForm.anchor_date;
+        if (addCycleForm.period_days) body.period_days = Number(addCycleForm.period_days);
+        if (addCycleForm.duration_days) body.duration_days = Number(addCycleForm.duration_days);
+        if (addCycleForm.dosage.trim()) body.dosage = addCycleForm.dosage.trim();
+        if (addCycleForm.frequency.trim()) body.frequency = addCycleForm.frequency.trim();
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/cycles', body);
+        showAddCycle.value = false;
+        resetAddCycleForm();
+        await reloadCycles(); await loadPersons();
+      } catch (e) { showError(e); }
+      finally { addingCycle.value = false; }
+    }
+    function askDeleteCycle(c) { deletingCycleId.value = c.id; }
+    async function confirmDeleteCycle() {
+      const id = deletingCycleId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/cycles/' + id);
+        deletingCycleId.value = null;
+        await reloadCycles(); await loadPersons();
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 确认队列（跨平面 pending 并集；与名册/详情独立刷新） ----------
     const pendingItems = ref([]);
     const pendingLoading = ref(false);
@@ -1440,10 +1524,12 @@ const app = createApp({
       if (it.kind === 'attribute') return (it.attr_key || '') + '：' + (it.value || '');
       if (it.kind === 'relationship') return (it.relation_type || '') + (it.label ? '（' + it.label + '）' : '');
       if (it.kind === 'event') return (it.event_type || '') + '：' + (it.value || ''); // event：event_type + title（value 后端映射为 title）
+      if (it.kind === 'metric') return (metricDef(it.metric_key).label || it.metric_key) + '：' + (it.value || '');
+      if (it.kind === 'cycle') return it.value || ''; // 后端 value 已是 type·label
       return it.value || it.person_name; // person：名字
     }
     function pendingKindText(k) {
-      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记' }[k] || k;
+      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记', metric: '指标', cycle: '周期' }[k] || k;
     }
 
     // ---------- 从历史回填抽取（POST /api/profile/extract：不带 session_id = 最近 50 个 completed，同步） ----------
@@ -1765,6 +1851,7 @@ const app = createApp({
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
       EVENT_TYPES, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
       METRIC_KEYS, metricKey, metricRows, metricLoading, metricIsNumeric, metricDef, switchMetric, showAddMetric, addMetricForm, addingMetric, toggleAddMetric, submitAddMetric, deletingMetricId, askDeleteMetric, confirmDeleteMetric, metricChart, metricHover, onMetricChartMove, CHART_W, CHART_H, metricNumericRows, metricCategoryRows, showMetricList,
+      CYCLE_TYPES, healthOpen, cycles, cyclesNote, cycleLoading, toggleHealth, reloadCycles, showAddCycle, addCycleForm, addingCycle, toggleAddCycle, submitAddCycle, deletingCycleId, askDeleteCycle, confirmDeleteCycle, cycleTypeLabel, fmtDateOnly,
       pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
       backfilling, backfillInfo, runBackfill,
     };
