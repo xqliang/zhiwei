@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/profile"
 	"zhiwei/internal/repo"
 )
 
@@ -27,6 +28,8 @@ func mcpText(t *testing.T, res *mcp.CallToolResult) string {
 }
 
 // p2dDeps 构造写-提议闸门测试用的 MCPDeps + ProposalDeps（同一 DB）。
+// P2 起同时装配画像 repo + profile.Service（供 get_profile/get_person 读工具、
+// propose_profile_* 读现值、以及 confirm 时经 ManualAdd*Ext 落库）。
 func p2dDeps(t *testing.T) (MCPDeps, ProposalDeps) {
 	t.Helper()
 	db, err := repo.NewDB(orchDSN(t))
@@ -38,9 +41,44 @@ func p2dDeps(t *testing.T) (MCPDeps, ProposalDeps) {
 	tod := &repo.TodoRepo{DB: db}
 	tt := &repo.TodoTopicRepo{DB: db}
 	pr := &repo.AgentProposalRepo{DB: db}
-	md := MCPDeps{Memory: mem, Topic: top, Todo: tod, Proposals: pr}
-	pd := ProposalDeps{DB: db, Proposals: pr, Memories: mem, Topics: top, Todos: tod, TodoTopics: tt}
+	// 画像 repo + Service（manual 路径只用 DB/Attributes/Events/ChangeLogs/Persons）
+	persons := &repo.PersonRepo{DB: db}
+	pattrs := &repo.PersonAttributeRepo{DB: db}
+	pevents := &repo.PersonEventRepo{DB: db}
+	profileSvc := &profile.Service{
+		DB: db, Persons: persons, Attributes: pattrs, Events: pevents,
+		Relationships: &repo.PersonRelationshipRepo{DB: db},
+		ChangeLogs:    &repo.PersonChangeLogRepo{DB: db},
+	}
+	md := MCPDeps{
+		Memory: mem, Topic: top, Todo: tod, Proposals: pr,
+		Persons: persons, PersonAttributes: pattrs, PersonEvents: pevents,
+	}
+	pd := ProposalDeps{
+		DB: db, Proposals: pr, Memories: mem, Topics: top, Todos: tod, TodoTopics: tt,
+		Profile: profileSvc, Persons: persons,
+	}
 	return md, pd
+}
+
+// ensureOwner 保证画像 owner「我」存在：已存在则复用（不清理，属公共 bootstrap 数据）；
+// 本用例首次创建则登记 t.Cleanup 删除（只清理自己插入的行，符合共享库约定）。
+func ensureOwner(t *testing.T, persons *repo.PersonRepo) *repo.Person {
+	t.Helper()
+	ctx := t.Context()
+	o, err := persons.GetOwner(ctx, toolUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o != nil {
+		return o
+	}
+	np := &repo.Person{DisplayName: "我", IsOwner: true}
+	if err := persons.Create(ctx, np); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = persons.DB.Exec("DELETE FROM person WHERE id = ?", np.ID.Int64()) })
+	return np
 }
 
 // postProposal 经真 HTTP 路由 confirm/dismiss 一条提议, 返回状态码与响应体解析出的提议。
@@ -239,5 +277,254 @@ func TestConfirmTodoStatusIllegalTransition(t *testing.T) {
 	after, _ := pd.Proposals.Get(ctx, p.ID)
 	if after.Status != "pending" {
 		t.Errorf("非法确认后提议应仍 pending, got %q", after.Status)
+	}
+}
+
+// ---- P2 画像工具（读 + propose + confirm 落库）----
+
+func profHasAttr(p profileOut, key, value string) bool {
+	for _, a := range p.Attributes {
+		if a.Key == key && a.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+func profHasEvent(p profileOut, title string) bool {
+	for _, e := range p.Events {
+		if e.Title == title {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGetProfileAndPerson 锁定读工具：get_profile 返回 owner 及其 active 属性/事件；
+// get_person 命中具名人物 / 不命中返回 {found:false}。
+func TestGetProfileAndPerson(t *testing.T) {
+	md, _ := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	// seed owner 一条独占属性 + 一条独占事件（用完按 id 精确清理）
+	attr := &repo.PersonAttribute{PersonID: owner.ID, AttrKey: "occupation", ValueText: "读工具职业GP",
+		ValueType: "text", Status: "active", Source: "manual", Confidence: 1}
+	if err := md.PersonAttributes.Create(ctx, attr); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_attribute WHERE id = ?", attr.ID.Int64()) })
+	ev := &repo.PersonEvent{PersonID: owner.ID, EventType: "里程碑", Title: "读工具事件GP",
+		Status: "active", Source: "manual", Confidence: 1, Importance: 1}
+	if err := md.PersonEvents.Create(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = md.PersonEvents.DB.Exec("DELETE FROM person_event WHERE id = ?", ev.ID.Int64()) })
+
+	// get_profile：含 owner + seed 的属性/事件
+	res, _, err := getProfileHandler(md)(ctx, nil, getProfileArgs{})
+	if err != nil {
+		t.Fatalf("get_profile: %v", err)
+	}
+	var prof profileOut
+	if err := json.Unmarshal([]byte(mcpText(t, res)), &prof); err != nil {
+		t.Fatalf("解析 get_profile: %v", err)
+	}
+	if !prof.Found || prof.DisplayName == "" {
+		t.Fatalf("get_profile 应返回存在的 owner: %+v", prof)
+	}
+	if !profHasAttr(prof, "occupation", "读工具职业GP") {
+		t.Errorf("get_profile 缺 seed 属性: %+v", prof.Attributes)
+	}
+	if !profHasEvent(prof, "读工具事件GP") {
+		t.Errorf("get_profile 缺 seed 事件: %+v", prof.Events)
+	}
+
+	// get_person：建一个具名人物 + 属性，命中
+	person := &repo.Person{DisplayName: "画像测试人物GP", IsOwner: false}
+	if err := md.Persons.Create(ctx, person); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = md.Persons.DB.Exec("DELETE FROM person WHERE id = ?", person.ID.Int64()) })
+	pattr := &repo.PersonAttribute{PersonID: person.ID, AttrKey: "city", ValueText: "上海GP",
+		ValueType: "text", Status: "active", Source: "manual", Confidence: 1}
+	if err := md.PersonAttributes.Create(ctx, pattr); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_attribute WHERE id = ?", pattr.ID.Int64()) })
+
+	res2, _, err := getPersonHandler(md)(ctx, nil, getPersonArgs{Name: "画像测试人物GP"})
+	if err != nil {
+		t.Fatalf("get_person 命中: %v", err)
+	}
+	var got profileOut
+	if err := json.Unmarshal([]byte(mcpText(t, res2)), &got); err != nil {
+		t.Fatalf("解析 get_person: %v", err)
+	}
+	if !got.Found || got.DisplayName != "画像测试人物GP" || !profHasAttr(got, "city", "上海GP") {
+		t.Errorf("get_person 命中结果异常: %+v", got)
+	}
+
+	// get_person 不命中 → {found:false}
+	res3, _, err := getPersonHandler(md)(ctx, nil, getPersonArgs{Name: "查无此人ZZZ"})
+	if err != nil {
+		t.Fatalf("get_person 不命中: %v", err)
+	}
+	var miss map[string]any
+	if err := json.Unmarshal([]byte(mcpText(t, res3)), &miss); err != nil {
+		t.Fatal(err)
+	}
+	if f, _ := miss["found"].(bool); f {
+		t.Errorf("不存在人物应 found:false, got %+v", miss)
+	}
+}
+
+// TestProposeProfileAttrNoMutation 锁定 §8 根防线：propose_profile_attr 只建 pending 提议，
+// 绝不改 owner 画像；非法 attr_key / event_type / 空 title 报 tool-error。
+func TestProposeProfileAttrNoMutation(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	const key = "phone_brand" // 单值、其它用例未用，避免共享库串扰
+	seed := &repo.PersonAttribute{PersonID: owner.ID, AttrKey: key, ValueText: "小米NM",
+		ValueType: "text", Status: "active", Source: "manual", Confidence: 1}
+	if err := md.PersonAttributes.Create(ctx, seed); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_attribute WHERE person_id = ? AND attr_key = ?", owner.ID.Int64(), key)
+	})
+
+	res, _, err := proposeProfileAttrHandler(md)(ctx, nil, proposeProfileAttrArgs{
+		AttrKey: key, Value: "华为NM", Rationale: "换手机了",
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	if err := json.Unmarshal([]byte(mcpText(t, res)), &p); err != nil {
+		t.Fatalf("解析提议: %v", err)
+	}
+	cleanupProposal(t, pd, p.ID)
+	if p.Status != "pending" || p.Kind != "profile_attr" || p.TargetKind != "profile" || p.TargetID == nil || *p.TargetID != owner.ID {
+		t.Fatalf("画像属性提议异常: %+v", p)
+	}
+	// 关键：owner 属性现值未变（仍是 seed 的小米NM，未 supersede）
+	cur, err := md.PersonAttributes.FindActiveByKey(ctx, owner.ID, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur == nil || cur.ValueText != "小米NM" || cur.ID != seed.ID {
+		t.Errorf("propose 不应改画像属性, got %+v", cur)
+	}
+	if old, _ := md.PersonAttributes.Get(ctx, seed.ID); old == nil || old.Status != "active" {
+		t.Errorf("seed 行应仍 active（未被 supersede）: %+v", old)
+	}
+
+	// 非法 attr_key → tool-error
+	if _, _, e := proposeProfileAttrHandler(md)(ctx, nil, proposeProfileAttrArgs{AttrKey: "不存在的键xx", Value: "x"}); e == nil {
+		t.Error("非法 attr_key 应报 tool-error")
+	}
+	// 空 value → tool-error
+	if _, _, e := proposeProfileAttrHandler(md)(ctx, nil, proposeProfileAttrArgs{AttrKey: key, Value: "   "}); e == nil {
+		t.Error("空 value 应报 tool-error")
+	}
+	// 非法 event_type → tool-error
+	if _, _, e := proposeProfileEventHandler(md)(ctx, nil, proposeProfileEventArgs{EventType: "不存在类型", Title: "x"}); e == nil {
+		t.Error("非法 event_type 应报 tool-error")
+	}
+	// 空 title → tool-error
+	if _, _, e := proposeProfileEventHandler(md)(ctx, nil, proposeProfileEventArgs{EventType: "里程碑", Title: "  "}); e == nil {
+		t.Error("空 title 应报 tool-error")
+	}
+}
+
+// TestConfirmProfileAttrApplyOnce 锁定 §8 apply-once：propose_profile_attr → confirm → owner
+// 多一条 active 属性、proposal=applied、applied_ref 指向新属性；重复 confirm 幂等不重复叠加。
+func TestConfirmProfileAttrApplyOnce(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	const key = "car_brand" // 单值、其它用例未用
+	// 先登记清理：confirm 会经 ManualAddAttributeExt 在 owner 上新建该 key 的 active 行 + 审计。
+	t.Cleanup(func() {
+		_, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_attribute WHERE person_id = ? AND attr_key = ?", owner.ID.Int64(), key)
+		_, _ = md.PersonAttributes.DB.Exec("DELETE FROM person_change_log WHERE person_id = ? AND attr_key = ?", owner.ID.Int64(), key)
+	})
+
+	res, _, err := proposeProfileAttrHandler(md)(ctx, nil, proposeProfileAttrArgs{AttrKey: key, Value: "特斯拉AO"})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	_ = json.Unmarshal([]byte(mcpText(t, res)), &p)
+	cleanupProposal(t, pd, p.ID)
+
+	code, p1 := postProposal(t, pd, p.ID, "confirm")
+	if code != http.StatusOK || p1.Status != "applied" || p1.AppliedRef == nil {
+		t.Fatalf("confirm code=%d status=%s ref=%v", code, p1.Status, p1.AppliedRef)
+	}
+	// owner 多一条 active 属性 = 特斯拉AO，source=manual conf=1.0，applied_ref 指向它
+	cur, _ := md.PersonAttributes.FindActiveByKey(ctx, owner.ID, key)
+	if cur == nil || cur.ValueText != "特斯拉AO" || cur.Source != "manual" || cur.Confidence != 1.0 {
+		t.Fatalf("confirm 未落库画像属性: %+v", cur)
+	}
+	if *p1.AppliedRef != cur.ID {
+		t.Errorf("applied_ref 应指向新属性: ref=%v attr=%v", p1.AppliedRef, cur.ID)
+	}
+
+	// 重复 confirm：apply-once → 幂等，不新增 active 行
+	code2, p2 := postProposal(t, pd, p.ID, "confirm")
+	if code2 != http.StatusOK || p2.Status != "applied" {
+		t.Fatalf("2nd confirm code=%d status=%s", code2, p2.Status)
+	}
+	var activeCnt int
+	if err := md.PersonAttributes.DB.GetContext(ctx, &activeCnt,
+		`SELECT COUNT(*) FROM person_attribute WHERE person_id = ? AND attr_key = ? AND status = 'active'`,
+		owner.ID.Int64(), key); err != nil {
+		t.Fatal(err)
+	}
+	if activeCnt != 1 {
+		t.Errorf("重复 confirm 不应叠加, 期望 1 个 active 得 %d", activeCnt)
+	}
+}
+
+// TestConfirmProfileEvent 锁定：propose_profile_event → confirm → owner 新增一条 active 大事记。
+func TestConfirmProfileEvent(t *testing.T) {
+	md, pd := p2dDeps(t)
+	ctx := t.Context()
+	owner := ensureOwner(t, md.Persons)
+
+	const title = "确认大事记CE"
+	t.Cleanup(func() {
+		_, _ = md.PersonEvents.DB.Exec("DELETE FROM person_event WHERE person_id = ? AND title = ?", owner.ID.Int64(), title)
+		_, _ = md.PersonEvents.DB.Exec("DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'", owner.ID.Int64())
+	})
+
+	res, _, err := proposeProfileEventHandler(md)(ctx, nil, proposeProfileEventArgs{
+		EventType: "旅行", Title: title, OccurredAt: "2026-05-01", Rationale: "去了趟三亚",
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	var p repo.AgentProposal
+	_ = json.Unmarshal([]byte(mcpText(t, res)), &p)
+	cleanupProposal(t, pd, p.ID)
+	if p.Kind != "profile_event" || p.TargetID == nil || *p.TargetID != owner.ID {
+		t.Fatalf("大事记提议异常: %+v", p)
+	}
+
+	code, p1 := postProposal(t, pd, p.ID, "confirm")
+	if code != http.StatusOK || p1.Status != "applied" || p1.AppliedRef == nil {
+		t.Fatalf("confirm code=%d status=%s ref=%v", code, p1.Status, p1.AppliedRef)
+	}
+	ev, err := md.PersonEvents.Get(ctx, *p1.AppliedRef)
+	if err != nil || ev == nil {
+		t.Fatalf("新事件应存在: %v %+v", err, ev)
+	}
+	if ev.Title != title || ev.EventType != "旅行" || ev.Status != "active" || ev.Source != "manual" || ev.OccurredAt == nil {
+		t.Errorf("新事件字段异常: %+v", ev)
 	}
 }

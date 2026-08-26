@@ -11,6 +11,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/profile"
 	"zhiwei/internal/repo"
 )
 
@@ -22,6 +23,12 @@ type ProposalDeps struct {
 	Topics     *repo.TopicRepo
 	Todos      *repo.TodoRepo
 	TodoTopics *repo.TodoTopicRepo
+	// ---- 画像确认落库（P2）----
+	// Profile 提供 ManualAddAttributeExt/ManualAddEventExt（事务版），在 confirm 单事务里
+	// 把画像写并进来（apply-once）。Persons 供 owner 相关校验（当前 applyInTx 直接用
+	// p.TargetID=owner.ID，Persons 预留给后续关系提议 / owner 兜底校验）。
+	Profile *profile.Service
+	Persons *repo.PersonRepo
 }
 
 // RegisterProposals 挂载写-提议闸门的人审侧端点（spec §8）：列出/确认/放弃。
@@ -247,6 +254,37 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 			return nil, err
 		}
 		return p.TargetID, nil
+	case "profile_attr":
+		// 画像属性：target_id=owner person id（propose 时定）。走 profile.Service 的事务版
+		// ManualAddAttributeExt，把「属性写(active/manual/审计 + 单值 supersede) + Resolve」并进
+		// 本 confirm 事务，apply-once。ChangedBy 记 user（用户点了确认，语义等同手动改画像）。
+		if p.TargetID == nil {
+			return nil, fmt.Errorf("profile_attr 缺 target_id")
+		}
+		attrKey := newStr("attr_key")
+		value := newStr("value")
+		if attrKey == "" || value == "" {
+			return nil, fmt.Errorf("profile_attr 缺 new.attr_key/value")
+		}
+		row, err := d.Profile.ManualAddAttributeExt(ctx, tx, *p.TargetID, attrKey, value)
+		if err != nil {
+			return nil, err
+		}
+		return &row.ID, nil
+	case "profile_event":
+		// 画像大事记：走事务版 ManualAddEventExt（内部再校验 event_type 合法 + title 非空，
+		// 与 propose 端校验双保险）。occurred_at 是原始字符串，parseEventAt 尽力解析、失败存 NULL。
+		if p.TargetID == nil {
+			return nil, fmt.Errorf("profile_event 缺 target_id")
+		}
+		eventType := newStr("event_type")
+		title := newStr("title")
+		occurredAt := newStr("occurred_at")
+		row, err := d.Profile.ManualAddEventExt(ctx, tx, *p.TargetID, eventType, title, "", occurredAt, "", "", nil)
+		if err != nil {
+			return nil, err
+		}
+		return &row.ID, nil
 	default:
 		return nil, fmt.Errorf("未知提议 kind: %s", p.Kind)
 	}

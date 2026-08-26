@@ -23,6 +23,12 @@ type MCPDeps struct {
 	// 一条 pending 提议，绝不直接改领域行；确认端点再在单事务内落库（见 mcp_write_tools.go
 	// 与 proposals.go）。这是提示注入的根防线（spec §8）。
 	Proposals *repo.AgentProposalRepo
+	// ---- 画像（人物系统）读工具 + propose 读现值用（P2）----
+	// 读工具 get_profile/get_person 与 propose_profile_* 只读这些 repo；propose_* 绝不写画像，
+	// 只 Create pending 提议（写在 confirm 单事务里经 profile.Service Ext 变体落库）。全部限 owner「我」。
+	Persons          *repo.PersonRepo
+	PersonAttributes *repo.PersonAttributeRepo
+	PersonEvents     *repo.PersonEventRepo
 }
 
 // pingArgs：无参工具的入参（空 struct → object schema 无属性）。
@@ -41,8 +47,9 @@ func NewMCPServer(d MCPDeps) *mcp.Server {
 		}, nil, nil
 	})
 
-	registerReadTools(s, d)  // 只读工具（search_memory / get_timeline / get_topics / get_todos）
-	registerWriteTools(s, d) // 写-提议工具（propose_*）：只建 pending 提议，绝不直接 mutate（§8）
+	registerReadTools(s, d)    // 只读工具（search_memory / get_timeline / get_topics / get_todos）
+	registerWriteTools(s, d)   // 写-提议工具（propose_*）：只建 pending 提议，绝不直接 mutate（§8）
+	registerProfileTools(s, d) // 画像读工具（get_profile/get_person）+ propose_profile_*（同样只建提议）
 	return s
 }
 

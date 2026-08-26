@@ -252,6 +252,10 @@ func main() {
 		Topic:      topics,
 		Todo:       todos,
 		Proposals:  agentProposals,
+		// 画像读工具 + propose_profile_* 读现值用（P2）
+		Persons:          persons,
+		PersonAttributes: personAttrs,
+		PersonEvents:     personEvents,
 	})
 	// 报告工具（generate_report / get_topic_status）注册进同一 MCP server，供 dsh agent 调用。
 	review.RegisterReportTools(mcpSrv, reviewer)
@@ -263,6 +267,8 @@ func main() {
 	agent.RegisterProposals(r, agent.ProposalDeps{
 		DB: db, Proposals: agentProposals,
 		Memories: memories, Topics: topics, Todos: todos, TodoTopics: todoTopics,
+		// 画像确认落库（P2）：confirm 单事务经 profile.Service 的 Ext 变体写画像 + Resolve。
+		Profile: profileSvc, Persons: persons,
 	})
 
 	// Agent 运行时（惰性 spawn dsh；首次对话时启动，此时 /internal/mcp 已监听）。

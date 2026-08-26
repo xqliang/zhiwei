@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jmoiron/sqlx"
+
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
@@ -89,15 +91,32 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, id ids.ID, status s
 
 // ManualAddAttribute 手动加/改属性：单值型已有 active 时旧行 superseded、
 // 新行 supersedes_id 指向旧行（即手动改值）；列表型纯叠加新行。
+// 自持事务：BeginTxx → ManualAddAttributeExt → Commit（行为/签名与历史一致，
+// 现有 api/person.go 调用面零改）。真正的写逻辑在 Ext 变体里，便于并入他人的事务
+// （如 agent 提议确认闸门的单事务 apply-once，见 internal/agent/proposals.go）。
 func (s *Service) ManualAddAttribute(ctx context.Context, personID ids.ID, attrKey, value string) (*repo.PersonAttribute, error) {
-	d := Def(attrKey)
 	tx, err := s.DB.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _ = tx.Rollback() }() // Commit 后为 no-op
+	row, err := s.ManualAddAttributeExt(ctx, tx, personID, attrKey, value)
+	if err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualAddAttributeExt 是 ManualAddAttribute 的事务版：全部读写走传入的 tx，
+// 不自开/自提事务，供调用方把「领域写 + 其它写（如 Proposals.Resolve）」原子并进同一事务。
+// 语义与 ManualAddAttribute 完全一致：单值 supersede、同值幂等 no-op、审计 changed_by=user。
+// 注意：同值幂等分支这里直接 return existing, nil（不 tx.Rollback）——tx 生命周期归调用方，
+// 事务里没写任何行，调用方照常 Commit 也无副作用（对齐设计 D1）。
+func (s *Service) ManualAddAttributeExt(ctx context.Context, tx *sqlx.Tx, personID ids.ID, attrKey, value string) (*repo.PersonAttribute, error) {
+	d := Def(attrKey)
 
 	var existing *repo.PersonAttribute
+	var err error
 	if d.Cardinality == CardinalityList {
 		existing, err = s.Attributes.FindActiveByKeyValueExt(ctx, tx, personID, attrKey, value)
 	} else {
@@ -106,9 +125,10 @@ func (s *Service) ManualAddAttribute(ctx context.Context, personID ids.ID, attrK
 	if err != nil {
 		return nil, err
 	}
-	// 同值已存在：幂等返回旧行（不重复叠加）
+	// 同值已存在：幂等返回旧行（不重复叠加）。Ext 版不持有 tx 生命周期，直接返回 nil，
+	// 不做 tx.Rollback（那会毁掉调用方事务里的其它写）。
 	if existing != nil && repo.NormalizeTitle(existing.ValueText) == repo.NormalizeTitle(value) {
-		return existing, tx.Rollback() // no-op
+		return existing, nil // no-op
 	}
 
 	var sup *ids.ID
@@ -140,7 +160,7 @@ func (s *Service) ManualAddAttribute(ctx context.Context, personID ids.ID, attrK
 	if err := s.ChangeLogs.CreateExt(ctx, tx, l); err != nil {
 		return nil, err
 	}
-	return row, tx.Commit()
+	return row, nil
 }
 
 // ManualDeleteAttribute 手动删属性 → dismissed + delete 审计。
@@ -240,7 +260,26 @@ func (s *Service) ManualDeleteRelationship(ctx context.Context, id ids.ID) error
 // ManualAddEvent 手动加大事记（active/manual conf=1.0 + create 审计）。
 // relatedPersonID 可空；occurredAt/endAt 是原始字符串（YYYY-MM-DD/YYYY-MM/RFC3339，
 // parseEventAt 尽力解析，失败存 NULL）；参数多，调用方为 API handler。
+// 自持事务：BeginTxx → ManualAddEventExt → Commit（行为/签名与历史一致）。
 func (s *Service) ManualAddEvent(ctx context.Context, personID ids.ID, eventType, title,
+	description, occurredAt, endAt, location string, relatedPersonID *ids.ID) (*repo.PersonEvent, error) {
+
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }() // Commit 后为 no-op
+	row, err := s.ManualAddEventExt(ctx, tx, personID, eventType, title, description, occurredAt, endAt, location, relatedPersonID)
+	if err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualAddEventExt 是 ManualAddEvent 的事务版：全部写走传入的 tx，不自开/自提事务，
+// 供调用方（如 agent 提议确认闸门）把「事件写 + Proposals.Resolve」原子并进同一事务（D1）。
+// 校验与落库语义与 ManualAddEvent 完全一致（event_type 合法 + title 非空 + 审计 changed_by=user）。
+func (s *Service) ManualAddEventExt(ctx context.Context, tx *sqlx.Tx, personID ids.ID, eventType, title,
 	description, occurredAt, endAt, location string, relatedPersonID *ids.ID) (*repo.PersonEvent, error) {
 
 	if !ValidEventTypes[eventType] {
@@ -269,11 +308,6 @@ func (s *Service) ManualAddEvent(ctx context.Context, personID ids.ID, eventType
 	if relatedPersonID != nil {
 		row.RelatedPersonIDs = ids.List{*relatedPersonID}
 	}
-	tx, err := s.DB.BeginTxx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback() }()
 	if err := s.Events.CreateExt(ctx, tx, row); err != nil {
 		return nil, err
 	}
@@ -284,7 +318,7 @@ func (s *Service) ManualAddEvent(ctx context.Context, personID ids.ID, eventType
 	}); err != nil {
 		return nil, err
 	}
-	return row, tx.Commit()
+	return row, nil
 }
 
 // ManualDeleteEvent 手动删事件 → dismissed + delete 审计。

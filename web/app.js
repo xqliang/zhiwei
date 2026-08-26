@@ -1677,10 +1677,13 @@ const app = createApp({
       search_memory: '检索记忆', get_timeline: '查看时间线', get_topics: '查看主题',
       get_todos: '查看待办', get_topic_status: '话题状态', generate_report: '生成报告',
       zhiwei_ping: '连通性检查',
+      // 画像读工具（P2）
+      get_profile: '读取画像', get_person: '查看人物',
       // 写-提议工具（propose_*）：出结果后会翻成「确认卡」，这里只是进行中骨架的友好名。
       propose_memory_edit: '修改记忆', propose_memory_dismiss: '忽略记忆',
       propose_topic_rename: '话题改名', propose_topic_confirm: '确认话题', propose_topic_dismiss: '忽略话题',
       propose_todo_create: '新建待办', propose_todo_status: '待办状态',
+      propose_profile_attr: '更新画像属性', propose_profile_event: '记录大事记',
     };
     function toolLabel(name) { return TOOL_LABELS[toolBase(name)] || (name || '工具'); }
     // 参数摘要：把 args(JSON 字符串) 折成 "k=v · k=v"，解析失败原样显示
@@ -1722,14 +1725,15 @@ const app = createApp({
     //（JSON：{id,kind,target_kind,target_id,payload:{old?,new?},rationale,status}）。前端据此渲染
     // 「确认卡」：old→new diff + 理由 + [确认]/[放弃]。确认/放弃走 /api/agent/proposals/{id}/{action}
     //（幂等）。所有展示值一律走 Vue {{ }} 自动转义，不用 v-html（rationale/old/new 均为不可信文本）。
-    const PROPOSAL_KINDS = ['memory_update', 'memory_dismiss', 'topic_rename', 'topic_confirm', 'topic_dismiss', 'todo_create', 'todo_status'];
+    const PROPOSAL_KINDS = ['memory_update', 'memory_dismiss', 'topic_rename', 'topic_confirm', 'topic_dismiss', 'todo_create', 'todo_status', 'profile_attr', 'profile_event'];
     const PROPOSAL_TITLES = {
       memory_update: '修改记忆', memory_dismiss: '忽略记忆',
       topic_rename: '话题改名', topic_confirm: '确认话题', topic_dismiss: '忽略话题',
       todo_create: '新建待办', todo_status: '待办状态',
+      profile_attr: '更新画像属性', profile_event: '记录大事记',
     };
     // 字段名 → 中文标签（diff 行左侧）
-    const PROPOSAL_FIELD_LABELS = { title: '标题', content: '内容', name: '名称', status: '状态', due_at: '截止', topic_id: '关联话题', type: '类型', kind: '类型' };
+    const PROPOSAL_FIELD_LABELS = { title: '标题', content: '内容', name: '名称', status: '状态', due_at: '截止', topic_id: '关联话题', type: '类型', kind: '类型', attr_key: '属性', value: '值', event_type: '事件类型', occurred_at: '发生时间' };
     // 状态枚举 → 中文（memory/topic/todo 状态并集）
     const PROPOSAL_STATUS_LABELS = { suggested: '待确认', pending: '待处理', confirmed: '已确认', active: '活跃', done: '已完成', dismissed: '已忽略', applied: '已应用', expired: '已过期' };
     // 单字段值格式化：status 走中文枚举，*_at 走本地时间，其余按类型稳妥转字符串。
