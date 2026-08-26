@@ -43,6 +43,9 @@ type Fact struct {
 	OccurredAt       string // 原始字符串（YYYY-MM-DD / YYYY-MM / RFC3339），时间解析放 service 层（parseEventAt）
 	EndAt            string
 	EventLocation    string
+	// EventImportance 事件的人生分量 0~1（P2a①：与 confidence 正交，见 service.go defaultImportance）。
+	// LLM 可显式给值；0=未给（service 层走事件类型默认，不再用 confidence 代偿）。
+	EventImportance float64
 
 	// ---- metric 平面（P3 时序指标）----
 	MetricKey   string // emotion|state|weight|sleep_late|diet|health
@@ -135,6 +138,7 @@ type rawFact struct {
 	OccurredAt       string     `json:"occurred_at"`
 	EndAt            string     `json:"end_at"`
 	EventLocation    string     `json:"location"`
+	EventImportance  float64    `json:"importance"` // P2a①：事件人生分量 0~1；无同层标签冲突（confidence 各自独立）
 	MetricKey        string     `json:"metric_key"`
 	MetricValue      string     `json:"metric_value"`
 	MetricUnit       string     `json:"metric_unit"`
@@ -195,6 +199,7 @@ func ParseFacts(raw string) ([]Fact, error) {
 			OccurredAt:       strings.TrimSpace(rf.OccurredAt),
 			EndAt:            strings.TrimSpace(rf.EndAt),
 			EventLocation:    strings.TrimSpace(rf.EventLocation),
+			EventImportance:  clamp01(rf.EventImportance), // P2a①：0=未给（service 走类型默认）
 			MetricKey:        strings.TrimSpace(rf.MetricKey),
 			MetricValue:      strings.TrimSpace(rf.MetricValue),
 			MetricUnit:       strings.TrimSpace(rf.MetricUnit),

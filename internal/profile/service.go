@@ -730,6 +730,40 @@ func relRow(userID int64, personID ids.ID, f Fact, relatedID ids.ID, status stri
 	return row
 }
 
+// defaultImportance 事件类型的默认重要度（P2a①：importance 不再用 confidence 代偿）。
+//
+// 重要度衡量「这件事在人生里的分量」，与 confidence（抽取把握）**正交**：一句「今天中午随便吃了个
+// 火锅」可能被高置信抽出（confidence 高），但它的人生分量很低（importance 低）——旧代偿把二者混为
+// 一谈是错的（spec §13 P2a①）。类型分级依据 spec §4.4 事件语义：
+//   - 里程碑/成就（女儿出生/考上研究生/晋升）——人生大事 → 0.9
+//   - 挫折/负面/健康（被骗/离职/确诊/生病）——影响深远的负向事件 → 0.8
+//   - 旅行/聚会/会议——值得记的经历，分量中等 → 0.5
+//   - 其他（及未知类型）——日常琐事，给略低地板 → 0.4
+//
+// 兜底 0.4（而非 repo CreateExt 的 0.5）：未命中枚举的多是琐碎「其他」，比中性再低半档更贴语义；
+// 且本函数恒返回 >0，eventRow/ManualAddEvent 落库的 importance 必非零，repo 的 0→0.5 兜底不会触发。
+func defaultImportance(eventType string) float64 {
+	switch eventType {
+	case "里程碑", "成就":
+		return 0.9
+	case "挫折", "负面", "健康":
+		return 0.8
+	case "旅行", "聚会", "会议":
+		return 0.5
+	default: // 其他 / 未知类型
+		return 0.4
+	}
+}
+
+// eventImportanceOrDefault 事件重要度取值链（P2a①）：LLM/手动显式给值（>0）优先并 clamp 到 (0,1]，
+// 未给（<=0）走事件类型默认。LLM 路径（eventRow）与手动路径（ManualAddEvent）共用，保证取值口径单点。
+func eventImportanceOrDefault(explicit float64, eventType string) float64 {
+	if explicit > 0 {
+		return clamp01(explicit)
+	}
+	return defaultImportance(eventType)
+}
+
 func eventRow(userID int64, personID ids.ID, f Fact, relatedIDs ids.List, status string,
 	memID *ids.ID, prov Provenance) *repo.PersonEvent {
 	row := &repo.PersonEvent{
@@ -739,9 +773,9 @@ func eventRow(userID int64, personID ids.ID, f Fact, relatedIDs ids.List, status
 		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
 		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
 		RelatedPersonIDs:     relatedIDs,
-		// MVP：importance 用 confidence 代（手动路径 1.0/LLM 路径闸后值）——
-		// 独立重要度建模留后续，spec §13 已记
-		Importance: f.Confidence,
+		// P2a①：重要度独立建模，取值链 = LLM 显式值(>0) > 事件类型默认；不再用 confidence 代偿
+		//（重要度=人生分量，置信度=抽取把握，两者正交——见 defaultImportance）。
+		Importance: eventImportanceOrDefault(f.EventImportance, f.EventType),
 	}
 	if f.EventDescription != "" {
 		row.Description = strPtr(f.EventDescription)

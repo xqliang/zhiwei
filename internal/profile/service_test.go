@@ -364,13 +364,16 @@ func TestApplyEventFacts(t *testing.T) {
 		t.Fatalf("M2 斜杠日期应落库 2026-07-20，实得 %s", got)
 	}
 
-	// 手动加/删事件
-	me, err := svc.ManualAddEvent(ctx, oid, "健康", "确诊高血压", "长期服药", "2025-06-01", "", "北京协和", nil)
+	// 手动加/删事件（importance=0 → 走「健康」类型默认 0.8）
+	me, err := svc.ManualAddEvent(ctx, oid, "健康", "确诊高血压", "长期服药", "2025-06-01", "", "北京协和", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if me.Status != "active" || me.Source != "manual" || me.OccurredAt == nil {
 		t.Fatalf("手动事件错误: %+v", me)
+	}
+	if me.Importance != 0.8 {
+		t.Fatalf("手动 importance=0 应走「健康」类型默认 0.8，实得 %v", me.Importance)
 	}
 	if err := svc.ManualDeleteEvent(ctx, me.ID); err != nil {
 		t.Fatal(err)
@@ -470,6 +473,96 @@ func TestApplyEventFactsNormalizedTitle(t *testing.T) {
 	}
 	if reaffirms != 1 {
 		t.Fatalf("应恰有 1 条 event reaffirm 审计，实得 %d（全部 event 审计 %d 条）", reaffirms, len(elogs))
+	}
+}
+
+// TestApplyEventFactsImportance 覆盖 P2a①：事件重要度脱离 confidence 独立建模。
+//   - LLM 路径：显式 importance 落库；未给走事件类型默认（里程碑 0.9 / 其他 0.4 两档）；
+//     正交性反证——confidence 很高但未给 importance 时 importance 仍是类型默认（不再 = confidence）。
+//   - 手动路径：importance=0 走类型默认；传值 clamp 落库。
+func TestApplyEventFactsImportance(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+
+	// 共享 owner（user_id=1）：收尾删净本用例写入的事件与其 event 审计（模式参照 TestApplyEventFacts）。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			ownerPK := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_event WHERE person_id = ?`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'`, ownerPK)
+		}
+	})
+	// 基线：清空 owner 既有事件，保证下面按 title 精确取行不受其他用例残留干扰。
+	_, _ = svc.DB.ExecContext(ctx, `DELETE FROM person_event WHERE person_id = ?`, oid.Int64())
+
+	// DECIMAL(5,4) 落库回读用近似比较，避免定点↔浮点极小误差导致的偶发 flake。
+	approxEq := func(a, b float64) bool { d := a - b; return d < 1e-6 && d > -1e-6 }
+
+	sess := ids.New()
+	st, err := svc.ApplyFacts(ctx, sess, 1, []Fact{
+		// ① 显式 importance=0.7（旅行类型默认 0.5）→ 落库 0.7（显式值优先）
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "旅行", EventTitle: "重要度-显式旅行",
+			EventImportance: 0.7, Confidence: 0.9, EpistemicType: "observed"},
+		// ② 未给 importance 的里程碑 → 类型默认 0.9
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "里程碑", EventTitle: "重要度-默认里程碑",
+			Confidence: 0.9, EpistemicType: "observed"},
+		// ③ 正交性反证：confidence 高（0.95）但未给 importance 的「其他」→ 类型默认 0.4（≠ confidence）
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "其他", EventTitle: "重要度-正交其他",
+			Confidence: 0.95, EpistemicType: "observed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Active != 3 {
+		t.Fatalf("三条高置信事件应全 active: %+v", st)
+	}
+
+	byTitle := func(title string) repo.PersonEvent {
+		evs, _ := svc.Events.ListByPerson(ctx, oid)
+		for _, e := range evs {
+			if e.Title == title {
+				return e
+			}
+		}
+		t.Fatalf("找不到事件 %q", title)
+		return repo.PersonEvent{}
+	}
+
+	// ① 显式值落库
+	if e := byTitle("重要度-显式旅行"); !approxEq(e.Importance, 0.7) {
+		t.Fatalf("① 显式 importance 应落库 0.7，实得 %v", e.Importance)
+	}
+	// ② 里程碑未给 → 类型默认 0.9
+	if e := byTitle("重要度-默认里程碑"); !approxEq(e.Importance, 0.9) {
+		t.Fatalf("② 里程碑默认重要度应 0.9，实得 %v", e.Importance)
+	}
+	// ③ 正交性反证：高 confidence 但未给 importance → 类型默认 0.4，且 importance ≠ confidence
+	e3 := byTitle("重要度-正交其他")
+	if !approxEq(e3.Importance, 0.4) {
+		t.Fatalf("③ 「其他」类型默认重要度应 0.4，实得 %v", e3.Importance)
+	}
+	if approxEq(e3.Importance, e3.Confidence) {
+		t.Fatalf("③ 正交性反证失败：importance(%v) 不应等于 confidence(%v)——重要度已脱离 confidence 代偿",
+			e3.Importance, e3.Confidence)
+	}
+
+	// 手动路径：importance=0 → 事件类型默认（里程碑 0.9）；返回值为落库前 in-memory 行，精确比较即可。
+	m0, err := svc.ManualAddEvent(ctx, oid, "里程碑", "重要度-手动默认", "", "", "", "", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m0.Importance != 0.9 {
+		t.Fatalf("手动 importance=0 应走里程碑默认 0.9，实得 %v", m0.Importance)
+	}
+	// 手动路径：importance=0.3 传值 → 落 0.3（clamp 到 (0,1]）
+	mv, err := svc.ManualAddEvent(ctx, oid, "旅行", "重要度-手动传值", "", "", "", "", nil, 0.3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mv.Importance != 0.3 {
+		t.Fatalf("手动 importance=0.3 应落 0.3，实得 %v", mv.Importance)
 	}
 }
 

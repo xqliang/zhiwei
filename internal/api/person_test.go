@@ -387,6 +387,10 @@ func TestPersonEventAPI(t *testing.T) {
 	if ev.Status != "active" || ev.Source != "manual" || ev.OccurredAt == nil {
 		t.Fatalf("手动事件错误: %+v", ev)
 	}
+	// P2a①：未给 importance 的「旅行」事件 → 事件类型默认 0.5（不再是旧代偿的 confidence/固定 1.0）
+	if ev.Importance < 0.49 || ev.Importance > 0.51 {
+		t.Fatalf("旅行事件未给 importance 应走类型默认 0.5，实得 %v", ev.Importance)
+	}
 	// M1 回归：+08:00 05:00 → 存库日期 07-20
 	if ev.OccurredAt.Format("2006-01-02") != "2026-07-20" {
 		t.Fatalf("occurred_at 日期错误: %v", ev.OccurredAt)
@@ -481,6 +485,18 @@ func TestPersonEventAPI(t *testing.T) {
 	}
 	if d, _ := svc.Events.Get(ctx, ev.ID); d.Status != "dismissed" {
 		t.Fatalf("删除后应 dismissed: %+v", d)
+	}
+
+	// P2a①：body 带 importance=0.9 → 落库 0.9（显式值优先于类型默认）
+	rec = doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "旅行", "title": "API 测试-重要旅行", "importance": 0.9})
+	if rec.Code != 200 {
+		t.Fatalf("加事件(带 importance)失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var evImp repo.PersonEvent
+	_ = json.Unmarshal(rec.Body.Bytes(), &evImp)
+	if evImp.Importance < 0.89 || evImp.Importance > 0.91 {
+		t.Fatalf("body importance=0.9 应落库 0.9，实得 %v", evImp.Importance)
 	}
 }
 

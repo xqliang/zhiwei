@@ -85,9 +85,9 @@ func TestParseFactsEvent(t *testing.T) {
 	raw := `{"facts":[
 		{"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去云南旅游一周",
 		 "description":"和朋友自驾","occurred_at":"2026-07-20","end_at":"2026-07-27","location":"云南",
-		 "confidence":0.9,"epistemic_type":"observed","block_index":1},
+		 "importance":0.8,"confidence":0.9,"epistemic_type":"observed","block_index":1},
 		{"plane":"event","subject":{"kind":"self"},"event_type":"聚会","title":"同学十年聚会",
-		 "confidence":0.7,"epistemic_type":"observed","block_index":2}
+		 "importance":1.5,"confidence":0.7,"epistemic_type":"observed","block_index":2}
 	]}`
 	facts, err := ParseFacts(raw)
 	if err != nil {
@@ -100,6 +100,14 @@ func TestParseFactsEvent(t *testing.T) {
 	if f0.EventType != "旅行" || f0.EventTitle != "去云南旅游一周" || f0.OccurredAt != "2026-07-20" ||
 		f0.EndAt != "2026-07-27" || f0.EventLocation != "云南" || f0.EventDescription != "和朋友自驾" {
 		t.Fatalf("event fact0 错误: %+v", f0)
+	}
+	// P2a①：importance 解析落 EventImportance
+	if f0.EventImportance != 0.8 {
+		t.Fatalf("event fact0 importance 应解析为 0.8: %v", f0.EventImportance)
+	}
+	// P2a①：超范围 importance（1.5）应 clamp 到 1.0
+	if facts[1].EventImportance != 1.0 {
+		t.Fatalf("event fact1 importance 应 clamp 到 1.0: %v", facts[1].EventImportance)
 	}
 	// occurred_at 缺省允许（事件仍创建，时间列 NULL 由 service 处理）
 	if facts[1].OccurredAt != "" {

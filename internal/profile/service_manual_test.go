@@ -49,7 +49,7 @@ func TestManualSetPersonStatusCascade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	evt, err := svc.ManualAddEvent(ctx, pid, "里程碑", "删除级联测试-升职", "", "2026-01-15", "", "", nil)
+	evt, err := svc.ManualAddEvent(ctx, pid, "里程碑", "删除级联测试-升职", "", "2026-01-15", "", "", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

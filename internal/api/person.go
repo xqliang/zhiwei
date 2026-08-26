@@ -577,6 +577,7 @@ func (h *PersonHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 
 // AddEvent 手动加大事记（走 Service：active/manual/conf=1.0 + 审计）。
 // event_type 9 枚举校验；occurred_at/endAt 原始串由 Service 的 parseEventAt 尽力解析。
+// importance 可选（P2a①）：缺省/0 走事件类型默认，>0 由 Service clamp 到 (0,1]。
 func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 	pid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
@@ -584,13 +585,14 @@ func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		EventType       string `json:"event_type"`
-		Title           string `json:"title"`
-		Description     string `json:"description"`
-		OccurredAt      string `json:"occurred_at"`
-		EndAt           string `json:"end_at"`
-		Location        string `json:"location"`
-		RelatedPersonID string `json:"related_person_id"`
+		EventType       string  `json:"event_type"`
+		Title           string  `json:"title"`
+		Description     string  `json:"description"`
+		OccurredAt      string  `json:"occurred_at"`
+		EndAt           string  `json:"end_at"`
+		Location        string  `json:"location"`
+		RelatedPersonID string  `json:"related_person_id"`
+		Importance      float64 `json:"importance"` // P2a①：可选，0/缺省=事件类型默认，>0 clamp 到 (0,1]
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "请求体非法", http.StatusBadRequest)
@@ -614,7 +616,7 @@ func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 		related = &rid
 	}
 	e, err := h.Service.ManualAddEvent(r.Context(), pid, req.EventType, req.Title,
-		req.Description, req.OccurredAt, req.EndAt, req.Location, related)
+		req.Description, req.OccurredAt, req.EndAt, req.Location, related, req.Importance)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -54,6 +54,7 @@
   - end_at：跨天事件（旅行/会议）的结束日（可选）
   - location：地点（可选）
   - related：同场的主要人物 subject（可选，如「和朋友张三去」）
+  - importance：事件的人生分量 0~1（女儿出生/晋升 0.9、旅行/聚会 0.5、日常小事 0.3；与 confidence 无关——它是「这件事在人生里多重要」，不是「你多确定」；不确定可不填，走事件类型默认）
 - metric 平面字段（对话中表达的情绪/身体状态/体重/饮食等瞬时信号——每次对话是独立测点，不要合并成「当前状态」）：
   - metric_key：emotion|state|weight|sleep_late|diet|health
   - metric_value：数值（如 72.5）或中文短语（如 焦虑/火锅/熬夜）
@@ -123,7 +124,7 @@ personality 性格
    "confidence":0.85,"epistemic_type":"observed","block_index":2},
   {"plane":"event","subject":{"kind":"self"},"event_type":"旅行","title":"去云南旅游一周",
    "description":"和家人自驾","occurred_at":"2026-07-20","end_at":"2026-07-27","location":"云南",
-   "confidence":0.9,"epistemic_type":"observed","block_index":3},
+   "importance":0.8,"confidence":0.9,"epistemic_type":"observed","block_index":3},
   {"plane":"metric","subject":{"kind":"self"},"metric_key":"emotion","metric_value":"焦虑",
    "confidence":0.85,"epistemic_type":"observed","block_index":3},
   {"plane":"cycle","subject":{"kind":"self"},"cycle_type":"medication","cycle_label":"降压药",
