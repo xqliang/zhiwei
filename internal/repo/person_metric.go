@@ -175,6 +175,23 @@ func (r *PersonMetricRepo) SetStatus(ctx context.Context, id ids.ID, status stri
 	return r.SetStatusExt(ctx, r.DB, id, status)
 }
 
+// DismissAllByPersonExt 人物归档级联（spec §13 F5）：把该人物在**时序指标平面**上所有活跃态
+// （active/pending）的行批量置 dismissed，返回受影响行数（RowsAffected）。供 ManualSetPersonStatus
+// 归档分支在事务内调用（ext 传 *sqlx.Tx，随归档事务一起提交/回滚）。
+//
+// 级联语义——只动 active 与 pending：dismissed 已是终态不再改动；metric 是测点流、无版本取代
+// 语义（本表无 supersedes_id，实践中不产生 superseded 行），但仍用与其他平面一致的
+// status IN ('active','pending') 圈定活跃态——写法统一、且对未来可能出现的 superseded 行天然安全。
+func (r *PersonMetricRepo) DismissAllByPersonExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
+	res, err := ext.ExecContext(ctx,
+		`UPDATE person_metric SET status = 'dismissed' WHERE person_id = ? AND status IN ('active','pending')`,
+		personID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ListPending 全局确认队列（时序指标平面部分），按 id 升序（先产生的先确认）。
 func (r *PersonMetricRepo) ListPending(ctx context.Context, userID int64) ([]PersonMetric, error) {
 	var list []PersonMetric

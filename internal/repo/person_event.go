@@ -163,6 +163,23 @@ func (r *PersonEventRepo) SetStatus(ctx context.Context, id ids.ID, status strin
 	return r.SetStatusExt(ctx, r.DB, id, status)
 }
 
+// DismissAllByPersonExt 人物归档级联（spec §13 F5）：把该人物在**大事记（事件）平面**上所有
+// 活跃态（active/pending）的行批量置 dismissed，返回受影响行数（RowsAffected）。供
+// ManualSetPersonStatus 归档分支在事务内调用（ext 传 *sqlx.Tx，随归档事务一起提交/回滚）。
+//
+// 级联语义——只动 active 与 pending：superseded（已被新版本取代）与 dismissed（已放弃/已归档）
+// 都是**终态**，不再改动；否则会把「历史被取代行」也翻成 dismissed，既无意义又污染 supersedes
+// 链的历史可读性。故用 status IN ('active','pending') 精确圈定活跃态。
+func (r *PersonEventRepo) DismissAllByPersonExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
+	res, err := ext.ExecContext(ctx,
+		`UPDATE person_event SET status = 'dismissed' WHERE person_id = ? AND status IN ('active','pending')`,
+		personID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ListPending 全局确认队列（事件平面部分），按 id 升序（先产生的先确认）。
 func (r *PersonEventRepo) ListPending(ctx context.Context, userID int64) ([]PersonEvent, error) {
 	var list []PersonEvent

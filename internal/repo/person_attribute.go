@@ -167,6 +167,23 @@ func (r *PersonAttributeRepo) SetStatus(ctx context.Context, id ids.ID, status s
 	return r.SetStatusExt(ctx, r.DB, id, status)
 }
 
+// DismissAllByPersonExt 人物归档级联（spec §13 F5）：把该人物在**属性平面**上所有活跃态
+// （active/pending）的行批量置 dismissed，返回受影响行数（RowsAffected）。供 ManualSetPersonStatus
+// 归档分支在事务内调用（ext 传 *sqlx.Tx，随归档事务一起提交/回滚）。
+//
+// 级联语义——只动 active 与 pending：superseded（已被新版本取代）与 dismissed（已放弃/已归档）
+// 都是**终态**，不再改动；否则会把「历史被取代行」也翻成 dismissed，既无意义又污染 supersedes
+// 链的历史可读性。故用 status IN ('active','pending') 精确圈定活跃态。
+func (r *PersonAttributeRepo) DismissAllByPersonExt(ctx context.Context, ext ExecerContext, personID ids.ID) (int64, error) {
+	res, err := ext.ExecContext(ctx,
+		`UPDATE person_attribute SET status = 'dismissed' WHERE person_id = ? AND status IN ('active','pending')`,
+		personID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // BumpConfidenceExt 佐证上调置信度，封顶 0.99（同 memory 的佐证模式）。
 func (r *PersonAttributeRepo) BumpConfidenceExt(ctx context.Context, ext ExecerContext, id ids.ID, delta float64) error {
 	_, err := ext.ExecContext(ctx,

@@ -63,6 +63,19 @@ func (s *Service) ManualUpdatePerson(ctx context.Context, id ids.ID, name string
 }
 
 // ManualSetPersonStatus 人物状态流转（归档=dismissed 等）。
+//
+// F5（spec §13）归档级联：status=="dismissed"（归档人物）时，在**同一事务**内把该人物六个平面
+// （属性/关系/大事记/指标/周期/活动）上所有 active|pending 的行一并置 dismissed——否则名册里人物
+// 虽已隐藏，其平面行仍会进抽取闸门/确认队列，留下孤儿引用。级联行数**汇总**记入 person 的
+// change_log Note（一行审计），**不逐平面、不逐行**写审计条目，这是刻意取舍：
+//   - 归档是「显式用户意图」——用户已明确要清掉这个人的全部画像数据，无需逐行留痕来还原意图；
+//   - 六平面可能有成百上千行（metric/activity 是测点流），逐行写审计会让 change_log 爆量、得不偿失。
+//     故只在 person 行上留一条带级联计数的汇总审计（可审计「归档时清了多少」，够用）。
+//
+// 另一取舍：非 dismissed 流转（恢复 active / 置 pending 等）**不触发级联**；且**恢复人物不自动
+// 恢复**已被级联 dismissed 的平面行——因为「哪些行是归档时级联下去的、哪些是本来就 dismissed 的」
+// 无法仅凭状态区分（汇总审计不逐行记 id），自动回滚既语义复杂、又可能误恢复用户此前手动删掉的行。
+// 故恢复语义留作跟进：恢复人物后其平面数据由用户按需手动重新录入/确认。
 func (s *Service) ManualSetPersonStatus(ctx context.Context, id ids.ID, status string) error {
 	p, err := s.Persons.Get(ctx, id)
 	if err != nil {
@@ -79,10 +92,45 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, id ids.ID, status s
 	if err := s.Persons.SetStatusExt(ctx, tx, id, status); err != nil {
 		return err
 	}
+
+	// 默认审计备注；仅归档（dismissed）时改写为带六平面级联计数的汇总备注。
+	note := "人物状态流转"
+	if status == "dismissed" {
+		// 六平面各自把该人物的 active/pending 行级联置 dismissed（只动活跃态，终态不动——见各 repo
+		// DismissAllByPersonExt 注释）。全部在本事务内执行，任一步失败经 defer Rollback 整体回滚，
+		// 不会留下「人物已归档但平面未级联」的中间态。
+		nAttr, err := s.Attributes.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nRel, err := s.Relationships.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nEvt, err := s.Events.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nMet, err := s.Metrics.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nCyc, err := s.Cycles.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		nAct, err := s.Activities.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		note = fmt.Sprintf("人物归档：级联 dismissed 属性 %d/关系 %d/大事记 %d/指标 %d/周期 %d/活动 %d 行",
+			nAttr, nRel, nEvt, nMet, nCyc, nAct)
+	}
+
 	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
 		PersonID: id, EntityKind: "person", EntityID: &id,
 		ChangeType: "update", ChangedBy: "user", OldValue: snap(p.Status), NewValue: snap(status),
-		Note: strPtr("人物状态流转"),
+		Note: strPtr(note),
 	}); err != nil {
 		return err
 	}
