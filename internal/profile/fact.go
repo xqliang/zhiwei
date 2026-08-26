@@ -62,7 +62,7 @@ type Fact struct {
 	// ---- activity 平面（P4 生活轨迹）----
 	ActivityText string // 做什么（开会/写代码/打球…）；Go 字段名 ActivityText，rawFact 的 json 标签是 activity（同 FrequencyText/frequency 桥接先例）
 	Tool         string // 什么工具（手机/电脑/健身房…）
-	Location     string // 与 event 平面 EventLocation 同风格的自由文本
+	Location     string // 与 event 平面 EventLocation 同风格的自由文本；由 rawFact 的 json:"location" 填充（与 EventLocation 同源——一条 fact 只有一个 plane，event/activity 互斥不污染，见 rawFact 处的重复标签告警注释）
 	CommuteMode  string // 通勤方式中文短串（地铁/开车/步行…；不做枚举强校验）
 	StartedAt    string // 原始日期串（YYYY-MM-DD/RFC3339），解析在 service 层 parseEventAt
 	DurationMin  int    // 持续分钟
