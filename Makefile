@@ -40,16 +40,23 @@ migrate-up:
 migrate-down:
 	migrate -path migrations -database "mysql://zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei" down 1
 
-# 重建集成测试库（每次干净状态）并跑迁移
+# 重建集成测试库（每次干净状态）+ 授权。
+# F6 完整并行：真正的测试库是按包隔离的 zhiwei_test_<pkg>，由 repo.TestDSN 懒建。
+# 本目标负责三件事：①清理上一轮遗留的 zhiwei_test_<pkg>（逐个 DROP，防脏 schema）；
+# ②给 zhiwei 用户授予 `zhiwei_test_%`.* 通配符权限（MySQL 通配符 GRANT 对「尚不存在」
+# 的库也生效，故懒建时 zhiwei 已有全权限）；③兜底建共享库 zhiwei_test + 迁移（旧流程/
+# 手动排查仍可用）。
 init-testdb:
-	docker exec zhiwei-mvp-mysql mysql -uroot -proot -e "DROP DATABASE IF EXISTS zhiwei_test; CREATE DATABASE zhiwei_test CHARACTER SET utf8mb4; GRANT ALL PRIVILEGES ON zhiwei_test.* TO 'zhiwei'@'%'; FLUSH PRIVILEGES;"
+	docker exec zhiwei-mvp-mysql bash -c 'for db in $$(mysql -uroot -proot -N -e "SHOW DATABASES LIKE \"zhiwei_test_%\""); do mysql -uroot -proot -e "DROP DATABASE IF EXISTS \`$$db\`"; done'
+	docker exec zhiwei-mvp-mysql mysql -uroot -proot -e "DROP DATABASE IF EXISTS zhiwei_test; CREATE DATABASE zhiwei_test CHARACTER SET utf8mb4; GRANT ALL PRIVILEGES ON zhiwei_test.* TO 'zhiwei'@'%'; GRANT ALL PRIVILEGES ON \`zhiwei_test_%\`.* TO 'zhiwei'@'%'; FLUSH PRIVILEGES;"
 	migrate -path migrations -database "mysql://root:root@tcp(127.0.0.1:3307)/zhiwei_test" up
 
-# 集成测试：需要 docker compose 里的 MySQL 已启动并完成迁移。
-# -p 1 串行执行各包测试：repo 的 TestJobLifecycle 与 pipeline 的 pool 测试
-# 都依赖「领取最老的 pending 任务」，并行包二进制共享同一测试库会互相抢占任务。
+# 集成测试：需要 docker compose 里的 MySQL 已启动；init-testdb 会清库并配好通配符授权。
+# 无需 -p 1：各测试包经 repo.TestDSN 懒建独立库 zhiwei_test_<pkg>，并行跑包时各用各的库、
+# 互不可见，两个并行根因（ClaimNext 全局抢 pending job、extract user_id=1 跨包去重污染）
+# 均由库级隔离消解。
 test-integration: init-testdb
-	TEST_MYSQL_DSN="zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei_test?parseTime=true&charset=utf8mb4&multiStatements=true" go test -p 1 ./...
+	TEST_MYSQL_DSN="zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei_test?parseTime=true&charset=utf8mb4&multiStatements=true" go test ./...
 
 spike-llm:
 	go run ./cmd/spike/llm
