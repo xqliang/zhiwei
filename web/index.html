@@ -301,16 +301,16 @@
               </div>
             </div>
             <div style="display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap" @click.stop>
-              <span v-if="reextractingId !== s.id && reidentifyingId !== s.id" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
-              <span v-else-if="reextractingId === s.id" class="badge running"><span class="spinner"></span> 重新提取中</span>
+              <span v-if="!reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
+              <span v-else-if="reextractingIds.has(s.id)" class="badge running"><span class="spinner"></span> 重新提取中</span>
               <span v-else class="badge running"><span class="spinner"></span> 重新识别中</span>
-              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && reextractingId !== s.id && reidentifyingId !== s.id" class="btn mini" @click="askReidentify(s)" title="清空说话人归属，按最新声纹库重新匹配（会覆盖手动换人）">重新识别</button>
+              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && !reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="btn mini" @click="askReidentify(s)" title="清空说话人归属，按最新声纹库重新匹配（会覆盖手动换人）">重新识别</button>
               <button v-if="reidentifyConfirmId === s.id" class="btn warn" @click="confirmReidentify(s)">确认重识别?</button>
               <button v-if="reidentifyConfirmId === s.id" class="btn ghost" @click="cancelReidentify()">取消</button>
-              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && reextractingId !== s.id && reidentifyingId !== s.id" class="btn mini" @click="askReextract(s)">重新提取</button>
+              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && !reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="btn mini" @click="askReextract(s)">重新提取</button>
               <button v-if="reextractConfirmId === s.id" class="btn warn" @click="confirmReextract(s)">确认重提取?</button>
               <button v-if="reextractConfirmId === s.id" class="btn ghost" @click="cancelReextract()">取消</button>
-              <button v-if="reidentifyConfirmId !== s.id && deletingSessionId !== s.id && reextractConfirmId !== s.id && reextractingId !== s.id && reidentifyingId !== s.id" class="btn mini" @click="askDeleteSession(s)">删除</button>
+              <button v-if="reidentifyConfirmId !== s.id && deletingSessionId !== s.id && reextractConfirmId !== s.id && !reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="btn mini" @click="askDeleteSession(s)">删除</button>
               <button v-if="deletingSessionId === s.id" class="btn danger" @click="confirmDeleteSession(s)">确认删除?</button>
               <button v-if="deletingSessionId === s.id" class="btn ghost" @click="cancelDeleteSession()">取消</button>
             </div>
@@ -1625,6 +1625,6 @@
   </div>
 </div>
 
-<script src="/app/app.7dba77d6.js"></script>
+<script src="/app/app.bf6db80a.js"></script>
 </body>
 </html>

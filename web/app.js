@@ -1870,19 +1870,19 @@ const app = createApp({
     // ---------- 重新提取（基于最新 ASR 重跑 segment→extract） ----------
     // 点卡片「重新提取」→ 2 步确认 → 若有未保存转写先存盘 → POST reextract 建任务
     // → 轮询 job 状态 → 完成后刷新列表+详情。2 步确认提示会覆盖旧记忆/待办。
-    const reextractingId = ref(null);   // 正在重新提取的 session id（卡片显 loading）
-    const reextractConfirmId = ref(null); // 待确认重新提取的 session id
-    let reextractPollTimer = null;
+    const reextractingIds = reactive(new Set()); // 正在重新提取的 session id 集合（支持多卡片并行）
+    const reextractConfirmId = ref(null);        // 待确认重新提取的 session id
+    const reextractTimers = new Map();           // sessionId → 轮询 timer（并行时各自独立，互不覆盖）
     function askReextract(s) { deletingSessionId.value = null; reextractConfirmId.value = s.id; }
     function cancelReextract() { reextractConfirmId.value = null; }
     async function confirmReextract(s) { reextractConfirmId.value = null; await reextractSession(s); }
     async function reextractSession(s) {
-      if (reextractingId.value) return;
+      if (reextractingIds.has(s.id)) return; // 只防**同一** session 重复提交；不同 session 允许并行（后端 pool 并发=2，多的排队）
       // 当前展开且有未保存转写修改 → 先存盘，确保用最新 ASR 提取
       if (expandedId.value === s.id && segDirty.value) {
         await saveTranscript(s);
       }
-      reextractingId.value = s.id;
+      reextractingIds.add(s.id);
       try {
         await api('POST', '/api/sessions/' + s.id + '/reextract', {});
         toast.value = '正在重新提取…';
@@ -1894,36 +1894,38 @@ const app = createApp({
             err = r.job ? (r.job.last_error || '') : '';
           } catch (e) { /* 轮询失败静默重试 */ }
           if (st === 'done' || st === 'completed') {
-            reextractingId.value = null;
+            reextractingIds.delete(s.id);
+            reextractTimers.delete(s.id);
             toast.value = '重新提取完成'; setTimeout(() => { toast.value = ''; }, 2500);
             await loadSessions();
             if (expandedId.value === s.id) await reloadSession(s.id);
           } else if (st === 'failed') {
-            reextractingId.value = null;
+            reextractingIds.delete(s.id);
+            reextractTimers.delete(s.id);
             toast.value = '重新提取失败' + (err ? '：' + err : '');
             setTimeout(() => { toast.value = ''; }, 4000);
           } else {
-            reextractPollTimer = setTimeout(poll, 2000);
+            reextractTimers.set(s.id, setTimeout(poll, 2000));
           }
         };
         poll();
       } catch (e) {
-        reextractingId.value = null;
+        reextractingIds.delete(s.id);
         showError(e);
       }
     }
 
     // ---------- 重新识别说话人（清空说话人归属 + 重跑 speaker stage 用最新声纹库 1:N） ----------
     // 区别于重新提取（speaker 幂等跳过、不改已有归属）；重新识别会覆盖手动换人，故二次确认。
-    const reidentifyingId = ref(null);     // 正在重新识别的 session id（卡片显 loading）
-    const reidentifyConfirmId = ref(null); // 待确认重新识别的 session id
-    let reidentifyPollTimer = null;
+    const reidentifyingIds = reactive(new Set()); // 正在重新识别的 session id 集合（支持多卡片并行）
+    const reidentifyConfirmId = ref(null);        // 待确认重新识别的 session id
+    const reidentifyTimers = new Map();           // sessionId → 轮询 timer（并行时各自独立）
     function askReidentify(s) { deletingSessionId.value = null; reextractConfirmId.value = null; reidentifyConfirmId.value = s.id; }
     function cancelReidentify() { reidentifyConfirmId.value = null; }
     async function confirmReidentify(s) { reidentifyConfirmId.value = null; await reidentifySession(s); }
     async function reidentifySession(s) {
-      if (reidentifyingId.value) return;
-      reidentifyingId.value = s.id;
+      if (reidentifyingIds.has(s.id)) return; // 只防**同一** session 重复提交；不同 session 允许并行（后端 pool 并发=2，多的排队）
+      reidentifyingIds.add(s.id);
       try {
         await api('POST', '/api/sessions/' + s.id + '/reidentify', {});
         toast.value = '正在重新识别说话人…';
@@ -1935,21 +1937,23 @@ const app = createApp({
             err = r.job ? (r.job.last_error || '') : '';
           } catch (e) { /* 轮询失败静默重试 */ }
           if (st === 'done' || st === 'completed') {
-            reidentifyingId.value = null;
+            reidentifyingIds.delete(s.id);
+            reidentifyTimers.delete(s.id);
             toast.value = '重新识别完成'; setTimeout(() => { toast.value = ''; }, 2500);
             await loadSessions();
             if (expandedId.value === s.id) await reloadSession(s.id);
           } else if (st === 'failed') {
-            reidentifyingId.value = null;
+            reidentifyingIds.delete(s.id);
+            reidentifyTimers.delete(s.id);
             toast.value = '重新识别失败' + (err ? '：' + err : '');
             setTimeout(() => { toast.value = ''; }, 4000);
           } else {
-            reidentifyPollTimer = setTimeout(poll, 2000);
+            reidentifyTimers.set(s.id, setTimeout(poll, 2000));
           }
         };
         poll();
       } catch (e) {
-        reidentifyingId.value = null;
+        reidentifyingIds.delete(s.id);
         showError(e);
       }
     }
@@ -2014,8 +2018,8 @@ const app = createApp({
       hasNameCandidates, acceptNameCandidate, dismissNameCandidate,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
       spMergeMode, spMergeSelected, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
-      reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
-      reidentifyingId, reidentifyConfirmId, askReidentify, cancelReidentify, confirmReidentify,
+      reextractingIds, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
+      reidentifyingIds, reidentifyConfirmId, askReidentify, cancelReidentify, confirmReidentify,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       lastAudioFile, matchInfo, voiceprintMatching, tryMatchVoiceprint,
       topics, topicDetail, showNewTopic, newTopic, creating, toggleNewTopic, cancelNewTopic, renaming,
