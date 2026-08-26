@@ -38,9 +38,17 @@ const app = createApp({
       const r = await fetch(url, opt);
       const text = await r.text();
       if (!r.ok) {
-        let msg = '请求失败';
-        try { msg = (text ? JSON.parse(text).error : '') || msg; } catch (e) {}
-        throw new Error(msg);
+        // 后端错误体有两种形态，都要透传给用户，不能一律吞成通用「请求失败」：
+        //   1) Go 的 http.Error 直接回「纯文本」错误串（如「display_name 不能为空」、
+        //      「该声纹已绑定人物「张三」」）——它不是 JSON，JSON.parse 会抛异常。
+        //   2) 业务 JSON API 回 {"error":"..."} 结构，取其 .error 字段。
+        // 策略：先按 JSON 解析取 .error；解析失败（形态 1）则回退用响应纯文本，
+        //   trim 去首尾空白后 slice(0,200) 截断，防后端偶发返回超长 HTML 错误页刷屏。
+        //   两种都拿不到内容时，才回落到「请求失败 + 状态码」这一最后兜底。
+        let msg = '';
+        try { msg = (text ? JSON.parse(text).error : '') || ''; } catch (e) {}
+        if (!msg && text) { msg = text.trim().slice(0, 200); }
+        throw new Error(msg || '请求失败 ' + r.status);
       }
       // 部分写操作（关联/删除 topic）返回 200/204 空体，r.json() 会抛
       // "Unexpected end of JSON input"——空体直接返回 null，调用方按需判断。
