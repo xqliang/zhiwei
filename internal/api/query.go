@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -20,6 +21,8 @@ type QueryHandler struct {
 	Memories    *repo.MemoryRepo  // Sprint 2：详情附带 memory 卡片
 	Todos       *repo.TodoRepo    // Sprint 2：详情附带 todo 卡片
 	Speakers    *repo.SpeakerRepo // speaker stage：详情附带段说话人 + speakers 列表
+
+	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // speakername stage：详情 speakers 附候选名
 }
 
 // RegisterQuery 挂载查询路由。
@@ -87,6 +90,10 @@ type segmentView struct {
 	Text         string `json:"text"`
 	StartMS      int64  `json:"start_ms"`
 	EndMS        int64  `json:"end_ms"`
+	// VoiceMatches 该段声纹与全库的 top-3 相似（speaker stage 逐段落库的向量算出；
+	// 一句话可能混多人，段级 top-1 不是归属说话人即该段可能被切错/归错）。
+	// 存量会话（逐段向量落库前处理）无值。json 无 omitempty：前端统一按空数组处理。
+	VoiceMatches []voiceMatch `json:"voice_matches"`
 }
 
 func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
@@ -110,11 +117,20 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 			sis[i].ColorIndex = i // 按转写出现序号着色
 			spMap[sis[i].SpeakerID] = sis[i].Name
 		}
+		// 预解码声纹库（一次），供逐段算 top-3 相似度；无库或失败降级为空（不阻断详情）
+		var lib []libVoice
+		if h.Speakers != nil {
+			if all, err := h.Speakers.List(r.Context()); err != nil {
+				log.Printf("[speaker] 段级声纹相似度富化失败: %v", err)
+			} else {
+				lib = decodeLibrary(all)
+			}
+		}
 		views := make([]segmentView, len(segs))
 		for i, sg := range segs {
 			views[i] = segmentView{
 				ID: sg.ID.String(), Text: sg.Text, StartMS: sg.StartMS, EndMS: sg.EndMS,
-				SpeakerLabel: sg.SpeakerLabel,
+				SpeakerLabel: sg.SpeakerLabel, VoiceMatches: []voiceMatch{},
 			}
 			if sg.SpeakerID != nil {
 				views[i].SpeakerID = sg.SpeakerID.String()
@@ -126,10 +142,44 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 			} else {
 				views[i].Speaker = speakerLabelName(sg.SpeakerLabel) // 未解析→"说话人 N"
 			}
+			// 段级声纹 top-3（含归属者）：speaker stage 落库的逐段向量 vs 全库余弦
+			if len(lib) > 0 && len(sg.Embedding) > 0 {
+				if emb, ok := decodeEmbedding(sg.Embedding); ok {
+					views[i].VoiceMatches = topVoiceMatchesVec(lib, emb, 3)
+				}
+			}
+		}
+		// sis 富化候选名（随机名说话人展示「建议名字」区）；repo 未装配则空候选
+		type speakerWithCands struct {
+			repo.SpeakerInSegment
+			NameCandidates []NameCandidateView `json:"name_candidates"`
+		}
+		sisView := make([]speakerWithCands, len(sis))
+		spIDs := make([]ids.ID, len(sis))
+		for i := range sis {
+			sisView[i] = speakerWithCands{SpeakerInSegment: sis[i], NameCandidates: []NameCandidateView{}}
+			spIDs[i] = sis[i].SpeakerID
+		}
+		if h.SpeakerNameCandidates != nil {
+			cands, err := h.SpeakerNameCandidates.ListBySpeakers(r.Context(), spIDs)
+			if err != nil {
+				log.Printf("[speaker] 候选名富化失败: %v", err) // 降级为空候选，不阻断详情
+			} else {
+				idx := make(map[ids.ID]int, len(sisView))
+				for i := range sisView {
+					idx[sisView[i].SpeakerID] = i
+				}
+				for _, c := range cands {
+					if i, ok := idx[c.SpeakerID]; ok {
+						sisView[i].NameCandidates = append(sisView[i].NameCandidates,
+							NameCandidateView{Name: c.Name, Confidence: c.Confidence, Evidence: c.Evidence})
+					}
+				}
+			}
 		}
 		resp["transcript"] = tr
 		resp["segments"] = views
-		resp["speakers"] = sis
+		resp["speakers"] = sisView
 	}
 	// Sprint 2：详情附带 memory/todo 卡片（repo 为空则跳过，兼容旧装配）
 	if h.Memories != nil {

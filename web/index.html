@@ -76,6 +76,21 @@
   .tabs button:hover { color: var(--text-2); }
   .tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
   .wrap { max-width: 780px; margin: 0 auto; padding: 18px 16px 80px; animation: fadeup .28s ease both; }
+  /* 时间线页加宽版：宽屏下配合详情双栏（转写 | 记忆/待办）利用横向空间 */
+  .wrap.wrap-lg { max-width: 1100px; }
+  /* 会话详情双栏：默认（窄屏）单栏纵排；≥960px 且有洞察内容时转写在左、记忆/待办卡片在右。
+     无洞察（detailInsights=false）时 aside 不渲染，grid 退化为单列全宽。 */
+  .detail-cols { display: flex; flex-direction: column; gap: 0; }
+  .detail-aside { min-width: 0; }
+  /* 右栏（洞察侧栏）更紧凑的排版：卡片收窄边距、节标题去首距、说明文字降一档 */
+  .detail-aside .card { padding: 10px 12px; margin: 8px 0; }
+  .detail-aside .todo-group-title { margin: 14px 2px 8px; }
+  .detail-aside .muted { font-size: var(--fs-xs); }
+  @media (min-width: 960px) {
+    .detail-cols.has-aside { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 0 18px; align-items: start; }
+    /* sticky 偏移避让顶部粘性标签栏（约 48px 高）；内容超高时侧栏内部独立滚动 */
+    .detail-aside { position: sticky; top: 64px; max-height: calc(100vh - 76px); overflow-y: auto; }
+  }
   @keyframes fadeup { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
   /* 卡片：分层阴影 + 描边 + 顶部高光 */
@@ -127,6 +142,14 @@
   .btn.primary:disabled { background: #c8c3b4; cursor: not-allowed; }
   .btn.mini { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); padding: 6px 12px; }
   .btn.mini:hover { background: var(--surface-sunken); border-color: var(--border-strong); }
+  /* mini 主操作按钮（保存/确认合并/确认切换…）：尺寸与 .btn.mini 完全一致、
+     仅背景用主色区分。必须显式声明——.btn.primary 的 9px/20px 大内边距与
+     15px 大字号会被 mini 覆盖一半（背景/内边距被覆盖、字号/字重残留），
+     造成「同一行两个按钮一大一小、颜色却一样」的错乱。三类选择器(0,3,0)
+     优先级高于 .btn.primary(0,2,0)，逐属性钉死。 */
+  .btn.mini.primary { background: var(--accent); color: #fff; border-color: var(--accent); padding: 6px 12px; font-size: var(--fs-sm); font-weight: 500; }
+  .btn.mini.primary:hover { background: var(--accent-hover); }
+  .btn.mini.primary:disabled { background: #c8c3b4; border-color: #c8c3b4; }
   .btn.ghost { background: transparent; color: var(--muted); padding: 6px 10px; }
   .btn.ghost:hover { color: var(--text-2); background: var(--surface-sunken); }
   .btn.danger { background: var(--danger-soft); color: var(--danger); padding: 6px 12px; border: 1px solid #f3caca; }
@@ -153,6 +176,14 @@
   /* 输入框 */
   input.txt, textarea.txt { border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; font-size: var(--fs-base); width: 100%; background: #fff; font-family: inherit; line-height: 1.6; transition: border-color .15s, box-shadow .15s; }
   input.txt:focus, textarea.txt:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+  /* select.txt：与 input.txt 同款描边/圆角/内距/字号，补上 inline 样式无法表达的 :focus 环与高度对齐 */
+  select.txt {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 9px;
+    padding: 9px 12px; font-size: var(--fs-base); font-family: inherit; color: var(--text);
+    line-height: 1.6; transition: border-color .15s, box-shadow .15s;
+    width: auto; /* input.txt 的 width:100% 会破坏 flex 行的 min-width 布局，select 保持自适应 */
+  }
+  select.txt:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
   textarea.txt { resize: vertical; }
   input.inline { width: auto; min-width: 160px; display: inline-block; }
 
@@ -168,7 +199,7 @@
   .field-label { display: block; font-size: var(--fs-xs); font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
   /* topic 标签编辑行：已有 chip（带 ✕）+ 「+ 关联」虚线胶囊下拉，内联紧凑 */
   .topic-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
-  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: var(--fs-xs); font-weight: 500; line-height: 1.4; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: var(--fs-xs); font-weight: 500; line-height: 1.4; cursor: default; }
   .chip-x { background: none; border: none; color: inherit; opacity: .45; cursor: pointer; font-size: 11px; padding: 0 4px; line-height: 1; }
   .chip-x:hover { opacity: 1; }
   .chip-add { position: relative; display: inline-flex; align-items: center; padding: 3px 12px; border-radius: 99px; border: 1px dashed var(--border-strong); color: var(--muted); font-size: var(--fs-xs); cursor: pointer; background: var(--surface); white-space: nowrap; }
@@ -318,6 +349,7 @@
     <button :class="{active: tab==='reports'}" @click="switchTab('reports')">报告</button>
     <button :class="{active: tab==='record'}" @click="switchTab('record')">录音</button>
     <button :class="{active: tab==='voiceprint'}" @click="switchTab('voiceprint')">声纹</button>
+    <button :class="{active: tab==='persons'}" @click="switchTab('persons')">人物</button>
     <button :class="{active: tab==='topics'}" @click="switchTab('topics')">主题</button>
     <button :class="{active: tab==='memories'}" @click="switchTab('memories')">记忆</button>
     <button :class="{active: tab==='todos'}" @click="switchTab('todos')">待办</button>
@@ -325,7 +357,7 @@
   <div v-if="toast" class="toast">{{ toast }}</div>
 
   <!-- ============ 时间线 ============ -->
-  <div class="wrap" v-if="tab==='timeline'">
+  <div class="wrap wrap-lg" v-if="tab==='timeline'">
     <!-- 工具栏：搜索 + 日期范围筛选 -->
     <div class="toolbar">
       <input class="txt" v-model="tlSearch" placeholder="搜索转写内容 / 文件名…">
@@ -394,16 +426,41 @@
                   :title="sp.source==='auto' ? '自动登记' : '手动录入'">
               {{ sp.name }}
               <button class="chip-x" @click.stop="startRenameSpeaker(sp)" title="改名">✎</button>
+              <button class="chip-x" @click.stop="startSwitchSpeaker(sp)" title="切换声纹：本会话该说话人的全部段一键改判给另一声纹">⇄</button>
               <button class="chip-x" @click.stop="askDeleteSpeaker(sp)" title="删除">✕</button>
             </span>
             <label class="chip-add" v-if="!enrollOpen" @click="openEnroll">+ 新加说话人</label>
             <span v-if="speakerFilter" class="chip" style="cursor:pointer; opacity:.8" @click="speakerFilter=null">显示全部 ✕</span>
           </div>
+          <!-- 建议名字：speakername stage 用 LLM 从对话推断的候选（名称+置信度数值，倒排）。
+               仅随机名说话人展示；✓ 采纳（改名+清候选）· ✕ 忽略该候选；悬浮看依据。 -->
+          <div v-if="(detail.speakers||[]).some(hasNameCandidates)" style="margin:0 0 8px; display:flex; flex-direction:column; gap:4px">
+            <div v-for="sp in detail.speakers.filter(hasNameCandidates)" :key="'cand-'+sp.speaker_id"
+                 style="display:flex; align-items:center; gap:6px; flex-wrap:wrap">
+              <span class="muted" style="font-size:var(--fs-xs)">建议名字（{{ sp.name }}）</span>
+              <span v-for="c in sp.name_candidates" :key="c.name" class="chip"
+                    style="cursor:default" :title="c.evidence || '无依据记录'">
+                {{ c.name }} · {{ c.confidence.toFixed(2) }}
+                <button class="chip-x" @click.stop="acceptNameCandidate(sp, c)" title="采纳为正式名">✓</button>
+                <button class="chip-x" @click.stop="dismissNameCandidate(sp, c)" title="忽略该候选（下次识别可能再次建议；采纳后不再）">✕</button>
+              </span>
+            </div>
+          </div>
           <!-- 改名行（就地一行输入，回车/保存提交） -->
           <div v-if="renamingSpeaker" class="edit-form" style="margin:0 0 8px">
             <input class="txt inline" v-model="renamingSpeaker.name" @keyup.enter="commitRenameSpeaker">
-            <button class="btn primary" style="padding:6px 12px; margin-left:6px" @click="commitRenameSpeaker">保存</button>
+            <button class="btn primary" style="padding:6px 12px; margin-left:6px" @click="commitRenameSpeaker">改名</button>
             <button class="btn mini" @click="renamingSpeaker=null">取消</button>
+          </div>
+          <!-- 切换声纹行（就地选择）：识别错时把本会话内该说话人的全部段一键改判给目标声纹 -->
+          <div v-if="switchingSpeaker" class="edit-form" style="margin:0 0 8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+            <span class="muted" style="font-size:var(--fs-xs)">把「{{ switchingSpeaker.name }}」的 {{ switchSegCount }} 段改判给</span>
+            <select class="mini" v-model="switchTarget" title="选择目标声纹">
+              <option :value="null" disabled>目标声纹…</option>
+              <option v-for="sp in allSpeakers.filter(x => x.id !== switchingSpeaker.id)" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
+            </select>
+            <button class="btn mini primary" :disabled="!switchTarget" @click="commitSwitchSpeaker()">切换</button>
+            <button class="btn mini" @click="cancelSwitchSpeaker()">取消</button>
           </div>
           <!-- 录入表单（名称 + 拖拽语音样本，multipart 上传） -->
           <div class="card sunken" v-if="enrollOpen" style="margin-bottom:10px">
@@ -421,6 +478,10 @@
               <button class="btn mini" @click="enrollOpen=false">取消</button>
             </div>
           </div>
+          <!-- 详情双栏（宽屏）：转写在左（detail-main）；有记忆/待办/整理草稿时
+               右栏（detail-aside，sticky）展示提取卡片——不用滚到转写列表底部才能看到 -->
+          <div class="detail-cols" :class="{ 'has-aside': detailInsights }">
+          <div class="detail-main">
           <div class="kv" style="margin-bottom:6px">
             <b>转写详情</b>
             <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap">
@@ -453,8 +514,9 @@
             <select class="sp" :class="spClass(sg.speaker)" :style="{background: segSpeakerBg(sg)}"
                     @change="reassignSegment(sg, $event.target.value); $event.target.value=sg.speaker_id||''"
                     style="border:none; cursor:pointer" title="点击可改判此段说话人">
+              <!-- 首项 = 当前说话人（未解析段显示回退名）；名册列表排除当前说话人，避免同一人出现两次 -->
               <option :value="sg.speaker_id || ''">{{ sg.speaker }}</option>
-              <option v-for="sp in allSpeakers" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
+              <option v-for="sp in allSpeakers.filter(x => x.id !== sg.speaker_id)" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
               <option value="__new">+ 新加…</option>
             </select>
             <button class="btn mini seg-play" @click="toggleTimelineSegPlay(sg)" style="padding:2px 8px; flex-shrink:0" :title="tlPlayingSegId===sg.id?'播放中，点暂停':'播放此段音频'">{{ tlPlayingSegId===sg.id ? '⏸' : '▶' }}</button>
@@ -467,36 +529,54 @@
               </div>
               <div v-else-if="!segEditing(sg)" class="editable" @click="startEditSeg(sg)" title="点击编辑转写文本">{{ sg.text }}<span class="hint">✎ 编辑</span></div>
               <div v-else class="edit-form" style="margin:0">
-                <textarea class="txt seg-edit" v-model="segDraft[sg.id]" rows="2"></textarea>
+                <textarea class="txt seg-edit" v-model="segDraft[sg.id]" rows="2"
+                          @keydown.meta.enter="saveSegEdit(s, sg)" @keydown.ctrl.enter="saveSegEdit(s, sg)"></textarea>
                 <div class="edit-actions">
+                  <button class="btn mini primary" @click="saveSegEdit(s, sg)" title="保存此段（⌘/Ctrl+Enter）">保存</button>
                   <button class="btn mini" @click="cancelEditSeg(sg)">取消</button>
                 </div>
+              </div>
+              <!-- 段级声纹相似度 top-3（该段音频的向量 vs 全库，含归属者）：一句话可能混
+                   多个人——top-1 不是归属说话人（或他人 ≥0.72）时该段可能被 ASR 切错/归错，
+                   可用段首下拉换人或说话人 chip 的 ⇄ 批量切换。存量会话无逐段向量则不显示 -->
+              <div v-if="(sg.voice_matches||[]).length" class="muted" style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
+                   title="该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错">
+                <span>声纹 ≈</span>
+                <span v-for="(m, mi) in sg.voice_matches" :key="m.speaker_id"
+                      :style="(m.similarity >= 0.72 && m.speaker_id !== sg.speaker_id) ? { color: 'var(--accent-2)', fontWeight: 600 } : {}"
+                      :title="m.speaker_id === sg.speaker_id ? '本段归属的说话人' : (m.similarity >= 0.72 ? '与他人相似度 ≥ 0.72：这句可能属于此人，可换人/切换声纹' : '')">
+                  {{ mi > 0 ? '·' : '' }} {{ m.name }} {{ m.similarity.toFixed(2) }}
+                </span>
               </div>
             </div>
           </div>
           <div v-if="segDirty" class="muted" style="margin-top:4px">有未保存的转写修改，点上方「保存转写修改」生效后即可「重新提取」。</div>
           </template>
           <template v-else>
-          <div class="muted" style="margin:4px 0 6px; font-size:var(--fs-xs)">原始 ASR 结果：spk 标签为模型/接口原始输出，同人可能被拆成 spk0/spk1（speaker stage 会用声纹聚类合并同人）</div>
+          <div class="muted" style="margin:4px 0 6px; font-size:var(--fs-xs)">原始 ASR 结果：spk 标签为模型/接口原始输出，同人可能被拆成 spk0/spk1（同一人跨录音靠声纹 1:N 识别归并；本录音内误拆可用上方「合并」按钮手动合并）</div>
           <div v-for="(sg, i) in detail.segments" :key="'r'+i" class="seg raw-asr">
             <span class="raw-spk">spk{{ sg.speaker_label || '—' }}</span>
             <span class="raw-time">{{ fmtSec(sg.start_ms) }} – {{ fmtSec(sg.end_ms) }}</span>
             <span class="raw-text">{{ sg.text }}</span>
           </div>
           </template>
-
+          </div><!-- /detail-main -->
+          <!-- 右栏：提取的记忆 / 记忆整理草稿 / 待办。detailInsights=false 时整栏不渲染，
+               detail-cols 退化为单列全宽（转写不被压缩） -->
+          <div class="detail-aside" v-if="detailInsights">
           <!-- memory 卡片 -->
           <template v-if="detail.memories && detail.memories.length">
-            <div class="kv" style="margin-top:10px">
+            <div class="kv">
               <div class="todo-group-title" style="margin:0">提取的记忆</div>
               <button class="btn mini" :disabled="memConsolidating" @click="startMemoryConsolidate">
                 <span v-if="memConsolidating" class="spinner"></span>{{ memConsolidating ? '整理中…' : '记忆整理' }}
               </button>
             </div>
-            <div class="card sunken" v-for="m in detail.memories" :key="m.id" style="margin:6px 0">
+            <div class="card sunken" v-for="m in detail.memories" :key="m.id">
               <div class="kv">
-                <div style="min-width:0">
-                  <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+                <!-- 类型标签 + 标题弹性换行：窄列下长标题整行换行，不再缩进错位 -->
+                <div style="min-width:0; display:flex; align-items:flex-start; gap:6px; flex-wrap:wrap">
+                  <span class="type-tag" style="margin-right:0" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
                   <b v-if="!editingMem || editingMem.id !== m.id" class="editable" @click="startEditMemory(m)" title="点击编辑">{{ m.title }}<span class="hint">✎</span></b>
                 </div>
                 <button v-if="dismissingMemId !== m.id" class="btn ghost" @click="askDismissMem(m)" title="忽略此记忆">✕</button>
@@ -515,7 +595,12 @@
               <div class="muted">重要度 {{ (m.importance ?? 0).toFixed(1) }} · 置信 {{ (m.confidence ?? 0).toFixed(2) }}<template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template></div>
               <div class="topic-row">
                 <span v-for="tp in topicChips(m)" :key="tp.id" class="chip">{{ tp.name }}<span v-if="tp.source==='user'" style="opacity:.55; font-size:10px">✎</span><button class="chip-x" @click.stop="removeMemoryTopic(m, tp.id)" title="取消关联">✕</button></span>
-                <label class="chip-add">+ 关联<select @change="if($event.target.value){addMemoryTopic(m,$event.target.value);$event.target.value=''}"><option value="">+ 关联</option><option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option></select></label>
+                <!-- 关联主题用正常下拉（窄列下比 chip 内嵌 select 清晰） -->
+                <select class="mini" style="padding:3px 8px" title="关联主题"
+                        @change="if($event.target.value){addMemoryTopic(m,$event.target.value);$event.target.value=''}">
+                  <option value="">+ 关联主题</option>
+                  <option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option>
+                </select>
               </div>
             </div>
           </template>
@@ -546,7 +631,7 @@
           <!-- todo 卡片（只读，操作去待办页） -->
           <template v-if="detail.todos && detail.todos.length">
             <div class="todo-group-title">提取的待办</div>
-            <div class="card sunken" v-for="td in detail.todos" :key="td.id" style="margin:6px 0">
+            <div class="card sunken" v-for="td in detail.todos" :key="td.id">
               <div class="kv">
                 <div v-if="!editingTodo || editingTodo.id !== td.id" class="editable" @click="startEditTodo(td)" title="点击编辑">☑️ {{ td.title }}<span class="hint">✎</span></div>
                 <div v-else style="min-width:0; flex:1">
@@ -566,6 +651,8 @@
               <div class="muted" v-if="td.due_at">截止 {{ fmtDue(td.due_at) }} · 到「待办」页处理</div>
             </div>
           </template>
+          </div><!-- /detail-aside -->
+          </div><!-- /detail-cols -->
         </div>
       </div>
     </div>
@@ -992,7 +1079,7 @@
           </template>
           <template v-else>
             <input class="txt inline" v-model="renamingSpeaker.name" @keyup.enter="commitRenameSpeaker" @keyup.esc="renamingSpeaker=null">
-            <button class="btn primary" style="padding:6px 12px" @click="commitRenameSpeaker">保存</button>
+            <button class="btn primary" style="padding:6px 12px" @click="commitRenameSpeaker">改名</button>
             <button class="btn mini" @click="renamingSpeaker=null">取消</button>
           </template>
         </div>
@@ -1003,6 +1090,17 @@
           </button>
           <button class="btn mini" @click="askDeleteSpeaker(sp)">删除</button>
         </div>
+      </div>
+
+      <!-- 建议名字：随机名声纹的 LLM 候选（名称+置信度数值，倒排）；采纳后名字即确认、候选清空 -->
+      <div v-if="hasNameCandidates(sp)" style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:6px 0">
+        <span class="muted" style="font-size:var(--fs-xs)">建议名字</span>
+        <span v-for="c in sp.name_candidates" :key="c.name" class="chip"
+              style="cursor:default" :title="c.evidence || '无依据记录'">
+          {{ c.name }} · {{ c.confidence.toFixed(2) }}
+          <button class="chip-x" @click.stop="acceptNameCandidate(sp, c)" title="采纳为正式名">✓</button>
+          <button class="chip-x" @click.stop="dismissNameCandidate(sp, c)" title="忽略该候选（下次识别可能再次建议；采纳后不再）">✕</button>
+        </span>
       </div>
 
       <!-- 展开：关联录音（按 session 分组）+ 按时间段播放 -->
@@ -1044,6 +1142,305 @@
           </template>
           <button class="btn mini" @click="cancelSpMerge">取消</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 人物 tab：名册 + 详情（就地展开）+ 确认队列 + 回填 -->
+  <div class="wrap" v-if="tab==='persons'">
+    <div class="kv" style="margin-bottom:12px">
+      <b style="font-size:var(--fs-lg)">人物</b>
+      <div style="display:flex; gap:6px">
+        <button class="btn mini" @click="runBackfill" :disabled="backfilling">
+          <span v-if="backfilling" class="spinner"></span>{{ backfilling ? '抽取中…' : '从历史抽取画像' }}
+        </button>
+        <button class="btn primary" style="padding:7px 16px" @click="toggleNewPerson">{{ showNewPerson ? '收起' : '＋ 新建' }}</button>
+      </div>
+    </div>
+
+    <!-- 回填结果摘要（最近 50 段录音同步重放；单段失败不中断） -->
+    <div class="card sunken" v-if="backfillInfo" style="margin-bottom:12px">
+      <div class="kv">
+        <span class="muted">已回填 {{ backfillInfo.processed }} 段录音：{{ backfillInfo.active }} 条生效 · {{ backfillInfo.pending }} 条待确认 · {{ backfillInfo.skipped }} 条跳过<span v-if="backfillInfo.errors"> · {{ backfillInfo.errors }} 段失败</span></span>
+        <button class="btn-link" @click="backfillInfo=null">✕</button>
+      </div>
+    </div>
+
+    <!-- 确认队列：低置信/冲突的 AI 建议（全局，与人物详情无关） -->
+    <div class="card" v-if="pendingItems.length" style="border-color:var(--warn)">
+      <div class="kv" style="margin-bottom:8px">
+        <b style="color:var(--warn)">待确认 <span class="chip" style="background:var(--warn-soft); color:var(--warn)">{{ pendingItems.length }}</span></b>
+        <span class="muted" style="font-size:var(--fs-xs)">AI 从对话中抽取的低置信/冲突信息，确认后生效</span>
+      </div>
+      <div v-for="it in pendingItems" :key="it.kind + '-' + it.id" class="seg" style="align-items:flex-start">
+        <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ pendingKindText(it.kind) }}</span>
+        <div class="seg-text">
+          <div>
+            <b>{{ it.person_name }}</b><span v-if="it.kind !== 'person'"> · {{ pendingSummary(it) }}</span>
+            <span v-if="it.kind === 'person'" class="muted">LLM 自动新建的人物</span>
+            <span v-if="it.current_value" class="muted">（现值：{{ it.current_value }} → 建议改为 <b>{{ it.value }}</b>）</span>
+          </div>
+          <div v-if="it.kind !== 'person'" class="muted" style="font-size:var(--fs-xs)">
+            置信度 {{ (it.confidence * 100).toFixed(0) }}%
+            <span v-if="it.occurred_at"> · {{ fmtEventDate(it.occurred_at, true) }}</span>
+            <span v-if="it.session_id" style="cursor:pointer; text-decoration:underline" @click="jumpToSession(it.session_id)">来源录音</span>
+          </div>
+        </div>
+        <div style="display:flex; gap:4px; flex-shrink:0">
+          <button class="btn mini" style="background:var(--ok-soft); color:var(--ok); border-color:var(--ok)" :disabled="queueBusyIds[it.kind + '-' + it.id]" @click="confirmPendingItem(it)">✓ 确认</button>
+          <button class="btn mini danger" :disabled="queueBusyIds[it.kind + '-' + it.id]" @click="dismissPendingItem(it)">✕ 放弃</button>
+        </div>
+      </div>
+    </div>
+    <div v-else-if="pendingLoading" class="card empty">加载待确认项…</div>
+
+    <!-- 新建人物 -->
+    <div class="card" v-if="showNewPerson">
+      <div class="kv" style="margin-bottom:12px"><b>新建人物</b><button class="btn-link" @click="cancelNewPerson">✕</button></div>
+      <label class="field-label">姓名 *</label>
+      <input class="txt" v-model="newPerson.display_name" placeholder="如：张三" style="margin-bottom:8px">
+      <label class="field-label">关联声纹 speaker_id（可空；只被提到的人可不绑）</label>
+      <input class="txt" v-model="newPerson.speaker_id" placeholder="从声纹 tab 复制 id，可留空" style="margin-bottom:8px">
+      <label class="field-label">备注</label>
+      <input class="txt" v-model="newPerson.summary" placeholder="一句话备注（可空）" style="margin-bottom:8px">
+      <div class="edit-actions">
+        <button class="btn primary" :disabled="creatingPerson" @click="createPerson">
+          <span v-if="creatingPerson" class="spinner"></span>{{ creatingPerson ? '创建中…' : '创建' }}
+        </button>
+        <button class="btn mini" @click="cancelNewPerson">取消</button>
+      </div>
+    </div>
+
+    <!-- 名册卡片 -->
+    <div v-if="!persons.length" class="card empty">还没有人物。点「新建」，或上传录音后由画像抽取自动生成。</div>
+    <div class="card clickable" v-for="p in persons" :key="p.id" @click="togglePerson(p.id)">
+      <div class="kv">
+        <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
+          <b>{{ p.display_name }}</b>
+          <span v-if="p.is_owner" class="chip">我</span>
+          <span v-if="p.speaker_id" class="muted" title="已关联声纹">🎙</span>
+          <span v-if="p.source === 'llm'" class="muted">自动识别</span>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-shrink:0" @click.stop>
+          <span v-if="p.pending_count" class="chip" style="background:var(--warn-soft); color:var(--warn)" title="待确认的属性/关系数">{{ p.pending_count }} 待确认</span>
+          <template v-if="archivingPersonId === p.id">
+            <span class="muted">归档？</span>
+            <button class="btn mini danger" @click="confirmArchivePerson(p)">确认</button>
+            <button class="btn mini" @click="cancelArchivePerson()">取消</button>
+          </template>
+          <button v-else class="btn mini" @click="askArchivePerson(p)">归档</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 人物详情（就地展开在名册之后；Task 1 已定义 togglePerson/closePersonDetail 数据流） -->
+    <div class="card" v-if="personDetail" style="border-color:var(--accent)">
+      <div class="kv" style="margin-bottom:12px">
+        <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
+          <template v-if="!renamingPerson">
+            <b style="font-size:var(--fs-md)">{{ personDetail.person.display_name }}</b>
+            <span v-if="personDetail.person.is_owner" class="chip">我</span>
+            <span v-if="personDetail.person.speaker_id" class="muted">🎙 {{ personDetail.person.speaker_id }}</span>
+            <button class="btn-link" @click="startRenamePerson" title="改名">✎</button>
+          </template>
+          <template v-else>
+            <input class="txt inline" v-model="renamingPerson.name" @keyup.enter="commitRenamePerson" @keyup.esc="renamingPerson=null">
+            <button class="btn primary" style="padding:6px 12px" @click="commitRenamePerson">保存</button>
+            <button class="btn mini" @click="renamingPerson=null">取消</button>
+          </template>
+        </div>
+        <button class="btn mini" @click="closePersonDetail">收起 ✕</button>
+      </div>
+      <div v-if="personDetail.person.summary" class="muted" style="margin-bottom:8px">{{ personDetail.person.summary }}</div>
+
+      <!-- 最近互动（溯源 session，点击跳时间线展开） -->
+      <div v-if="personDetail.recent_session_ids && personDetail.recent_session_ids.length" style="margin-bottom:10px">
+        <span class="muted" style="font-size:var(--fs-xs)">最近互动</span>
+        <span v-for="sid in personDetail.recent_session_ids" :key="sid" class="chip" style="cursor:pointer; margin-left:4px"
+              @click="jumpToSession(sid)" title="在时间线打开该录音">🎤</span>
+      </div>
+
+      <!-- 分组属性区（后端已按 GroupOrder 分组、只含 active+pending） -->
+      <div v-for="g in personDetail.groups" :key="g.group" style="margin-bottom:12px">
+        <div class="muted" style="font-weight:600; margin-bottom:4px">{{ g.group }}</div>
+        <div v-for="a in g.attrs" :key="a.id" class="seg">
+          <div class="seg-text">
+            <div>
+              {{ a.attr_key }}：<b>{{ a.value_text }}</b>
+              <span class="chip"
+                    :style="a.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ a.source === 'llm' ? 'AI' : '人工' }}</span>
+              <span class="chip">{{ (a.confidence * 100).toFixed(0) }}%</span>
+              <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ epiText(a.epistemic_type) }}</span>
+              <span v-if="a.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+            </div>
+          </div>
+          <div style="display:flex; gap:4px; flex-shrink:0">
+            <template v-if="editingAttr && editingAttr.id === a.id">
+              <input class="txt inline" v-model="editingAttr.value" @keyup.enter="commitEditAttr" @keyup.esc="editingAttr=null">
+              <button class="btn primary" style="padding:6px 12px" @click="commitEditAttr">存</button>
+              <button class="btn mini" @click="editingAttr=null">取消</button>
+            </template>
+            <template v-else-if="deletingAttrId === a.id">
+              <span class="muted">删除？</span>
+              <button class="btn mini danger" @click="confirmDeleteAttr">确认</button>
+              <button class="btn mini" @click="deletingAttrId=null">取消</button>
+            </template>
+            <template v-else>
+              <button v-if="a.status !== 'pending'" class="btn mini" @click="startEditAttr(a)" title="改值（旧行留痕）">✎</button>
+              <button class="btn mini" @click="showAttrHistory(a)" title="修改历史">⟲</button>
+              <button class="btn mini danger" @click="askDeleteAttr(a)" title="删除">🗑</button>
+            </template>
+          </div>
+        </div>
+      </div>
+      <div v-if="!personDetail.groups || !personDetail.groups.length" class="muted" style="margin-bottom:12px">暂无属性。</div>
+
+      <!-- 关系区 -->
+      <div v-if="personDetail.relationships && personDetail.relationships.length" style="margin-bottom:12px">
+        <div class="muted" style="font-weight:600; margin-bottom:4px">关系</div>
+        <div v-for="rel in personDetail.relationships" :key="rel.id" class="seg">
+          <div class="seg-text">
+            <div>
+              <b>{{ rel.relation_type }}</b>
+              <span v-if="rel.related_person_id" class="muted"> → {{ personNameOf(rel.related_person_id) }}</span>
+              <span v-if="rel.org_name" class="muted"> · {{ rel.org_name }}</span>
+              <span v-if="rel.label" class="muted"> · {{ rel.label }}</span>
+              <span v-if="rel.direction" class="muted"> · {{ rel.direction }}</span>
+              <span v-if="rel.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+            </div>
+          </div>
+          <div style="display:flex; gap:4px; flex-shrink:0">
+            <template v-if="deletingRelId === rel.id">
+              <span class="muted">删除？</span>
+              <button class="btn mini danger" @click="confirmDeleteRel">确认</button>
+              <button class="btn mini" @click="deletingRelId=null">取消</button>
+            </template>
+            <button v-else class="btn mini danger" @click="askDeleteRel(rel)" title="删除关系">🗑</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 大事记（按年分组，时间倒序；与属性/关系互补：属性记「有过的」，大事记记「某次发生的」） -->
+      <div v-if="personDetail.events && personDetail.events.length" style="margin-bottom:12px">
+        <div class="muted" style="font-weight:600; margin-bottom:4px">大事记</div>
+        <div v-for="g in eventsByYear" :key="g.year" style="margin-bottom:8px">
+          <div class="muted" style="font-size:var(--fs-xs); margin:4px 0">{{ g.year }}</div>
+          <div v-for="ev in g.items" :key="ev.id" class="seg">
+            <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ ev.event_type }}</span>
+            <div class="seg-text">
+              <div>
+                <b>{{ ev.title }}</b>
+                <span class="muted"> · {{ fmtEventDate(ev.occurred_at, g.year === '时间未知') }}</span>
+                <span v-if="ev.end_at" class="muted"> 至 {{ fmtEventDate(ev.end_at, g.year === '时间未知') }}</span>
+                <span v-if="ev.location" class="muted"> · {{ ev.location }}</span>
+                <span v-if="ev.related_person_ids && ev.related_person_ids.length" class="muted"> · 与 {{ ev.related_person_ids.map(id => personNameOf(id)).join('、') }} 同行/同场</span>
+                <span class="chip" :style="ev.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ ev.source === 'llm' ? 'AI' : '人工' }}</span>
+                <span v-if="ev.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+              </div>
+              <div v-if="ev.description" class="muted" style="font-size:var(--fs-xs)">{{ ev.description }}</div>
+            </div>
+            <div style="display:flex; gap:4px; flex-shrink:0">
+              <template v-if="deletingEventId === ev.id">
+                <span class="muted">删除？</span>
+                <button class="btn mini danger" @click="confirmDeleteEvent">确认</button>
+                <button class="btn mini" @click="deletingEventId=null">取消</button>
+              </template>
+              <button v-else class="btn mini danger" @click="askDeleteEvent(ev)" title="删除事件">🗑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 加事件表单 -->
+      <div class="card sunken" v-if="showAddEvent" style="margin-bottom:10px">
+        <div class="kv" style="margin-bottom:8px"><b>加大事记</b><button class="btn-link" @click="toggleAddEvent">✕</button></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+          <select class="txt" v-model="addEventForm.event_type" style="min-width:100px">
+            <option value="" disabled>事件类型</option>
+            <option v-for="t in EVENT_TYPES" :key="t" :value="t">{{ t }}</option>
+          </select>
+          <input class="txt" v-model="addEventForm.title" placeholder="标题（如 去云南旅游一周）*" style="flex:1; min-width:140px">
+          <input class="txt" v-model="addEventForm.occurred_at" type="date" title="发生日期" style="width:auto; min-width:130px">
+          <input class="txt" v-model="addEventForm.end_at" type="date" title="结束日期（旅行/会议等跨天事件）" style="width:auto; min-width:130px">
+          <input class="txt" v-model="addEventForm.location" placeholder="地点（可空）" style="flex:1; min-width:100px">
+          <select class="txt" v-model="addEventForm.related_person_id" style="min-width:120px" title="同场主要人物">
+            <option value="">（同行人物，可空）</option>
+            <option v-for="p in persons.filter(x => x.id !== personDetail.person.id)" :key="p.id" :value="p.id">{{ p.display_name }}</option>
+          </select>
+          <button class="btn primary" :disabled="addingEvent" @click="submitAddEvent">{{ addingEvent ? '保存中…' : '保存' }}</button>
+        </div>
+        <input class="txt" v-model="addEventForm.description" placeholder="细节（可空）" style="width:100%; margin-top:8px">
+        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；日期可选，只知道大概时间可留空。</div>
+      </div>
+
+      <!-- 加属性表单 -->
+      <div class="card sunken" v-if="showAddAttr" style="margin-bottom:10px">
+        <div class="kv" style="margin-bottom:8px"><b>加属性</b><button class="btn-link" @click="toggleAddAttr">✕</button></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap">
+          <input class="txt" list="attr-keys" v-model="addAttrForm.attr_key" placeholder="属性 key（如 occupation）" style="flex:1; min-width:140px">
+          <datalist id="attr-keys">
+            <option v-for="k in ATTR_KEYS" :key="k" :value="k"></option>
+          </datalist>
+          <input class="txt" v-model="addAttrForm.value" placeholder="值（如 后端工程师）" style="flex:1; min-width:140px">
+          <button class="btn primary" :disabled="addingAttr" @click="submitAddAttr">{{ addingAttr ? '保存中…' : '保存' }}</button>
+        </div>
+        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">手动添加立即生效（来源=人工 · 置信度 100%）；单值属性重复添加 = 改值，旧值留痕可查历史。</div>
+      </div>
+
+      <!-- 加关系表单 -->
+      <div class="card sunken" v-if="showAddRel" style="margin-bottom:10px">
+        <div class="kv" style="margin-bottom:8px"><b>加关系</b><button class="btn-link" @click="toggleAddRel">✕</button></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+          <select class="txt" v-model="addRelForm.relation_type" style="min-width:100px">
+            <option value="" disabled>关系类型</option>
+            <option v-for="t in RELATION_TYPES" :key="t" :value="t">{{ t }}</option>
+          </select>
+          <span class="muted">→</span>
+          <select class="txt" v-model="addRelForm.related_person_id" style="min-width:140px">
+            <option value="">（对端人物，可空）</option>
+            <option v-for="p in persons.filter(x => x.id !== personDetail.person.id)" :key="p.id" :value="p.id">{{ p.display_name }}</option>
+          </select>
+          <input class="txt" v-model="addRelForm.label" placeholder="称呼（如 老婆/大儿子，可空）" style="flex:1; min-width:120px">
+          <select class="txt" v-model="addRelForm.direction" style="min-width:100px">
+            <option value="">（上下游，可空）</option>
+            <option v-for="d in DIRECTIONS" :key="d" :value="d">{{ d }}</option>
+          </select>
+          <input class="txt" v-model="addRelForm.org_name" placeholder="组织名（组织关系用，可空）" style="flex:1; min-width:120px">
+          <button class="btn primary" :disabled="addingRel" @click="submitAddRel">{{ addingRel ? '保存中…' : '保存' }}</button>
+        </div>
+        <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">对端人物可空（组织关系只填组织名）；手动添加立即生效（来源=人工 · 置信度 100%）。</div>
+      </div>
+
+      <!-- 修改历史抽屉 -->
+      <div class="card sunken" v-if="attrHistory" style="margin-bottom:10px">
+        <div class="kv" style="margin-bottom:8px">
+          <b>「{{ attrHistory.attr_key }}」修改历史</b>
+          <button class="btn-link" @click="attrHistory=null">✕</button>
+        </div>
+        <div v-if="attrHistoryLoading" class="muted">加载中…</div>
+        <template v-else>
+          <div v-for="h in attrHistory.items" :key="h.id" class="seg">
+            <span class="chip"
+                  :style="h.changed_by === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">
+              {{ h.changed_by === 'llm' ? 'AI' : '人工' }} · {{ changeText(h.change_type) }}
+            </span>
+            <div class="seg-text">
+              <div>
+                <template v-if="h.old_value && h.new_value">{{ snapText(h.old_value) }} → <b>{{ snapText(h.new_value) }}</b></template>
+                <template v-else-if="h.new_value"><b>{{ snapText(h.new_value) }}</b></template>
+                <template v-else-if="h.old_value">删除了 {{ snapText(h.old_value) }}</template>
+              </div>
+              <div class="muted" style="font-size:var(--fs-xs)">{{ fmtTime(h.created_at) }}<span v-if="h.note"> · {{ h.note }}</span></div>
+            </div>
+          </div>
+          <div v-if="!attrHistory.items.length" class="muted">无历史记录。</div>
+        </template>
+      </div>
+
+      <div class="edit-actions">
+        <button class="btn mini" @click="toggleAddAttr">{{ showAddAttr ? '收起加属性' : '＋ 加属性' }}</button>
+        <button class="btn mini" @click="toggleAddRel">{{ showAddRel ? '收起加关系' : '＋ 加关系' }}</button>
+        <button class="btn mini" @click="toggleAddEvent">{{ showAddEvent ? '收起加大事记' : '＋ 加大事记' }}</button>
       </div>
     </div>
   </div>
@@ -1357,6 +1754,6 @@
   </div>
 </div>
 
-<script src="/app/app.ce84e132.js"></script>
+<script src="/app/app.dd75bf1e.js"></script>
 </body>
 </html>

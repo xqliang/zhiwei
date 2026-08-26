@@ -22,7 +22,12 @@ AI 全时生活记忆与个人智能体的云端服务。当前为 **Sprint 0-1*
   - `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`（`ZW_ASR_PROVIDER=file` 时必填，火山引擎 TOS 对象存储，文件 ASR 需上传音频换公网 URL；可放 `.env`）
   - `ZW_ASR_PROVIDER`（`file` 默认｜`realtime`；file 走 StepFun 异步文件 ASR 原生 diarization+ms 时间戳更准，realtime 走 WSS + prompt diarization 免 TOS）
   - `ZW_VOICEPRINT_SIDECAR_URL`（声纹 sidecar 地址，默认 `http://127.0.0.1:8010`）
-  - `ZW_VOICEPRINT_THRESHOLD`（1:N 余弦匹配阈值，默认 `0.5`，需用真实录音 benchmark 实调）
+  - `ZW_VOICEPRINT_THRESHOLD`（1:N 余弦匹配阈值，默认 `0.8`，需用真实录音 benchmark 实调）
+  - `ZW_NAME_INFER_WINDOW_MIN`（说话人名字推断回看窗口，分钟，默认 `10`）
+  - `ZW_NAME_INFER_MAX_SEGMENTS`（名字推断上下文段数上限，默认 `400`）
+  - `ZW_PROFILE_AUTO_CONFIDENCE`（画像 LLM 抽取自动写入的置信阈值，默认 `0.75`）
+  - `ZW_PROFILE_EXTRACT_ENABLED`（是否启用画像抽取流水线阶段，默认 `true`）
+  - `ZW_PROFILE_EXTRACT_WINDOW`（画像抽取窗口大小，默认 `10`）
 
 ## 快速开始
 
@@ -42,7 +47,7 @@ make sidecar-start
 # 4. 起服务（会读取 .env 里的密钥）
 set -a; source .env; set +a
 make dev
-# 打开 http://localhost:8080 —— 时间线 / 录音 两个标签页
+# 打开 http://localhost:8080 —— 时间线 / 录音 / 声纹 / 人物 / 主题 / 记忆 / 待办 标签页
 ```
 
 > 启动顺序：MySQL → 声纹 sidecar → 服务。sidecar 未起时转写仍可用，但说话人解析 stage 会失败重试（不丢转写）。
@@ -91,8 +96,21 @@ GET/PATCH /api/memories      记忆列表（type/topic_id 过滤）/ 修正与�
 GET/PATCH /api/todos         待办列表 / 状态流转（确认/完成/忽略）
 GET/POST/PATCH /api/topics   主题计数列表 / 新建 / 确认/改名/忽略
 GET/POST/PATCH/DELETE /api/speakers  说话人名册 / 录入声纹(multipart file+name) / 改名 / 删除
+DELETE /api/speakers/{id}/name-candidates?name=…   忽略单个建议名字候选
 GET  /api/sessions/{id}/speakers     会话内已解析说话人列表（面板用）
 PATCH /api/sessions/{id}/segments/{seg}/speaker  单段换人（手动纠正说话人）
+GET/POST         /api/persons                        人物名册（含 pending 计数）/ 新建
+GET/PATCH/DELETE /api/persons/{id}                   详情（分组属性+关系+最近互动）/ 改名·换绑声纹 / 归档
+POST             /api/persons/{id}/attributes        手动加属性（source=manual, conf=1.0）
+PATCH/DELETE     /api/persons/{id}/attributes/{aid}  手动改值（supersede）/ 删除
+POST             /api/persons/{id}/relationships     手动加关系（配偶/子女/上下游/组织…）
+DELETE           /api/persons/{id}/relationships/{rid}
+GET              /api/persons/{id}/history           修改历史（?entity_kind=&attr_key= 过滤）
+GET/POST         /api/persons/{id}/events             大事记列表（?status= 过滤）/ 手动新增
+DELETE           /api/persons/{id}/events/{eid}       删除事件（软删 dismissed）
+GET              /api/profile/pending                确认队列（属性/关系/人物/大事记 pending 并集）
+POST             /api/profile/pending/{kind}/{id}/confirm|dismiss   确认/放弃
+POST             /api/profile/extract                画像抽取/回填（可带 session_id；默认最近 50 个 completed）
 ```
 
 ## 项目结构
@@ -101,6 +119,7 @@ PATCH /api/sessions/{id}/segments/{seg}/speaker  单段换人（手动纠正说�
 cmd/zhiwei-server/   服务入口（HTTP API + 异步 worker 同进程）
 internal/api/        REST handler
 internal/pipeline/   任务状态机 + worker 池 + 各处理阶段
+internal/profile/    用户画像（人物系统）领域逻辑：属性目录/抽取/闸门/确认队列
 internal/provider/   AI 能力抽象（ASR / LLM / Embedding，可替换实现）
 internal/repo/       MySQL DAO（sqlx）
 internal/ids/        雪花 ID（JSON 序列化为字符串）
@@ -116,6 +135,11 @@ scripts/e2e.sh       e2e 冒烟脚本
 上传/录音 → data/uploads 落盘 + audio_session/pipeline_job 入库
   → [worker 池] asr 阶段：ffmpeg 转 wav16k → ASR → transcript/segments 落库
   → [worker 池] segment 阶段：汇总全文
+  → [worker 池] speaker 阶段：声纹 1:N 解析说话人 → 回填 segment.speaker_id
+  → [worker 池] speakername 阶段：LLM 推断说话人名字（尽力而为，失败不阻塞）
+  → [worker 池] extract 阶段：LLM 抽取记忆/待办/主题
+  → [worker 池] profile 阶段：对话块 → LLM 抽取画像事实 → 置信闸门落库
+    （高置信直接生效，低置信/冲突进确认队列 /api/profile/pending）
   → session 置 completed，时间线可查看
 ```
 

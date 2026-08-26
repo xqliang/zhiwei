@@ -56,6 +56,15 @@ type Config struct {
 	DSHSystemPrompt   string // DSH_SYSTEM_PROMPT：dsh 进程级人设
 	AgentRetrieveTopK int    // ZW_AGENT_RETRIEVE_TOPK：上下文头检索种子条数
 	ReviewDailyCron   string // ZW_REVIEW_DAILY_CRON：日报定时
+
+	// ---- speakername stage（名字推断，main 合入）----
+	NameInferWindowMin   int // 名字推断上下文回看窗口（分钟，ZW_NAME_INFER_WINDOW_MIN，默认 10）
+	NameInferMaxSegments int // 名字推断上下文段数上限（ZW_NAME_INFER_MAX_SEGMENTS，默认 400）
+
+	// ---- profile stage（用户画像 P1）----
+	ProfileAutoConfidence float64 // ZW_PROFILE_AUTO_CONFIDENCE：LLM 抽取自动写入 active 的置信阈值（默认 0.75）
+	ProfileExtractEnabled bool    // ZW_PROFILE_EXTRACT_ENABLED：是否启用 profile 流水线阶段（默认 true）
+	ProfileExtractWindow  int     // ZW_PROFILE_EXTRACT_WINDOW：抽取窗口大小（对话块数，默认 10）
 }
 
 func getenv(k, def string) string {
@@ -104,7 +113,7 @@ func Load() (*Config, error) {
 		StepFunASRModel:      getenv("ZW_STEPFUN_ASR_MODEL", "stepaudio-2.5-asr"),
 		ASRProvider:          getenv("ZW_ASR_PROVIDER", "file"),
 		VoiceprintSidecarURL: getenv("ZW_VOICEPRINT_SIDECAR_URL", "http://127.0.0.1:8010"),
-		VoiceprintThreshold:  getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.5),
+		VoiceprintThreshold:  getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.8),
 		EnrollMinDurationMS:  int64(getenvInt("ZW_ENROLL_MIN_DURATION_MS", 3000)),
 
 		// ---- Agent / Chatbot ----
@@ -117,6 +126,15 @@ func Load() (*Config, error) {
 		DSHSystemPrompt:   getenv("DSH_SYSTEM_PROMPT", "你是知微(zhiwei)个人智能体，基于用户的记忆/时间线/话题/待办用简体中文亲切、简洁地回答；需要时调用工具读取用户数据，不要编造。"),
 		AgentRetrieveTopK: getenvInt("ZW_AGENT_RETRIEVE_TOPK", 10),
 		ReviewDailyCron:   getenv("ZW_REVIEW_DAILY_CRON", "0 22 * * *"),
+
+		// ---- speakername stage ----
+		NameInferWindowMin:   getenvInt("ZW_NAME_INFER_WINDOW_MIN", 10),
+		NameInferMaxSegments: getenvInt("ZW_NAME_INFER_MAX_SEGMENTS", 400),
+
+		// ---- profile stage ----
+		ProfileAutoConfidence: getenvFloat("ZW_PROFILE_AUTO_CONFIDENCE", 0.75),
+		ProfileExtractEnabled: getenvBool("ZW_PROFILE_EXTRACT_ENABLED", true),
+		ProfileExtractWindow:  getenvInt("ZW_PROFILE_EXTRACT_WINDOW", 10),
 	}, nil
 }
 

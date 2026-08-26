@@ -17,6 +17,7 @@ import (
 	"zhiwei/internal/ids"
 	"zhiwei/internal/memory"
 	"zhiwei/internal/pipeline"
+	"zhiwei/internal/profile"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
 	"zhiwei/internal/review"
@@ -27,6 +28,9 @@ import (
 // promptPath 是抽取 prompt 的版本化文件路径；版本号 = 去掉扩展名的文件名
 // （如 extraction_v1），运行时从文件名推导并写进 job.trace。
 const promptPath = "prompts/extraction_v3.md"
+
+// nameInferPromptPath 说话人名字推断 prompt（speakername stage 用，版本号见文件名）。
+const nameInferPromptPath = "prompts/speaker_naming_v1.md"
 
 func main() {
 	cfg, err := config.Load()
@@ -62,6 +66,17 @@ func main() {
 	speakers := &repo.SpeakerRepo{DB: db}
 	reviews := &repo.ReviewRepo{DB: db}
 	topicStatuses := &repo.TopicStatusRepo{DB: db}
+	nameCandidates := &repo.SpeakerNameCandidateRepo{DB: db}
+
+	persons := &repo.PersonRepo{DB: db}
+	personAttrs := &repo.PersonAttributeRepo{DB: db}
+	personRels := &repo.PersonRelationshipRepo{DB: db}
+	personEvents := &repo.PersonEventRepo{DB: db}
+	personLogs := &repo.PersonChangeLogRepo{DB: db}
+	// 画像回填：owner「我」+ speaker→person（幂等，见 repo.EnsurePersonBootstrap）
+	if err := repo.EnsurePersonBootstrap(context.Background(), persons, speakers); err != nil {
+		log.Fatal("画像 bootstrap 失败: ", err)
+	}
 
 	// 抽取 prompt（版本化文件，运行时读取；版本号见文件名与文件首行）
 	promptBytes, err := os.ReadFile(promptPath)
@@ -101,6 +116,19 @@ func main() {
 		log.Fatal("读取对话转记忆 prompt 失败: ", err)
 	}
 
+	// 说话人名字推断 prompt（版本化文件，speakername stage 用）
+	nameInferBytes, err := os.ReadFile(nameInferPromptPath)
+	if err != nil {
+		log.Fatal("读取名字推断 prompt 失败: ", err)
+	}
+
+	// 画像抽取 prompt（版本化文件；版本号见文件名）
+	profilePromptBytes, err := os.ReadFile("prompts/profile_extraction_v2.md")
+	if err != nil {
+		log.Fatal("读取画像抽取 prompt 失败: ", err)
+	}
+	profilePromptVersion := strings.TrimSuffix(filepath.Base("prompts/profile_extraction_v2.md"), ".md")
+
 	// pipeline 装配：ASR 默认 file（StepFun 异步文件 ASR，原生 diarization + ms 时间戳）。
 	// ZW_ASR_PROVIDER=realtime 切回 WebSocket 方案（免 TOS、靠 prompt diarization）。
 	// File ASR 需 TOS 上传音频换公网 URL + STEPFUN_ASR_FILE_API_KEY。
@@ -126,7 +154,6 @@ func main() {
 	}
 	voiceprintCli := voiceprint.NewClient(cfg.VoiceprintSidecarURL)
 	llm := provider.NewArkLLM(cfg.ARKBaseURL, cfg.ARKAPIKey)
-
 	// Agent / 报告共用模型：ZW_AGENT_MODEL 优先，未配则回退强模型（见 config §14）。
 	agentModel := cfg.AgentModel
 	if agentModel == "" {
@@ -140,6 +167,14 @@ func main() {
 		string(reviewWeeklyBytes), "review_weekly_v1",
 		string(topicStatusBytes), "topic_status_v1",
 		reviews, topicStatuses, memories, todos, topics, sessions, transcripts)
+	profileSvc := &profile.Service{
+		DB: db, Sessions: sessions, Transcripts: transcripts, Memories: memories,
+		Speakers: speakers, Persons: persons, Attributes: personAttrs,
+		Relationships: personRels, Events: personEvents, ChangeLogs: personLogs,
+		LLM: llm, Model: cfg.LLMFastModel, Prompt: string(profilePromptBytes),
+		PromptVersion: profilePromptVersion,
+		Window:        cfg.ProfileExtractWindow, Gate: profile.GateConfig{AutoConf: cfg.ProfileAutoConfidence},
+	}
 	stages := pipeline.BuildStages(pipeline.StageDeps{
 		Sessions: sessions, Transcripts: transcripts, ASR: asr, DataDir: cfg.DataDir,
 		DB: db, Memories: memories, Todos: todos, Topics: topics,
@@ -150,8 +185,18 @@ func main() {
 		ExtractWindow: cfg.ExtractWindow,
 		Gate:          memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
 		Voiceprint:    voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
+		NameInferPrompt:       string(nameInferBytes),
+		SpeakerNameCandidates: nameCandidates,
+		NameInferWindowMin:    cfg.NameInferWindowMin,
+		NameInferMaxSegments:  cfg.NameInferMaxSegments,
+		Profile:               profileSvc,
 	})
-	flow := pipeline.Flow{Stages: []string{"asr", "segment", "speaker", "extract"}}
+	// profile stage 按开关追加（ZW_PROFILE_EXTRACT_ENABLED=false 时仅手动+回填端点）
+	stagesList := []string{"asr", "segment", "speaker", "speakername", "extract"}
+	if cfg.ProfileExtractEnabled {
+		stagesList = append(stagesList, "profile")
+	}
+	flow := pipeline.Flow{Stages: stagesList}
 	pool := pipeline.NewPool(jobs, flow, stages)
 	pool.OnDone(func(ctx context.Context, sid ids.ID) {
 		_ = sessions.UpdateStatus(ctx, sid, "completed")
@@ -172,12 +217,14 @@ func main() {
 	api.RegisterQuery(r, &api.QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,
+		SpeakerNameCandidates: nameCandidates,
 	})
 	api.RegisterSpeaker(r, &api.SpeakerHandler{
 		Speakers: speakers, Transcripts: transcripts,
 		Voiceprint: voiceprintCli, DataDir: cfg.DataDir,
-		EnrollMinDurationMS: cfg.EnrollMinDurationMS,
-		VoiceprintThreshold: cfg.VoiceprintThreshold,
+		EnrollMinDurationMS:   cfg.EnrollMinDurationMS,
+		VoiceprintThreshold:   cfg.VoiceprintThreshold,
+		SpeakerNameCandidates: nameCandidates,
 	})
 	api.RegisterMemory(r, &api.MemoryHandler{
 		Memories: memories, Topics: topics, MemoryTopics: memoryTopics,
@@ -190,6 +237,10 @@ func main() {
 	})
 	// 报告 API：/api/reviews/daily|weekly（取最新或生成/强制重生）+ /api/topics/{id}/status。
 	api.RegisterReviews(r, reviewer)
+	api.RegisterPerson(r, &api.PersonHandler{
+		Persons: persons, Attributes: personAttrs, Relationships: personRels,
+		Events: personEvents, ChangeLogs: personLogs, Service: profileSvc,
+	})
 
 	// MCP 工具端点（仅供本机 dsh 边车经 streamable-http 连回；不对外）。
 	// 进程内运行、复用上面已开库的 repo 实例（同一个 DB 池）。

@@ -13,6 +13,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/bin/zhiwei-server"
 PID_FILE="$ROOT/.run/dev.pid"
 LOG_FILE="$ROOT/logs/dev.log"
+# 先 source .env 再取 ZW_PORT——端口预检/启动都要用正确端口，且 .env 里可
+# 覆盖端口（如与本机其它服务共机让出 8080）。放顶部保证所有命令生效。
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/.env"
+  set +a
+fi
 # 与 internal/config 保持一致：ZW_PORT 默认 8080
 PORT="${ZW_PORT:-8080}"
 
@@ -42,6 +50,13 @@ running_pid() {
   echo "$pid"
 }
 
+# 输出监听服务端口的进程行（lsof 一行）；无监听返回空。
+# 用途：start 前端口预检——端口被非本脚本管理的进程占用时，新进程会 bind 失败
+# 秒退，而健康检查会打到占用进程上「假成功」，必须提前拦下并报出占用者。
+port_listener() {
+  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | tail -n +2 | head -n 1
+}
+
 cmd_start() {
   # 1) 防重复启动
   local pid
@@ -51,13 +66,18 @@ cmd_start() {
   fi
   rm -f "$PID_FILE" # 清理陈旧 PID 文件
 
-  # 2) 环境变量预检：服务不自己读 .env，这里统一 source 后校验必需密钥
-  if [ -f "$ROOT/.env" ]; then
-    set -a
-    # shellcheck disable=SC1091
-    . "$ROOT/.env"
-    set +a
+  # 1.5) 端口预检：走到这里说明本脚本没在管任何进程，端口若被监听就是「野」进程
+  #（如手动起的 bin/zhiwei-server）。此时启动必然 bind 失败，且健康检查会打到
+  # 野进程上假成功——提前报出占用者让用户处理（kill 或换 ZW_PORT）。
+  local listener
+  if listener="$(port_listener)"; then
+    echo "错误: 端口 $PORT 已被其它进程占用（非本脚本管理，dev-stop 停不掉）:" >&2
+    echo "  $listener" >&2
+    echo "请先 kill 该进程（kill <PID>），或用 ZW_PORT 环境变量换端口。" >&2
+    exit 1
   fi
+
+  # 2) 环境变量预检：.env 已在脚本顶部 source（ZW_PORT 等全局生效），这里只校验必需密钥
   if [ -z "${ARK_API_KEY:-}" ]; then
     echo "错误: ARK_API_KEY 未设置（LLM 必需）。请在项目根目录 .env 中配置后重试。" >&2
     exit 1
@@ -80,10 +100,19 @@ cmd_start() {
   pid=$!
   echo "$pid" > "$PID_FILE"
 
-  # 5) 健康确认：最多等 5s（10 次 × 0.5s），失败则自动回滚
+  # 5) 健康确认：最多等 5s（10 次 × 0.5s），失败则自动回滚。
+  #    每轮先校验我们起的进程还活着——bind 失败等启动即崩的场景（预检漏网时），
+  #    若端口上有别的进程，curl 会打到旧进程上「假成功」，必须先排除。
   printf '等待健康检查 http://localhost:%s/api/health ...' "$PORT"
   local i
   for i in $(seq 1 10); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo
+      echo "错误: 进程 (PID $pid) 启动后即退出（端口冲突/配置错误等），最近 20 行日志：" >&2
+      tail -n 20 "$LOG_FILE" >&2
+      rm -f "$PID_FILE"
+      exit 1
+    fi
     if curl -sf "http://localhost:$PORT/api/health" >/dev/null 2>&1; then
       echo
       echo "启动成功 (PID $pid)"

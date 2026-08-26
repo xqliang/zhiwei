@@ -1,7 +1,9 @@
 """声纹 sidecar：WeSpeaker 提向量 + FAISS 1:N。
 契约见 spec §6.1:
   POST /embed   {audio_path}          -> {vector:[256 float]}
-  POST /search  {vector}              -> {speaker_id, distance, matched:true} | {matched:false}
+  POST /search  {vector}              -> {speaker_id, distance, second_distance, matched:true} | {matched:false}
+      second_distance = top-2 相似度（库中向量 <2 个时为 0）。
+      Go 侧用它做「区分性弱命中」两级判定（top1≥阈值 或 top1≥0.72 且 top1−top2≥0.6）。
   POST /add     {vector, speaker_id}  -> {ok:true}     幂等：先 remove 再 add
   POST /remove  {speaker_id}          -> {ok:true}
   GET  /health                          -> {status, model, n_vectors}
@@ -41,11 +43,12 @@ class _NumpyIndex:
         self.ids: list[int] = []
 
     def search(self, q: np.ndarray):
+        """top-2 检索：返回 [(id, sim), ...]（1 或 2 项）；空索引返回 None。"""
         if not self.vecs:
             return None
         sims = np.stack(self.vecs) @ q
-        i = int(np.argmax(sims))
-        return self.ids[i], float(sims[i])
+        order = np.argsort(-sims)[:2]
+        return [(self.ids[int(i)], float(sims[int(i)])) for i in order]
 
     def remove(self, sid: int) -> None:
         keep = [k for k, _id in enumerate(self.ids) if _id != sid]
@@ -111,10 +114,14 @@ def _to_vec(arr) -> np.ndarray:
 
 
 def _search_faiss(q: np.ndarray):
-    D, I = _index.search(q.reshape(1, -1), 1)
+    """top-2 检索：返回 [(id, sim), ...]（1 或 2 项）；空索引返回 None。"""
+    D, I = _index.search(q.reshape(1, -1), 2)
     if I[0][0] == -1:
         return None
-    return int(I[0][0]), float(D[0][0])
+    out = [(int(I[0][0]), float(D[0][0]))]
+    if I[0][1] != -1:
+        out.append((int(I[0][1]), float(D[0][1])))
+    return out
 
 
 class EmbedReq(BaseModel):
@@ -156,8 +163,10 @@ def search(req: VecReq) -> dict:
         res = _search_faiss(q)
     if res is None:
         return {"matched": False}
-    sid, dist = res
-    return {"speaker_id": sid, "distance": dist, "matched": True}
+    sid, dist = res[0]
+    # top-2 相似度（库中向量 <2 个时为 0）：Go 侧区分性弱命中规则用
+    second = res[1][1] if len(res) > 1 else 0.0
+    return {"speaker_id": sid, "distance": dist, "second_distance": second, "matched": True}
 
 
 @app.post("/add")

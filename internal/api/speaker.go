@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"os"
@@ -26,7 +28,52 @@ type SpeakerHandler struct {
 	Voiceprint          voiceprint.Client
 	DataDir             string
 	EnrollMinDurationMS int64   // 从转写段音频录入声纹的最小时长（ms，0→兜底 3000）
-	VoiceprintThreshold float64 // 1:N 余弦匹配阈值（match 预览判定+展示用，0→兜底 0.5）
+	VoiceprintThreshold float64 // 1:N 余弦匹配阈值（match 预览判定+展示用，0→兜底 0.8）
+
+	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // 名字候选 repo（nil = 不富化/不清理，兼容旧装配）
+}
+
+// NameCandidateView 前端展示的候选名：名称 + 置信度数值（硬性要求：用户确认时
+// 必须能看到名称和置信度值）+ 依据。倒排。
+type NameCandidateView struct {
+	Name       string  `json:"name"`
+	Confidence float64 `json:"confidence"`
+	Evidence   string  `json:"evidence,omitempty"`
+}
+
+// speakerWithCandidates speaker + 候选名列表（名册/面板富化视图）。
+type speakerWithCandidates struct {
+	repo.Speaker
+	NameCandidates []NameCandidateView `json:"name_candidates"`
+}
+
+// attachCandidates 为说话人列表批量附候选名（一次查询避免 N+1）。
+// repo 未装配时返回全空候选；查询失败降级为空候选（富化仅影响建议展示，不阻断列表）。
+func (h *SpeakerHandler) attachCandidates(ctx context.Context, list []repo.Speaker) []speakerWithCandidates {
+	out := make([]speakerWithCandidates, len(list))
+	spIDs := make([]ids.ID, len(list))
+	idx := make(map[ids.ID]int, len(list))
+	for i, sp := range list {
+		out[i] = speakerWithCandidates{Speaker: sp, NameCandidates: []NameCandidateView{}}
+		spIDs[i] = sp.ID
+		idx[sp.ID] = i
+	}
+	if h.SpeakerNameCandidates == nil || len(list) == 0 {
+		return out
+	}
+	cands, err := h.SpeakerNameCandidates.ListBySpeakers(ctx, spIDs)
+	if err != nil {
+		log.Printf("[speaker] 候选名富化失败: %v", err)
+		return out // 降级：无候选展示
+	}
+	for _, c := range cands {
+		if i, ok := idx[c.SpeakerID]; ok {
+			out[i].NameCandidates = append(out[i].NameCandidates, NameCandidateView{
+				Name: c.Name, Confidence: c.Confidence, Evidence: c.Evidence,
+			})
+		}
+	}
+	return out
 }
 
 // RegisterSpeaker 挂载说话人相关路由。
@@ -35,23 +82,25 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Post("/api/speakers", h.Enroll)
 	r.Patch("/api/speakers/{id}", h.Rename)
 	r.Delete("/api/speakers/{id}", h.Delete)
-	r.Post("/api/speakers/merge", h.Merge)           // 声纹页「手动合并」：多说话人并入一个目标
-	r.Get("/api/speakers/{id}/segments", h.Segments) // 该说话人跨 session 出现的片段（声纹 tab 点开看关联录音）
+	r.Delete("/api/speakers/{id}/name-candidates", h.DeleteNameCandidate) // 忽略单个候选名（建议区 ✕）
+	r.Post("/api/speakers/merge", h.Merge)                                // 声纹页「手动合并」：多说话人并入一个目标
+	r.Get("/api/speakers/{id}/segments", h.Segments)                      // 该说话人跨 session 出现的片段（声纹 tab 点开看关联录音）
 	r.Get("/api/sessions/{sid}/speakers", h.SessionSpeakers)
-	r.Patch("/api/sessions/{sid}/segments/{seg}/speaker", h.ReassignSegment)
+	r.Patch("/api/sessions/{sid}/segments/{seg}/speaker", h.ReassignSegment) // 单段换人
+	r.Post("/api/sessions/{sid}/speakers/reassign", h.ReassignSpeakerAll)   // 「切换声纹」：本会话某说话人全部段一键改判
 	r.Post("/api/sessions/{sid}/segments/{seg}/enroll", h.EnrollFromSegment) // timeline「用此段录音纹」：从转写段音频录入新说话人
 	r.Post("/api/sessions/{sid}/segments/merge", h.MergeSegments)            // timeline「合并连续同人段成一条」
 	r.Post("/api/voiceprint/match", h.MatchPreview)                          // 录音页「试匹配」预览：上传音频→提向→1:N→返回相似度+阈值（只读不登记）
 }
 
-// List 全部 active 说话人（管理页/换人下拉用）。
+// List 全部 active 说话人（管理页/换人下拉用）。随机名说话人附 LLM 推断的候选名（倒排）。
 func (h *SpeakerHandler) List(w http.ResponseWriter, r *http.Request) {
 	list, err := h.Speakers.List(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"speakers": list})
+	writeJSON(w, map[string]any{"speakers": h.attachCandidates(r.Context(), list)})
 }
 
 // Segments 该说话人出现的所有片段（跨 session，声纹 tab「点开看关联录音」用）。
@@ -165,6 +214,14 @@ func (h *SpeakerHandler) Rename(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// 改名 = 用户已确认称呼（采纳候选或手动命名）：清空候选——名字不再是随机名，
+	// 后续也不再重跑推断。清空失败不回滚改名（候选残留仅影响建议展示，前端对
+	// 非随机名说话人本就不显示建议区），log 便于排查。
+	if h.SpeakerNameCandidates != nil {
+		if err := h.SpeakerNameCandidates.DeleteBySpeaker(r.Context(), id); err != nil {
+			log.Printf("[speaker] 改名后清候选失败 speaker=%s: %v", id, err)
+		}
+	}
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -182,6 +239,13 @@ func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = h.Speakers.DB.ExecContext(r.Context(),
 		`UPDATE transcript_segment SET speaker_id = NULL WHERE speaker_id = ?`, id.Int64())
+	// 删说话人后清其候选：孤儿候选永不外显（说话人已没了）但会在表里累积，顺手清掉。
+	// best-effort，失败仅 log 不阻断删除（与 Rename 清候选一致；候选残留无副作用）。
+	if h.SpeakerNameCandidates != nil {
+		if err := h.SpeakerNameCandidates.DeleteBySpeaker(r.Context(), id); err != nil {
+			log.Printf("[speaker] 删说话人后清候选失败 speaker=%s: %v", id, err)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -289,10 +353,62 @@ func (h *SpeakerHandler) ReassignSegment(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// EnrollFromSegment timeline「用此段录音纹」：用某转写段对应时间段的音频录入新说话人。
-// 切 transcoded/{sid}.wav 的 [start_ms,end_ms] → sidecar /embed → 登记(enrolled) + /add。
+// ReassignSpeakerAll timeline 说话人 chip「切换声纹」：把本会话内源说话人的全部段
+// 一键改判给目标说话人（纠正声纹/识别错误——单段换人逐段点太繁琐）。
+// 只改本 transcript 段的 speaker_id，不动说话人名册/声纹（错误登记的说话人
+// 可用既有的删除/手动合并处理）。目标必须在名册中存在，防误写悬空 id。
+func (h *SpeakerHandler) ReassignSpeakerAll(w http.ResponseWriter, r *http.Request) {
+	sid, err := ids.ParseID(chi.URLParam(r, "sid"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		FromSpeakerID string `json:"from_speaker_id"`
+		ToSpeakerID   string `json:"to_speaker_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	fromID, err := ids.ParseID(req.FromSpeakerID)
+	if err != nil {
+		http.Error(w, "invalid from_speaker_id", http.StatusBadRequest)
+		return
+	}
+	toID, err := ids.ParseID(req.ToSpeakerID)
+	if err != nil {
+		http.Error(w, "invalid to_speaker_id", http.StatusBadRequest)
+		return
+	}
+	if fromID == toID {
+		http.Error(w, "源与目标声纹相同", http.StatusBadRequest)
+		return
+	}
+	tr, err := h.Transcripts.GetBySession(r.Context(), sid)
+	if err != nil {
+		http.Error(w, "无转写", http.StatusNotFound)
+		return
+	}
+	// 目标必须在名册中存在（防把段指向已删除/不存在的声纹）
+	if _, err := h.Speakers.Get(r.Context(), toID); err != nil {
+		http.Error(w, "目标声纹不存在", http.StatusNotFound)
+		return
+	}
+	updated, err := h.Transcripts.ReassignSpeakerSegments(r.Context(), tr.ID, fromID, toID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "updated": updated})
+}
+
+// EnrollFromSegment timeline「用此段录音纹」：用某转写段对应时间段的音频录入新说话人，
+// 并把该段所属说话人在本会话的全部段一并改判到新说话人。
+// 切 transcoded/{sid}.wav 的 [start_ms,end_ms] → sidecar /embed → 登记(enrolled) + /add → 批量改判。
 // 时长 < EnrollMinDurationMS 拒绝（声纹需足够时长才稳，WeSpeaker LM 对 >3s 更准）。
-// 只创建说话人、不改判段——改判可能误拆已聚类说话人，留给下拉/手动合并；返回新 speaker。
+// 改判口径「按当前显示的说话人」：该段已识别出说话人(speaker_id 非空)→ 改判本 transcript 内同一
+// speaker 的所有段；尚未识别(为空)→ 退回按 ASR 说话人标签分组，回填本 transcript 内同标签的未解析段。
 func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Request) {
 	sid, err := ids.ParseID(chi.URLParam(r, "sid"))
 	if err != nil {
@@ -370,6 +486,22 @@ func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Reques
 		_ = h.Speakers.Delete(r.Context(), sp.ID)
 		http.Error(w, "声纹索引写入失败，请重试", http.StatusInternalServerError)
 		return
+	}
+	// 把该段所属说话人在本会话的全部段一并改判到新录入的说话人（口径见函数注释）。
+	// 走到这里 speaker 已成功登记+入索引：改判失败只返回错误、不回滚新说话人（它是有效声纹，
+	// 用户可用换人下拉补救；不留孤儿）。
+	if seg.SpeakerID != nil {
+		// 已识别：按当前 speaker_id 分组，改判本 transcript 内同一 speaker 的所有段。
+		if _, err := h.Transcripts.ReassignSpeakerInTranscript(r.Context(), tr.ID, *seg.SpeakerID, sp.ID); err != nil {
+			http.Error(w, "改判失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// 未识别：退回按 ASR 说话人标签分组，回填本 transcript 内同标签的未解析段（含本段）。
+		if err := h.Transcripts.SetSegmentSpeaker(r.Context(), tr.ID, seg.SpeakerLabel, sp.ID); err != nil {
+			http.Error(w, "改判失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, sp)
 }
@@ -519,7 +651,7 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	threshold := h.VoiceprintThreshold
 	if threshold == 0 {
-		threshold = 0.5
+		threshold = 0.8
 	}
 	// 列全部 active 说话人，用其灾备 BLOB(与 FAISS 同向量) 逐个算余弦匹配度——
 	// 返回全库按相似度降序（不止 top-1），便于看「这段像库里的每一个谁、各多像」。
@@ -542,7 +674,14 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 		items = append(items, matchItem{SpeakerID: sp.ID.String(), Name: sp.Name, Similarity: cosine(vec, emb)})
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Similarity > items[j].Similarity })
-	matched := len(items) > 0 && items[0].Similarity >= threshold
+	// 命中判定与 speaker stage 同一套两级规则（voiceprint.Matched）：强命中 top1≥阈值；
+	// 或区分性弱命中 top1≥0.72 且明显领先第二名（top1−top2≥0.6）。
+	// 保证「试匹配」预览与实际识别结论一致，避免预览说未达阈值、实际处理却命中。
+	second := 0.0
+	if len(items) > 1 {
+		second = items[1].Similarity
+	}
+	matched := len(items) > 0 && voiceprint.Matched(items[0].Similarity, second, threshold)
 	resp := map[string]any{
 		"matches":     items, // 全库按相似度降序
 		"threshold":   threshold,
@@ -553,6 +692,13 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 		resp["speaker_id"] = items[0].SpeakerID
 		resp["speaker_name"] = items[0].Name
 		resp["similarity"] = items[0].Similarity
+		resp["match_rule"] = map[string]any{ // 命中依据（区分性弱命中时前端可解释为何低于阈值仍命中）
+			"top1":    items[0].Similarity,
+			"top2":    second,
+			"strong":  items[0].Similarity >= threshold, // true=强命中（过阈值）；false=区分性弱命中
+			"soft_min": voiceprint.SoftMin,
+			"gap_min":  voiceprint.GapMin,
+		}
 	}
 	writeJSON(w, resp)
 }
@@ -584,6 +730,52 @@ func cosine(a, b []float32) float64 {
 	return s
 }
 
+// voiceMatch 单条相似声纹（top-N 之一）。
+type voiceMatch struct {
+	SpeakerID  string  `json:"speaker_id"`
+	Name       string  `json:"name"`
+	Similarity float64 `json:"similarity"`
+}
+
+// libVoice 预解码的库内声纹（speaker.Embedding BLOB → []float32，一次解码全库复用，
+// 避免逐段重复 decode）。
+type libVoice struct {
+	id   string
+	name string
+	vec  []float32
+}
+
+// decodeLibrary 把全量说话人的灾备 BLOB 预解码成向量列表（无有效向量的跳过）。
+func decodeLibrary(all []repo.Speaker) []libVoice {
+	lib := make([]libVoice, 0, len(all))
+	for _, sp := range all {
+		if emb, ok := decodeEmbedding(sp.Embedding); ok && len(emb) == 256 {
+			lib = append(lib, libVoice{id: sp.ID.String(), name: sp.Name, vec: emb})
+		}
+	}
+	return lib
+}
+
+// topVoiceMatchesVec 计算某声纹向量与库（预解码列表）的 top-N 相似，降序。
+// 用灾备 BLOB 的余弦（与 FAISS 同向量，结果等价，同 MatchPreview）。
+// 用途：timeline 详情按「每个 ASR 段」展示声纹相似度——一句话可能混多个人，
+// 段级 top-1 不是归属说话人即该段可能被 ASR 切错/归错，可据此换人或切换声纹。
+// vec 非 256 维返回 nil。
+func topVoiceMatchesVec(lib []libVoice, vec []float32, n int) []voiceMatch {
+	if len(vec) != 256 || len(lib) == 0 {
+		return nil
+	}
+	ms := make([]voiceMatch, 0, len(lib))
+	for _, lv := range lib {
+		ms = append(ms, voiceMatch{SpeakerID: lv.id, Name: lv.name, Similarity: cosine(vec, lv.vec)})
+	}
+	sort.SliceStable(ms, func(i, j int) bool { return ms[i].Similarity > ms[j].Similarity })
+	if len(ms) > n {
+		ms = ms[:n]
+	}
+	return ms
+}
+
 // float32BlobAPI 256×float32 → []byte（Little-Endian），存 speaker.embedding 灾备 BLOB。
 // 内联而非 import pipeline（避免 api→pipeline 反向依赖；同 repo.RecomputeFullText 模式）。
 func float32BlobAPI(v []float32) []byte {
@@ -592,4 +784,28 @@ func float32BlobAPI(v []float32) []byte {
 		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(x))
 	}
 	return buf
+}
+
+// DeleteNameCandidate 忽略单个候选名（前端建议区 ✕ 按钮）。
+// ?name= 指定候选名；幂等（不存在也 204）。repo 未装配 501。
+func (h *SpeakerHandler) DeleteNameCandidate(w http.ResponseWriter, r *http.Request) {
+	if h.SpeakerNameCandidates == nil {
+		http.Error(w, "候选名功能未装配", http.StatusNotImplemented)
+		return
+	}
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+	if err := h.SpeakerNameCandidates.DeleteOne(r.Context(), id, name); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

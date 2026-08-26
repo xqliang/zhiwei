@@ -67,6 +67,12 @@ func TestTodoTopicSnapshotUser(t *testing.T) {
 	tp := &TopicRepo{DB: db}
 
 	sid := ids.New()
+	// 跨包隔离：本用例建的 event memory 挂在 sid 上（未显式给 status，插入的是空串 ''，
+	// 仍被 List 的 status!='dismissed' 计入），收尾按 session 删净——否则污染 api 包
+	// TestMemoryListAndFilter 的 type=event 计数（repo→api 逆序跑才暴露）。
+	t.Cleanup(func() {
+		_, _ = mr.DB.ExecContext(context.Background(), `DELETE FROM memory WHERE session_id = ?`, sid.Int64())
+	})
 	(&SessionRepo{DB: db}).Create(ctx, repoSessionFix(t, sid))
 
 	// memory 带 segment_ids + title（快照行经 source_memory_id join 取这些列）

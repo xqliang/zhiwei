@@ -22,17 +22,35 @@ func TestMain(m *testing.M) {
 func TestClientSearchMatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/search" {
+			_, _ = w.Write([]byte(`{"speaker_id":42,"distance":0.81,"second_distance":0.12,"matched":true}`))
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	res, err := c.Search(context.Background(), make([]float32, 256))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Matched || res.SpeakerID.Int64() != 42 || res.Distance != 0.81 || res.SecondDistance != 0.12 {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestClientSearchMatchNoSecondField(t *testing.T) {
+	// 旧版 sidecar 响应无 second_distance 字段 → 解析为 0（gap 规则退化为仅看 top1），不报错
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/search" {
 			_, _ = w.Write([]byte(`{"speaker_id":42,"distance":0.81,"matched":true}`))
 		}
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL)
-	id, dist, matched, err := c.Search(context.Background(), make([]float32, 256))
+	res, err := c.Search(context.Background(), make([]float32, 256))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !matched || id.Int64() != 42 || dist != 0.81 {
-		t.Fatalf("%v %d %f", matched, id, dist)
+	if !res.Matched || res.SpeakerID.Int64() != 42 || res.SecondDistance != 0 {
+		t.Fatalf("%+v", res)
 	}
 }
 
@@ -42,9 +60,9 @@ func TestClientSearchEmpty(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL)
-	_, _, matched, err := c.Search(context.Background(), make([]float32, 256))
-	if err != nil || matched {
-		t.Fatalf("%v %v", matched, err)
+	res, err := c.Search(context.Background(), make([]float32, 256))
+	if err != nil || res.Matched {
+		t.Fatalf("%v %v", res.Matched, err)
 	}
 }
 

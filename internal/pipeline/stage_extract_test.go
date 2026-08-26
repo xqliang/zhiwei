@@ -41,13 +41,13 @@ func newExtractDeps(t *testing.T, llm provider.LLMProvider) StageDeps {
 	return StageDeps{
 		Sessions:     &repo.SessionRepo{DB: db},
 		Transcripts:  &repo.TranscriptRepo{DB: db},
+		Speakers:     &repo.SpeakerRepo{DB: db},
 		DB:           db,
 		Memories:     &repo.MemoryRepo{DB: db},
 		Todos:        &repo.TodoRepo{DB: db},
 		Topics:       &repo.TopicRepo{DB: db},
 		MemoryTopics: &repo.MemoryTopicRepo{DB: db},
 		TodoTopics:   &repo.TodoTopicRepo{DB: db},
-		Speakers:     &repo.SpeakerRepo{DB: db}, // 70f2aef 起 stageExtract 用 Speakers 做说话人名映射；DSN 下不设会 nil panic
 		LLM:          llm,
 		LLMModel:     "fake-model",
 		Prompt:       "测试 system prompt",

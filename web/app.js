@@ -54,7 +54,12 @@ const app = createApp({
     function statusText(status, stage) {
       if (status === 'done' || status === 'completed') return '已完成';
       if (status === 'failed') return '失败';
-      if (status === 'running') return '处理中 · ' + (stage || '');
+      // 处理中标注当前阶段（中文）：pipeline 各 stage 的用户可读名
+      const stageNames = {
+        asr: '语音转写', segment: '全文汇总', speaker: '声纹识别',
+        speakername: '名字推断', extract: '记忆抽取',
+      };
+      if (status === 'running') return '处理中 · ' + (stageNames[stage] || stage || '');
       return '排队中';
     }
     // 待办状态 → 中文标签（模板多处复用，集中一处避免散落的三元）
@@ -680,15 +685,35 @@ const app = createApp({
       return order.map(k => ({ day: k, label: dayLabel(k), items: map[k] }));
     });
 
+    // 详情区是否有「提取的记忆 / 待办 / 整理草稿」——决定转写与洞察是否分双栏：
+    // 有洞察时（宽屏）右侧栏展示记忆/待办卡片，转写列表在左；无则单栏全宽给转写。
+    const detailInsights = computed(() => {
+      const d = detail.value;
+      return !!(d && ((d.memories && d.memories.length) ||
+                      (d.todos && d.todos.length) || memoryDraft.value));
+    });
+
     // ---------- ASR 转写就地编辑 ----------
     // segDraft = { [segId]: text }：键存在即该段处于编辑态（点击进入、保存/取消清键）。
     const segDraft = ref({});
     function segEditing(sg) { return !!(sg && sg.id !== undefined && segDraft.value[sg.id] !== undefined); }
     function startEditSeg(sg) { segDraft.value[sg.id] = sg.text; }
     function cancelEditSeg(sg) { delete segDraft.value[sg.id]; }
+    // 单段保存：只提交该段草稿，其余段的草稿保持编辑态互不影响
+    // （顶部「保存转写修改」是批量路径，本函数是段编辑框旁边的逐段路径）。
+    async function saveSegEdit(s, sg) {
+      const text = segDraft.value[sg.id];
+      if (text === undefined) return;
+      try {
+        await api('PATCH', '/api/sessions/' + s.id + '/transcript', { segments: [{ id: sg.id, text }] });
+        delete segDraft.value[sg.id];
+        await reloadSession(s.id);
+        toast.value = '转写已保存'; setTimeout(() => { toast.value = ''; }, 2000);
+      } catch (e) { showError(e); }
+    }
     const segDirty = computed(() => Object.keys(segDraft.value).length > 0);
     // 原始 ASR 视图开关：true 时转写段以只读方式展示 ASR 原始 spk 标签 + 毫秒时间戳 + 文本，
-    // 便于排查「同人被拆成 spk0/spk1」类 diarization 问题（speaker stage 会用声纹聚类兜底合并）。
+    // 便于排查「同人被拆成 spk0/spk1」类 diarization 问题（跨录音同人靠声纹 1:N 识别归并）。
     const rawAsrView = ref(false);
     // 切换函数（与 toggleSpeakerFilter/toggleEnrollForm 一致用函数式，避免内联赋值在某些 Vue 编译路径下不触发响应）
     function toggleRawAsr() { rawAsrView.value = !rawAsrView.value; }
@@ -873,6 +898,33 @@ const app = createApp({
     // 说话人对象有两种来源：时间线面板的 detail.speakers 用 speaker_id 字段；声纹 tab 的 allSpeakers 用 id 字段。
     // 用 `sp.speaker_id || sp.id` 兼容两者（两者都是同一个 speaker 主键，只是响应结构里的字段名不同）。
     function startRenameSpeaker(sp) { renamingSpeaker.value = { id: sp.speaker_id || sp.id, name: sp.name }; }
+
+    // ---------- 切换声纹（识别错时的一键批量改判） ----------
+    // 把本会话内某说话人的全部段一键改判给目标声纹（后端按 transcript 作用域批量 UPDATE，
+    // 单语句原子写）。只改段归属，不动名册/声纹——错误登记的说话人可另行删除或手动合并。
+    const switchingSpeaker = ref(null); // { id, name }：待切换的源说话人
+    const switchTarget = ref(null);     // 目标声纹 speaker id
+    // 待切换段数 = 本会话转写里归属源说话人的段数（行内提示 + 用户确认依据）
+    const switchSegCount = computed(() => {
+      if (!switchingSpeaker.value || !detail.value) return 0;
+      return (detail.value.segments || []).filter(sg => sg.speaker_id === switchingSpeaker.value.id).length;
+    });
+    function startSwitchSpeaker(sp) {
+      switchingSpeaker.value = { id: sp.speaker_id || sp.id, name: sp.name };
+      switchTarget.value = null;
+    }
+    function cancelSwitchSpeaker() { switchingSpeaker.value = null; switchTarget.value = null; }
+    async function commitSwitchSpeaker() {
+      if (!switchingSpeaker.value || !switchTarget.value || !detail.value.session) return;
+      try {
+        await api('POST', '/api/sessions/' + detail.value.session.id + '/speakers/reassign',
+          { from_speaker_id: switchingSpeaker.value.id, to_speaker_id: switchTarget.value });
+        cancelSwitchSpeaker();
+        await reloadSession(detail.value.session.id); // 刷新段归属与说话人面板
+        await loadAllSpeakers();                      // 下拉数据源同步（保险）
+      } catch (e) { showError(e); }
+    }
+
     async function commitRenameSpeaker() {
       if (!renamingSpeaker.value || !renamingSpeaker.value.name.trim()) return; // 空名不发
       try {
@@ -901,6 +953,407 @@ const app = createApp({
         await api('PATCH', '/api/sessions/' + detail.value.session.id + '/segments/' + sg.id + '/speaker', { speaker_id: val });
         await reloadSession(detail.value.session.id);
       } catch (e) { showError(e); }
+    }
+
+    // ---------- 建议名字（speakername stage 的 LLM 候选：名称+置信度数值，用户点选确认） ----------
+    // 与后端 stage_speaker_name.go 的 autoNamePattern 保持一致：
+    // 只有名字仍是自动随机名（说话人+5位[a-z0-9]）的说话人才展示建议区——
+    // 用户改过名（含采纳过候选）后不再打扰。
+    const AUTO_NAME_RE = /^说话人[a-z0-9]{5}$/;
+    function hasNameCandidates(sp) {
+      return AUTO_NAME_RE.test(sp.name) && (sp.name_candidates || []).length > 0;
+    }
+    // 采纳候选：把候选名写为说话人正式名。复用改名 PATCH（后端改名成功即清空全部候选）。
+    // sp 兼容两种来源：时间线面板 detail.speakers（speaker_id 字段）/ 声纹 tab allSpeakers（id 字段）。
+    async function acceptNameCandidate(sp, cand) {
+      const id = sp.speaker_id || sp.id;
+      try {
+        await api('PATCH', '/api/speakers/' + id, { name: cand.name });
+        if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
+        await loadAllSpeakers();
+      } catch (e) { showError(e); }
+    }
+    // 忽略单个候选：删该行（后端幂等）。成功后刷新两处列表。
+    async function dismissNameCandidate(sp, cand) {
+      const id = sp.speaker_id || sp.id;
+      try {
+        await api('DELETE', '/api/speakers/' + id + '/name-candidates?name=' + encodeURIComponent(cand.name));
+        if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
+        await loadAllSpeakers();
+      } catch (e) { showError(e); }
+    }
+
+    // ---------- 人物 tab（用户画像：名册 / 详情 / 确认队列 / 回填） ----------
+    // 后端契约见 internal/api/person.go：读直连 repo 响应、变更走 Service（审计+事务）。
+    const persons = ref([]);            // 名册（GET /api/persons → {persons:[PersonWithPending]}）
+    const personDetail = ref(null);     // 当前详情（GET /api/persons/{id}，Task 2 用）
+    const showNewPerson = ref(false);   // 新建人物表单开合
+    const newPerson = ref({ display_name: '', speaker_id: '', summary: '' });
+    const creatingPerson = ref(false);  // 防重复提交
+    const renamingPerson = ref(null);   // { id, name } 详情改名（Task 2 用）
+
+    async function loadPersons() {
+      try {
+        const d = await api('GET', '/api/persons');
+        persons.value = d.persons || [];
+      } catch (e) { showError(e); }
+    }
+    function cancelNewPerson() {
+      showNewPerson.value = false;
+      newPerson.value = { display_name: '', speaker_id: '', summary: '' };
+      creatingPerson.value = false;
+    }
+    // 工具栏「＋ 新建/收起」切换：收起时走 cancelNewPerson 一并清草稿（对齐 toggleNewTopic，
+    // 避免 inline `showNewPerson = !showNewPerson` 收起不重置、重开残留旧输入的不对称）。
+    function toggleNewPerson() { if (showNewPerson.value) cancelNewPerson(); else showNewPerson.value = true; }
+    async function createPerson() {
+      if (creatingPerson.value) return;
+      const name = newPerson.value.display_name.trim();
+      if (!name) { toast.value = '请输入姓名'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      creatingPerson.value = true;
+      try {
+        // speaker_id 可空（只被提到、没录音的人也能建档）；后端校验声纹冲突返回 409
+        const body = { display_name: name };
+        if (newPerson.value.speaker_id.trim()) body.speaker_id = newPerson.value.speaker_id.trim();
+        if (newPerson.value.summary.trim()) body.summary = newPerson.value.summary.trim();
+        await api('POST', '/api/persons', body);
+        cancelNewPerson();
+        await loadPersons();
+        toast.value = '人物已创建'; setTimeout(() => { toast.value = ''; }, 2000);
+      } catch (e) { showError(e); }
+      finally { creatingPerson.value = false; }
+    }
+    // 点名册卡片：已展开收起；否则拉详情（Task 2 渲染详情卡；本任务先实现数据拉取与切换）
+    async function togglePerson(id) {
+      if (personDetail.value && personDetail.value.person.id === id) { closePersonDetail(); return; }
+      closePersonDetail(); // 切换前清旧人物的临时态（历史抽屉/加属性草稿/编辑删除态），防跨人泄漏
+      try { personDetail.value = await api('GET', '/api/persons/' + id); }
+      catch (e) { showError(e); }
+    }
+    function closePersonDetail() {
+      personDetail.value = null;
+      renamingPerson.value = null;
+      archivingPersonId.value = null; // 切换详情/收起时一并清归档确认态（对齐 toggleSession 折叠清 deletingSessionId）
+      // 属性手动管理临时态（Task 3）：加属性表单(含草稿) / 就地改值 / 删除确认 / 历史抽屉一并清空
+      editingAttr.value = null; deletingAttrId.value = null; attrHistory.value = null;
+      showAddAttr.value = false; addAttrForm.attr_key = ''; addAttrForm.value = '';
+      // 关系手动管理临时态（Task 4）：加关系表单(含草稿) / 删除确认一并清空
+      showAddRel.value = false; resetAddRelForm(); deletingRelId.value = null;
+      // 大事记临时态（P2b Task 1）：加事件表单(含草稿) / 删除确认一并清空
+      showAddEvent.value = false; resetAddEventForm(); deletingEventId.value = null;
+    }
+    async function reloadPersonDetail() {
+      if (!personDetail.value) return;
+      try { personDetail.value = await api('GET', '/api/persons/' + personDetail.value.person.id); }
+      catch (e) { showError(e); }
+    }
+    // 人物改名（详情内就地编辑，Task 2 渲染；本任务先定义）
+    function startRenamePerson() {
+      renamingPerson.value = { id: personDetail.value.person.id, name: personDetail.value.person.display_name };
+    }
+    async function commitRenamePerson() {
+      const rn = renamingPerson.value;
+      renamingPerson.value = null;
+      if (!rn || !rn.name.trim()) return;
+      try {
+        await api('PATCH', '/api/persons/' + rn.id, { display_name: rn.name.trim() });
+        await reloadPersonDetail();
+        await loadPersons();
+      } catch (e) {
+        renamingPerson.value = rn; // 失败恢复编辑态防输入丢失
+        showError(e);
+      }
+    }
+    // 人物归档（2 步确认；DELETE = status=dismissed 软删）
+    const archivingPersonId = ref(null);
+    function askArchivePerson(p) { archivingPersonId.value = p.id; }
+    function cancelArchivePerson() { archivingPersonId.value = null; }
+    async function confirmArchivePerson(p) {
+      try {
+        await api('DELETE', '/api/persons/' + p.id);
+        archivingPersonId.value = null;
+        if (personDetail.value && personDetail.value.person.id === p.id) closePersonDetail();
+        await loadPersons();
+      } catch (e) { showError(e); }
+    }
+    // epistemic_type（认知来源）→ 中文标签，属性徽标用。
+    // 后端枚举见 internal/profile/fact.go：observed（对话直陈）/inferred（可推断）/
+    // predicted（预测）/suggested（建议）。未知值原样返回，避免出现空徽标。
+    function epiText(t) {
+      return { observed: '直述', inferred: '推断', predicted: '预测', suggested: '建议' }[t] || t;
+    }
+    // 关系对端人物名：从已加载的名册缓存（persons.value，GET /api/persons）里按 id 查显示名。
+    // 查不到就回退显示「未知联系人」——对端可能已被忽略（dismissed）或还没建卡，此时名册里
+    // 没有它；长雪花 id 直接展示不友好，故用友好占位文案而非原始 id。
+    function personNameOf(id) {
+      const p = persons.value.find(x => x.id === id);
+      return p ? p.display_name : '未知联系人';
+    }
+
+    // ---------- 人物属性手动管理（加 / 改(留痕) / 删 / 修改历史抽屉） ----------
+    // 常用属性 key 建议（datalist；与 internal/profile/catalog.go 的 47 键一致，可自由输入目录外 key）
+    const ATTR_KEYS = ['aliases','birthday','gender','zodiac','mbti','education','school','city','address','phone',
+      'occupation','industry','office_location','work_start_time','work_end_time','commute_mode','often_travel','current_projects',
+      'meal_time','cuisine','eats_spicy','eats_numbing','smokes','drinks','wears_makeup','perfume',
+      'hobbies','skills','reading_now','books_read','movies_watched','music_listened','games_played','fav_celebrities','fav_anime','fav_movie_genres','catchphrases','invests_stocks',
+      'cities_visited','places_traveled','has_car','car_brand','phone_brand',
+      'recent_concerns','attention_topics','personality','chronic_diseases'];
+
+    const showAddAttr = ref(false);          // 加属性表单开合
+    const addAttrForm = reactive({ attr_key: '', value: '' });
+    const addingAttr = ref(false);
+    const editingAttr = ref(null);           // { id, attr_key, value }：就地改值
+    const deletingAttrId = ref(null);        // 2 步删除确认
+    const attrHistory = ref(null);           // { attr_key, items }：历史抽屉
+    const attrHistoryLoading = ref(false);
+
+    async function submitAddAttr() {
+      if (addingAttr.value) return;
+      const key = addAttrForm.attr_key.trim(), val = addAttrForm.value.trim();
+      if (!key || !val) { toast.value = 'key 与值必填'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingAttr.value = true;
+      try {
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/attributes', { attr_key: key, value: val });
+        showAddAttr.value = false; addAttrForm.attr_key = ''; addAttrForm.value = '';
+        await reloadPersonDetail(); await loadPersons(); // 名册 pending 计数可能变化
+      } catch (e) { showError(e); }
+      finally { addingAttr.value = false; }
+    }
+    // 加属性表单开合切换：收起时一并清草稿（对齐 toggleNewPerson，防重开残留旧输入的不对称）。
+    // 底部「＋ 加属性」与表单 ✕ 均走此函数，保证「关闭 ⇒ 清草稿」在所有路径对称。
+    function toggleAddAttr() {
+      showAddAttr.value = !showAddAttr.value;
+      if (!showAddAttr.value) { addAttrForm.attr_key = ''; addAttrForm.value = ''; }
+    }
+    // 改值 = PATCH（后端 supersede 旧行留痕；body 必须带行自身的 attr_key，与目标行不一致会 400）
+    function startEditAttr(a) { deletingAttrId.value = null; editingAttr.value = { id: a.id, attr_key: a.attr_key, value: a.value_text }; }
+    async function commitEditAttr() {
+      const e = editingAttr.value;
+      if (!e || !e.value.trim()) return;
+      try {
+        await api('PATCH', '/api/persons/' + personDetail.value.person.id + '/attributes/' + e.id,
+          { attr_key: e.attr_key, value: e.value.trim() });
+        editingAttr.value = null;
+        await reloadPersonDetail();
+      } catch (e2) { showError(e2); }
+    }
+    function askDeleteAttr(a) { editingAttr.value = null; deletingAttrId.value = a.id; }
+    async function confirmDeleteAttr() {
+      const id = deletingAttrId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/attributes/' + id);
+        deletingAttrId.value = null;
+        await reloadPersonDetail(); await loadPersons();
+      } catch (e) { showError(e); }
+    }
+    // 修改历史抽屉：GET /api/persons/{id}/history?entity_kind=attribute&attr_key=X
+    async function showAttrHistory(a) {
+      attrHistory.value = { attr_key: a.attr_key, items: [] };
+      attrHistoryLoading.value = true;
+      try {
+        const d = await api('GET', '/api/persons/' + personDetail.value.person.id +
+          '/history?entity_kind=attribute&attr_key=' + encodeURIComponent(a.attr_key));
+        attrHistory.value = { attr_key: a.attr_key, items: d.history || [] };
+      } catch (e) { showError(e); attrHistory.value = null; }
+      finally { attrHistoryLoading.value = false; }
+    }
+    // change_log 变更类型 → 中文（历史抽屉行徽标）
+    function changeText(t) {
+      return { create: '新建', update: '修改', confirm: '确认', dismiss: '放弃', supersede: '替换', delete: '删除', reaffirm: '佐证' }[t] || t;
+    }
+    // 历史 old/new_value 是 JSON 快照文本（如 "医生"），剥引号展示
+    function snapText(v) { if (v == null) return ''; try { return JSON.parse(v); } catch (e) { return v; } }
+
+    // ---------- 关系管理 ----------
+    // 关系类型枚举（与后端 ValidRelations 14 项一致）
+    const RELATION_TYPES = ['配偶','子女','父母','兄弟姐妹','亲戚','朋友','同事','领导','下属','客户','供应商','合作方','组织','其他'];
+    const DIRECTIONS = ['upstream','downstream','peer'];
+
+    const showAddRel = ref(false);
+    const addRelForm = reactive({ relation_type: '', related_person_id: '', label: '', direction: '', org_name: '' });
+    const addingRel = ref(false);
+    const deletingRelId = ref(null);  // 2 步删除确认
+
+    async function submitAddRel() {
+      if (addingRel.value) return;
+      const rt = addRelForm.relation_type;
+      if (!rt) { toast.value = '请选择关系类型'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingRel.value = true;
+      try {
+        const body = { relation_type: rt };
+        if (addRelForm.related_person_id) body.related_person_id = addRelForm.related_person_id;
+        if (addRelForm.label.trim()) body.label = addRelForm.label.trim();
+        if (addRelForm.direction) body.direction = addRelForm.direction;
+        if (addRelForm.org_name.trim()) body.org_name = addRelForm.org_name.trim();
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/relationships', body);
+        await reloadPersonDetail();
+        // 手动加=active 不产生 pending，无需刷名册（删 pending 关系才需要，见 confirmDeleteRel）
+        showAddRel.value = false;
+        resetAddRelForm();
+      } catch (e) { showError(e); }
+      finally { addingRel.value = false; }
+    }
+    function resetAddRelForm() {
+      addRelForm.relation_type = ''; addRelForm.related_person_id = ''; addRelForm.label = ''; addRelForm.direction = ''; addRelForm.org_name = '';
+    }
+    // 开合切换：收起时清草稿（对齐 toggleAddAttr 的对称清理模式）
+    function toggleAddRel() {
+      if (showAddRel.value) { showAddRel.value = false; resetAddRelForm(); return; }
+      showAddRel.value = true;
+    }
+    function askDeleteRel(rel) { deletingRelId.value = rel.id; }
+    async function confirmDeleteRel() {
+      const id = deletingRelId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/relationships/' + id);
+        deletingRelId.value = null;
+        await reloadPersonDetail(); await loadPersons(); // 删 pending 关系会改名册 pending 计数，一并刷（对齐 confirmDeleteAttr）
+      } catch (e) { showError(e); }
+    }
+
+    // ---------- 大事记（event 平面，P2） ----------
+    // 事件类型枚举与后端 ValidEventTypes 一致（9 类）
+    const EVENT_TYPES = ['里程碑','聚会','会议','旅行','健康','成就','挫折','负面','其他'];
+
+    const showAddEvent = ref(false);
+    const addEventForm = reactive({ event_type: '', title: '', description: '', occurred_at: '', end_at: '', location: '', related_person_id: '' });
+    const addingEvent = ref(false);
+    const deletingEventId = ref(null);  // 2 步删除确认
+
+    // 按年分组（时间倒序）：occurred_at 为空的事件归「时间未知」组排最后。
+    // 后端 ListByPerson 已按 occurred_at DESC 排（NULL 沉底），这里只分桶保持顺序。
+    const eventsByYear = computed(() => {
+      if (!personDetail.value || !personDetail.value.events) return [];
+      const map = {}, order = [];
+      for (const e of personDetail.value.events) {
+        const k = e.occurred_at ? String(e.occurred_at).slice(0, 4) : '时间未知';
+        if (!map[k]) { map[k] = []; order.push(k); }
+        map[k].push(e);
+      }
+      return order.map(k => ({ year: k, items: map[k] }));
+    });
+    // 事件日期展示：occurred_at ISO → 「M月D日」（已按年分组，组内不再重复年）；
+    // withYear=true 输出含年「YYYY年M月D日」，供无年上下文的「时间未知」组用；空显「—」。
+    function fmtEventDate(iso, withYear) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      const md = `${d.getMonth() + 1}月${d.getDate()}日`;
+      return withYear ? `${d.getFullYear()}年${md}` : md;
+    }
+    function resetAddEventForm() {
+      addEventForm.event_type = ''; addEventForm.title = ''; addEventForm.description = '';
+      addEventForm.occurred_at = ''; addEventForm.end_at = ''; addEventForm.location = ''; addEventForm.related_person_id = '';
+    }
+    // 开合切换：收起清草稿（对齐 toggleAddAttr/toggleAddRel 对称模式）
+    function toggleAddEvent() {
+      if (showAddEvent.value) { showAddEvent.value = false; resetAddEventForm(); return; }
+      showAddEvent.value = true;
+    }
+    async function submitAddEvent() {
+      if (addingEvent.value) return;
+      const et = addEventForm.event_type;
+      const title = addEventForm.title.trim();
+      if (!et) { toast.value = '请选择事件类型'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      if (!title) { toast.value = '请输入标题'; setTimeout(() => { toast.value = ''; }, 2000); return; }
+      addingEvent.value = true;
+      try {
+        // 日期用 <input type="date"> 的 YYYY-MM-DD；可选字段仅非空才传（后端 parseEventAt 尽力解析）
+        const body = { event_type: et, title };
+        if (addEventForm.description.trim()) body.description = addEventForm.description.trim();
+        if (addEventForm.occurred_at) body.occurred_at = addEventForm.occurred_at;
+        if (addEventForm.end_at) body.end_at = addEventForm.end_at;
+        if (addEventForm.location.trim()) body.location = addEventForm.location.trim();
+        if (addEventForm.related_person_id) body.related_person_id = addEventForm.related_person_id;
+        await api('POST', '/api/persons/' + personDetail.value.person.id + '/events', body);
+        await reloadPersonDetail();
+        showAddEvent.value = false;
+        resetAddEventForm();
+      } catch (e) { showError(e); }
+      finally { addingEvent.value = false; }
+    }
+    function askDeleteEvent(ev) { deletingEventId.value = ev.id; }
+    async function confirmDeleteEvent() {
+      const id = deletingEventId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/events/' + id);
+        deletingEventId.value = null;
+        await reloadPersonDetail(); await loadPersons(); // pending 计数可能变化
+      } catch (e) { showError(e); }
+    }
+
+    // ---------- 确认队列（跨平面 pending 并集；与名册/详情独立刷新） ----------
+    const pendingItems = ref([]);
+    const pendingLoading = ref(false);
+    const queueBusyIds = reactive({}); // 正在确认/放弃的条目 id（kind-id 键），防双击重放
+    async function loadPending() {
+      pendingLoading.value = true;
+      try {
+        const d = await api('GET', '/api/profile/pending');
+        pendingItems.value = d.items || [];
+      } catch (e) { showError(e); }
+      finally { pendingLoading.value = false; }
+    }
+    // 确认/放弃后三处联动刷新：队列本身 + 名册（pending 计数）+ 当前详情（若开着）
+    async function refreshAfterQueue() {
+      await loadPending();
+      await loadPersons();
+      if (personDetail.value) await reloadPersonDetail();
+    }
+    async function confirmPendingItem(it) {
+      const k = it.kind + '-' + it.id;
+      if (queueBusyIds[k]) return; // 防双击重放（确认/放弃互斥共用同一键）
+      queueBusyIds[k] = true;
+      try {
+        await api('POST', '/api/profile/pending/' + it.kind + '/' + it.id + '/confirm');
+        await refreshAfterQueue();
+      } catch (e) { showError(e); }
+      finally { delete queueBusyIds[k]; }
+    }
+    async function dismissPendingItem(it) {
+      const k = it.kind + '-' + it.id;
+      if (queueBusyIds[k]) return; // 防双击重放（确认/放弃互斥共用同一键）
+      queueBusyIds[k] = true;
+      try {
+        await api('POST', '/api/profile/pending/' + it.kind + '/' + it.id + '/dismiss');
+        await refreshAfterQueue();
+      } catch (e) { showError(e); }
+      finally { delete queueBusyIds[k]; }
+    }
+    // 队列条目摘要（kind 不同字段不同：attribute=建议值，relationship=类型+称呼，event=类型+标题，person=名字）
+    function pendingSummary(it) {
+      if (it.kind === 'attribute') return (it.attr_key || '') + '：' + (it.value || '');
+      if (it.kind === 'relationship') return (it.relation_type || '') + (it.label ? '（' + it.label + '）' : '');
+      if (it.kind === 'event') return (it.event_type || '') + '：' + (it.value || ''); // event：event_type + title（value 后端映射为 title）
+      return it.value || it.person_name; // person：名字
+    }
+    function pendingKindText(k) {
+      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记' }[k] || k;
+    }
+
+    // ---------- 从历史回填抽取（POST /api/profile/extract：不带 session_id = 最近 50 个 completed，同步） ----------
+    const backfilling = ref(false);
+    const backfillInfo = ref(null); // { processed, active, pending, skipped, errors }
+    async function runBackfill() {
+      if (backfilling.value) return;
+      backfilling.value = true;
+      backfillInfo.value = null;
+      try {
+        const d = await api('POST', '/api/profile/extract', {});
+        const rs = d.results || [];
+        backfillInfo.value = {
+          processed: d.processed || rs.length,
+          active: rs.reduce((s, r) => s + (r.active || 0), 0),
+          pending: rs.reduce((s, r) => s + (r.pending || 0), 0),
+          skipped: rs.reduce((s, r) => s + (r.skipped || 0), 0),
+          errors: rs.filter(r => r.error).length,
+        };
+        await refreshAfterQueue(); // 新 pending 可能进队列
+      } catch (e) { showError(e); }
+      finally { backfilling.value = false; }
     }
 
     // ---------- 声纹 tab（名册管理：列表 / 录入 / 改名 / 删除 + 点开看关联录音并按时间段播放） ----------
@@ -1639,6 +2092,8 @@ const app = createApp({
       if (name === 'agent') { loadAgentConversations(); if (agentConvId.value) { const cid = agentConvId.value; loadAgentHistory(cid); openAgentWS(cid); } }
       // 报告 tab：拉主题列表（话题状态选择器数据源）+ 按当前日报/周报类型加载报告。
       if (name === 'reports') { loadTopics(); loadReport(); }
+      // 人物 tab：进入时复位详情/归档确认态，拉名册 + 确认队列（跨平面 pending 并集，独立刷新）。
+      if (name === 'persons') { closePersonDetail(); archivingPersonId.value = null; loadPersons(); loadPending(); }
     }
     loadSessions();
     // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value，而 loadTopics()
@@ -1654,8 +2109,8 @@ const app = createApp({
       tab, toast, switchTab,
       fmtTime, fmtDue, typeMeta, statusText, todoStatusText, spClass,
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissingMemId, askDismissMem, cancelDismissMem, confirmDismissMem, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
-      tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay,
-      segDraft, segEditing, startEditSeg, cancelEditSeg, segDirty, saveTranscript, rawAsrView, toggleRawAsr,
+      tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay, detailInsights,
+      segDraft, segEditing, startEditSeg, cancelEditSeg, saveSegEdit, segDirty, saveTranscript, rawAsrView, toggleRawAsr,
       sessionAudioEl, tlPlayingSegId, toggleTimelineSegPlay, onTimelineAudioTimeUpdate,
       mergeMode, mergeSelected, mergeCount, mergeTarget, enterMergeMode, cancelMerge, toggleMergeSelect, confirmMerge,
       MIN_ENROLL_MS, segEnrollId, segEnrollName, segDurMs, canEnrollSeg, startSegEnroll, cancelSegEnroll, confirmSegEnroll,
@@ -1663,6 +2118,8 @@ const app = createApp({
       speakerColor, segSpeakerBg, toggleSpeakerFilter, openEnroll, onEnrollDrop, submitEnroll, loadAllSpeakers,
       startEnrollRec, stopEnrollRec, enrollRecording, enrollRecSeconds, enrollPromptText,
       startRenameSpeaker, commitRenameSpeaker, askDeleteSpeaker, reassignSegment,
+      switchingSpeaker, switchTarget, switchSegCount, startSwitchSpeaker, cancelSwitchSpeaker, commitSwitchSpeaker,
+      hasNameCandidates, acceptNameCandidate, dismissNameCandidate,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
       spMergeMode, spMergeSelected, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
       reextractingId, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
@@ -1688,6 +2145,14 @@ const app = createApp({
       loadReport, regenReport, switchReportKind, weeklyCharts, fmtNum, pct, maxCount, sevMeta,
       statusTopicId, topicStatusRow, topicStatusLoading, topicStatusError, topicStatusContent, topicStatusFailed,
       loadTopicStatus, onPickStatusTopic,
+      // 人物 / 画像
+      persons, personDetail, showNewPerson, newPerson, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, archivingPersonId, askArchivePerson, cancelArchivePerson, confirmArchivePerson,
+      epiText, personNameOf,
+      ATTR_KEYS, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
+      RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
+      EVENT_TYPES, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
+      pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
+      backfilling, backfillInfo, runBackfill,
     };
   }
 });

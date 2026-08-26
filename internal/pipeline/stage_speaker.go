@@ -15,15 +15,17 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/voiceprint"
 )
 
 // runSpeakerStage 是 speaker stage 的可测核心（避开 pool），由 stageSpeaker 包装成 Handler。
 //
 // 流程：按 ASR speaker_label 分组 → 逐段切片提向 → 组代表声纹 →
-// 【session 内聚类】把声纹相近（同人）的不同 ASR 标签合并成一个说话人
-// （realtime prompt 式 diarization 可能把一人标成 spk0/spk1，用 WeSpeaker 兜底合并）→
-// 每个聚类做跨 session 1:N 检索/登记 → 回填组内段 speaker_id（仅填 NULL，保留手动纠正）。
-// 注：聚类需真实 WeSpeaker 才生效——StubEmbedder 的随机向量不会聚拢。
+// 每组（= 一个 ASR 说话人）做跨 session 1:N 检索/登记 → 回填组内段 speaker_id（仅填 NULL，保留手动纠正）。
+//
+// ASR 原生 diarization 已足够准，此处直接信任其说话人标签：不再用声纹在本地把不同 ASR 标签
+// 合并成同一人。是否同一人只由跨 session 1:N 判定——相似度 ≥ 阈值（默认 0.8）视为命中、复用该
+// speaker；否则登记为新声纹。
 func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *repo.Transcript) error {
 	segs, err := d.Transcripts.ListSegments(ctx, tr.ID)
 	if err != nil {
@@ -46,7 +48,7 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 	wavPath := filepath.Join(d.DataDir, "transcoded", sessionID.String()+".wav")
 	threshold := d.VoiceprintThreshold
 	if threshold == 0 {
-		threshold = 0.5
+		threshold = 0.8 // 同一人判定阈值：cosine ≥ 0.8 视为同人，否则登记新声纹
 	}
 
 	// 1) 逐组切片+提向，跳过已全部解析的组（幂等：reextract 不重复调 sidecar、不覆盖手动纠正）。
@@ -56,6 +58,10 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		vecN  int // 该组有效向量数（用于 sample_count）
 	}
 	var reps []groupRep
+	// 逐段声纹向量 BLOB（segID→blob）：speaker stage 提取向量后落库，
+	// 供详情页按「每个 ASR 段」展示与声纹库的相似度 top-N——一句话可能混多个人，
+	// 段级相似度才能审计 diarization 切分/归属是否正确。
+	segEmbeds := map[ids.ID][]byte{}
 	for _, label := range order {
 		members := groups[label]
 		allAssigned := len(members) > 0
@@ -79,6 +85,7 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 				continue // 提向失败跳过
 			}
 			vecs = append(vecs, v)
+			segEmbeds[s.ID] = float32Blob(v)
 		}
 		if len(vecs) == 0 {
 			continue
@@ -88,86 +95,43 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 	if len(reps) == 0 {
 		return nil
 	}
-
-	// 2) session 内聚类：声纹相近（cosine≥阈值）的不同 ASR 标签合并为同人。
-	// 贪心合并（每 session 说话人数极少，O(n³) 可接受）。
-	clusterOf := make([]int, len(reps))
-	for i := range clusterOf {
-		clusterOf[i] = i
-	}
-	for i := 0; i < len(reps); i++ {
-		for j := i + 1; j < len(reps); j++ {
-			if clusterOf[i] == clusterOf[j] {
-				continue
-			}
-			if cosineVec(reps[i].rep, reps[j].rep) >= threshold {
-				old := clusterOf[j]
-				for k := range clusterOf {
-					if clusterOf[k] == old {
-						clusterOf[k] = clusterOf[i]
-					}
-				}
-			}
+	// 逐段声纹向量落库（段级相似度审计的数据来源；失败按 DB 错误走 pool 重试）
+	if len(segEmbeds) > 0 {
+		if err := d.Transcripts.SaveSegmentEmbeddings(ctx, tr.ID, segEmbeds); err != nil {
+			return fmt.Errorf("落库逐段声纹: %w", err)
 		}
 	}
 
-	// 3) 每个聚类：聚代表声纹 → 跨 session 1:N 检索/登记 → 回填组内未解析段。
-	seen := make(map[int]bool)
-	for i := range reps {
-		if seen[clusterOf[i]] {
-			continue
-		}
-		seen[clusterOf[i]] = true
-		var memberReps [][]float32
-		var memberVecN int
-		var labels []string
-		for j := range reps {
-			if clusterOf[j] == clusterOf[i] {
-				memberReps = append(memberReps, reps[j].rep)
-				memberVecN += reps[j].vecN
-				labels = append(labels, reps[j].label)
-			}
-		}
-		rep := aggregateEmbeddings(memberReps) // 同人代表 = 各组代表再聚合
-		matchID, dist, matched, err := d.Voiceprint.Search(ctx, rep)
+	// 2) 每组（= 一个 ASR 说话人）独立做跨 session 1:N 检索/登记 → 回填该组未解析段。
+	// 信任 ASR diarization：不同 ASR 标签一律视为不同说话人，不在本地按声纹相似度合并。
+	for _, g := range reps {
+		res, err := d.Voiceprint.Search(ctx, g.rep)
 		if err != nil {
 			return fmt.Errorf("voiceprint search: %w", err)
 		}
-		matched = matched && dist >= threshold
+		// 同一人判定（两级规则，见 voiceprint.Matched）：强命中 sim≥阈值；
+		// 或区分性弱命中 sim≥0.72 且明显领先第二名（top1−top2≥0.6）——
+		// 分数略低于阈值但明显是同一个人的也复用，减少真匹配被误登记成新声纹。
+		matched := res.Matched && voiceprint.Matched(res.Distance, res.SecondDistance, threshold)
 		var speakerID ids.ID
 		if matched {
-			speakerID = matchID
+			speakerID = res.SpeakerID
 		} else {
 			// 自动登记：name=说话人{5位随机串}，向量 BLOB 灾备
-			sp := &repo.Speaker{Name: "说话人" + rand5(), Source: "auto", Embedding: float32Blob(rep), SampleCount: memberVecN}
+			sp := &repo.Speaker{Name: "说话人" + rand5(), Source: "auto", Embedding: float32Blob(g.rep), SampleCount: g.vecN}
 			if err := d.Speakers.Create(ctx, sp); err != nil {
 				return fmt.Errorf("登记 speaker: %w", err)
 			}
-			if err := d.Voiceprint.Add(ctx, rep, sp.ID); err != nil {
+			if err := d.Voiceprint.Add(ctx, g.rep, sp.ID); err != nil {
 				return fmt.Errorf("voiceprint add: %w", err)
 			}
 			speakerID = sp.ID
 		}
-		for _, label := range labels {
-			if err := d.Transcripts.SetSegmentSpeaker(ctx, tr.ID, label, speakerID); err != nil {
-				return fmt.Errorf("回填 speaker_id: %w", err)
-			}
+		if err := d.Transcripts.SetSegmentSpeaker(ctx, tr.ID, g.label, speakerID); err != nil {
+			return fmt.Errorf("回填 speaker_id: %w", err)
 		}
 	}
 	return nil
-}
-
-// cosineVec 两个 L2 归一化向量的余弦相似度（= 内积）。用于 session 内聚类合并同人。
-func cosineVec(a, b []float32) float64 {
-	var s float64
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
-	for i := 0; i < n; i++ {
-		s += float64(a[i]) * float64(b[i])
-	}
-	return s
 }
 
 // stageSpeaker 是 pool 用的 Handler 包装。

@@ -29,7 +29,11 @@ type TranscriptSegment struct {
 	// SpeakerID 解析到的已登记说话人（speaker stage 回填，此前为 NULL）。
 	// 000004 迁移给 transcript_segment 加了 speaker_id 列，NewDB 走 sqlx safe 模式
 	// （无对应字段的列会扫描报错），故此处同步加字段，保 SELECT * 可扫描。
-	SpeakerID  *ids.ID   `db:"speaker_id" json:"speaker_id,omitempty"`
+	SpeakerID *ids.ID `db:"speaker_id" json:"speaker_id,omitempty"`
+	// Embedding 该段的 256 维声纹向量 BLOB（000007 迁移加列；speaker stage 逐段
+	// 提取后落库，供详情页按段展示与声纹库的相似度 top-N）。json:"-" 不外泄，
+	// API 层按需转成 top-N 明文列表。存量会话（新列前处理）为 NULL。
+	Embedding  []byte    `db:"embedding" json:"-"`
 	Text       string    `db:"text" json:"text"`
 	StartMS    int64     `db:"start_ms" json:"start_ms"`
 	EndMS      int64     `db:"end_ms" json:"end_ms"`
@@ -196,6 +200,53 @@ func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID
 	return err
 }
 
+// SaveSegmentEmbeddings 批量落库逐段声纹向量 BLOB（speaker stage 提取后调用）。
+// 带 transcript_id 作用域防跨会话误写；逐行 UPDATE 原子写（段数=会话内句数，量小）。
+// 用于详情页按段展示与声纹库的相似度 top-N（一句话可能混多人，段级才能审计切分）。
+func (r *TranscriptRepo) SaveSegmentEmbeddings(ctx context.Context, transcriptID ids.ID, blobs map[ids.ID][]byte) error {
+	for segID, blob := range blobs {
+		if _, err := r.DB.ExecContext(ctx,
+			`UPDATE transcript_segment SET embedding = ? WHERE id = ? AND transcript_id = ?`,
+			blob, segID.Int64(), transcriptID.Int64()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReassignSpeakerSegments 把本 transcript 内某说话人的全部段一键改判给目标说话人
+// （timeline 说话人 chip「切换声纹」：纠正声纹/识别错误，逐段下拉太繁琐）。
+// 带 transcript_id 作用域防跨会话波及；单条 UPDATE 原子写，并发安全。
+// 只改段归属，不动说话人名册/声纹（错误登记的说话人可另行删除或合并）。
+// 返回受影响段数（0 = 本会话没有该说话人的段）。
+func (r *TranscriptRepo) ReassignSpeakerSegments(ctx context.Context, transcriptID, fromID, toID ids.ID) (int, error) {
+	res, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ? WHERE transcript_id = ? AND speaker_id = ?`,
+		toID.Int64(), transcriptID.Int64(), fromID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, nil // 理论不可达：拿不到行数按 0 处理，不影响改判本身已生效
+	}
+	return int(n), nil
+}
+
+// ReassignSpeakerInTranscript 把本 transcript 内所有 speaker_id = fromID 的段改判为 toID，返回改动行数。
+// 带 transcript_id 作用域，只影响本会话——同一 speaker 在其他会话的段不动。单条 UPDATE 原子写、并发安全。
+// 用于 timeline「用此段录音纹」：录入新说话人后，把该说话人在本会话的全部段一并改判到新说话人。
+func (r *TranscriptRepo) ReassignSpeakerInTranscript(ctx context.Context, transcriptID, fromID, toID ids.ID) (int, error) {
+	res, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ? WHERE transcript_id = ? AND speaker_id = ?`,
+		toID.Int64(), transcriptID.Int64(), fromID.Int64())
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // ListSpeakersForTranscript 本 transcript 解析到的说话人聚合（说话人面板用）。
 // 按 sequence_no 升序的首段定序，保证面板说话人顺序与转写一致。
 func (r *TranscriptRepo) ListSpeakersForTranscript(ctx context.Context, transcriptID ids.ID) ([]SpeakerInSegment, error) {
@@ -246,4 +297,52 @@ type SpeakerSegmentOccurrence struct {
 	SequenceNo int       `db:"sequence_no" json:"sequence_no"`
 	Filename   string    `db:"filename" json:"filename"`
 	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+}
+
+// WallClockSegment 跨 session 墙钟时间窗口内的一条发言（speakername stage 上下文用）。
+// WallTime = session.created_at + start_ms，由 SQL 计算返回。
+// SpeakerName 经 LEFT JOIN speaker 取（已确认真名/随机名原样；NULL 段为 nil）。
+type WallClockSegment struct {
+	SegmentID   ids.ID    `db:"segment_id"`
+	SessionID   ids.ID    `db:"session_id"`
+	SpeakerID   *ids.ID   `db:"speaker_id"`
+	SpeakerName *string   `db:"speaker_name"`
+	Text        string    `db:"text"`
+	StartMS     int64     `db:"start_ms"`
+	EndMS       int64     `db:"end_ms"`
+	WallTime    time.Time `db:"wall_time"`
+}
+
+// ListSegmentsInWallClockWindow 跨 session 取墙钟时间落在 [from,to] 的全部段，
+// 按墙钟**正序**返回；limit 超限时保留**最近**的（靠近 to 的）——当前录音的段
+// 是窗口内最新的，天然优先保留。user 维度过滤。
+// 实现：SQL DESC + LIMIT 取最近 N，Go 侧反转回正序。
+// 次级键 seg.id DESC：墙钟毫秒相同（跨 session 撞毫秒）时定序，保证排序稳定、
+// LIMIT 截断到底保留哪几条可复现（雪花 id 单调递增，DESC 即“更晚生成的优先”）。
+// speakername stage 用它拼「当前录音全文 + 前 N 分钟跨录音对话」上下文。
+func (r *TranscriptRepo) ListSegmentsInWallClockWindow(ctx context.Context, userID int64, from, to time.Time, limit int) ([]WallClockSegment, error) {
+	if limit <= 0 {
+		limit = 400
+	}
+	var desc []WallClockSegment
+	err := r.DB.SelectContext(ctx, &desc, `
+SELECT seg.id AS segment_id, tr.session_id, seg.speaker_id, sp.name AS speaker_name,
+       seg.text, seg.start_ms, seg.end_ms,
+       (s.created_at + INTERVAL seg.start_ms * 1000 MICROSECOND) AS wall_time
+FROM transcript_segment seg
+JOIN transcript tr      ON tr.id = seg.transcript_id
+JOIN audio_session s    ON s.id = tr.session_id
+LEFT JOIN speaker sp    ON sp.id = seg.speaker_id
+WHERE tr.user_id = ?
+  AND (s.created_at + INTERVAL seg.start_ms * 1000 MICROSECOND) BETWEEN ? AND ?
+ORDER BY wall_time DESC, seg.id DESC
+LIMIT ?`, userID, from, to, limit)
+	if err != nil {
+		return nil, err
+	}
+	// DESC → 正序（原地反转，避免再分配）
+	for i, j := 0, len(desc)-1; i < j; i, j = i+1, j-1 {
+		desc[i], desc[j] = desc[j], desc[i]
+	}
+	return desc, nil
 }
