@@ -28,6 +28,8 @@ type Config struct {
 	LLMFastModel   string // Tier1：抽取/分类
 	LLMStrongModel string // Tier2：Agent/Review
 	EmbedModel     string
+	EmbedAPIKey    string // ARK_AUDIO_API_KEY：向量端点专用 key（≠ ARK_API_KEY；未设→不启用向量）
+	EmbedBaseURL   string // ZW_EMBED_BASE_URL：向量 base，默认 https://ark.cn-beijing.volces.com/api/plan/v3
 	ASRModel       string // Ark 上的 ASR 模型；若账号需要 endpoint 形式（ep-xxx），直接配成 endpoint id
 
 	// ---- Sprint 2：抽取参数（见 Sprint 2 设计文档 §3） ----
@@ -92,8 +94,12 @@ func Load() (*Config, error) {
 		// 强模型与 embedding 需控制台开通后用环境变量覆盖。
 		LLMFastModel:   getenv("ZW_LLM_FAST", "doubao-seed-1-6-flash-250828"),
 		LLMStrongModel: getenv("ZW_LLM_STRONG", "doubao-seed-1-6-flash-250828"),
-		EmbedModel:     getenv("ZW_EMBED_MODEL", "doubao-embedding-large-text-250515"),
-		ASRModel:       getenv("ZW_ASR_MODEL", "doubao-seed-asr-2-0"),
+		EmbedModel:     getenv("ZW_EMBED_MODEL", "doubao-embedding-vision"),
+		// 向量检索用独立 Ark 账号（实测确认）：key 来自 ARK_AUDIO_API_KEY（≠ ARK_API_KEY），
+		// 为空时上层不启用向量检索；base 注意是 /api/plan/v3，不是 /api/v3。
+		EmbedAPIKey:  os.Getenv("ARK_AUDIO_API_KEY"),
+		EmbedBaseURL: getenv("ZW_EMBED_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3"),
+		ASRModel:     getenv("ZW_ASR_MODEL", "doubao-seed-asr-2-0"),
 
 		// ---- Sprint 2：抽取参数 ----
 		ExtractWindow:   getenvInt("ZW_EXTRACT_WINDOW", 10),

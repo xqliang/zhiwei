@@ -8,6 +8,7 @@ import (
 
 	"zhiwei/internal/profile"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/retrieve"
 )
 
 // ProfileContext 组装「发给 dsh 的对话上下文头」：把 owner「我」的概要 + 关键属性 + 当天日期
@@ -21,6 +22,8 @@ import (
 type ProfileContext struct {
 	Persons    *repo.PersonRepo
 	Attributes *repo.PersonAttributeRepo
+	// Retrieve 可选：非 nil 时按本轮 query 注入 top-k 相关记忆「种子」到上下文头（spec §10）。
+	Retrieve *retrieve.Retriever
 }
 
 // headMaxAttrs 上下文头最多纳入的关键属性条数（防止头过长喧宾夺主、浪费 token）。
@@ -65,6 +68,24 @@ func (pc *ProfileContext) Head(ctx context.Context, now time.Time) string {
 	}
 	return fmt.Sprintf("今天是 %s。关于用户本人：%s（背景信息，自然运用，不必复述）",
 		now.Format("2006-01-02"), strings.Join(parts, "；"))
+}
+
+// Seeds 按本轮 query 召回 top-k 相关记忆，拼成上下文头的「相关记忆」块；
+// 无 Retrieve / query 空 / 无命中 → ""。每轮一次 query 向量化（未配 embedder 时 Retrieve=nil 不触发）。
+func (pc *ProfileContext) Seeds(ctx context.Context, query string) string {
+	if pc == nil || pc.Retrieve == nil || strings.TrimSpace(query) == "" {
+		return ""
+	}
+	ms, err := pc.Retrieve.Search(ctx, toolUserID, query, "", 0) // limit=0 → Retriever.TopK
+	if err != nil || len(ms) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("可能相关的我的记忆（供参考，不必逐条复述）：")
+	for _, m := range ms {
+		b.WriteString("\n- " + m.Title)
+	}
+	return b.String()
 }
 
 // pickKeyAttrs 从 owner 的属性行里挑出「关键 active 属性」并格式化成「中文名：值」短语：

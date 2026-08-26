@@ -323,6 +323,40 @@ ORDER BY event_at DESC, id DESC LIMIT ?`, args...)
 	return rows, err
 }
 
+// ListForEmbedding 返回该用户「active 且尚无 embedding」的记忆（backfill 待嵌队列）。
+// 按 id 倒序、limit 上限 500。显式列出列（含 embedding），避免 SELECT * 顺序耦合。
+func (r *MemoryRepo) ListForEmbedding(ctx context.Context, userID int64, limit int) ([]Memory, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	var rows []Memory
+	err := r.DB.SelectContext(ctx, &rows, `
+SELECT id, user_id, type, title, content, epistemic_type, importance, confidence,
+  session_id, conversation_id, transcript_segment_ids, event_at, status, embedding, version, created_at, updated_at
+FROM memory WHERE user_id = ? AND status = 'active' AND embedding IS NULL
+ORDER BY id DESC LIMIT ?`, userID, limit)
+	return rows, err
+}
+
+// ListEmbeddedCandidates 返回该用户「active 且已有 embedding」的记忆（含 embedding blob），
+// 供检索时在 Go 侧暴力 cosine。按 event_at 倒序取最近 limit 条。limit 默认/上限 2000。
+func (r *MemoryRepo) ListEmbeddedCandidates(ctx context.Context, userID int64, limit int) ([]Memory, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	var rows []Memory
+	err := r.DB.SelectContext(ctx, &rows, `
+SELECT * FROM memory WHERE user_id = ? AND status = 'active' AND embedding IS NOT NULL
+ORDER BY event_at DESC, id DESC LIMIT ?`, userID, limit)
+	return rows, err
+}
+
+// SetEmbeddingExt 写入某记忆的向量 blob（ext 传 tx 即入事务；backfill 用 r.DB 逐条提交）。
+func (r *MemoryRepo) SetEmbeddingExt(ctx context.Context, ext ExecerContext, id ids.ID, blob []byte) error {
+	_, err := ext.ExecContext(ctx, `UPDATE memory SET embedding = ? WHERE id = ?`, blob, id.Int64())
+	return err
+}
+
 // escapeLike 转义 LIKE 通配符，使用户输入按字面量匹配（配合 SQL 默认 \ 转义符）。
 func escapeLike(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)

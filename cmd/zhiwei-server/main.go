@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"zhiwei/internal/agent"
 	"zhiwei/internal/api"
@@ -20,6 +21,7 @@ import (
 	"zhiwei/internal/profile"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/retrieve"
 	"zhiwei/internal/review"
 	"zhiwei/internal/storage"
 	"zhiwei/internal/voiceprint"
@@ -245,6 +247,32 @@ func main() {
 	// MCP 工具端点（仅供本机 dsh 边车经 streamable-http 连回；不对外）。
 	// 进程内运行、复用上面已开库的 repo 实例（同一个 DB 池）。
 	agentProposals := &repo.AgentProposalRepo{DB: db}
+	// 向量检索（可选）：仅当 ARK_AUDIO_API_KEY 配置时启用（doubao-embedding-vision，实测走
+	// /api/plan/v3 的 /embeddings/multimodal，见 embed_vision.go）；否则 retriever=nil，
+	// search_memory 与上下文头种子整条链路降级回关键词/无种子（每个消费点都判 nil）。
+	var retriever *retrieve.Retriever
+	if cfg.EmbedAPIKey != "" {
+		embedder := provider.NewArkVisionEmbed(cfg.EmbedBaseURL, cfg.EmbedAPIKey, cfg.EmbedModel)
+		retriever = &retrieve.Retriever{Memories: memories, Embedder: embedder, TopK: cfg.AgentRetrieveTopK}
+		// backfill sweep：后台 goroutine，启动先跑一次、之后每 5 分钟一次，把「active 且未嵌」的
+		// 记忆补上向量（不侵入抽取事务；新记忆最迟一个 tick 内可被语义检索到）。ctx 退出即停。
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				if n, err := retriever.Backfill(context.Background(), 1, 500); err != nil {
+					log.Printf("[retrieve] backfill 失败: %v", err)
+				} else if n > 0 {
+					log.Printf("[retrieve] backfill 回填 %d 条记忆向量", n)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
 	mcpSrv := agent.NewMCPServer(agent.MCPDeps{
 		Memory:     memories,
 		Session:    sessions,
@@ -256,6 +284,8 @@ func main() {
 		Persons:          persons,
 		PersonAttributes: personAttrs,
 		PersonEvents:     personEvents,
+		// 语义检索（可选，nil 则 search_memory 走关键词）
+		Retrieve: retriever,
 	})
 	// 报告工具（generate_report / get_topic_status）注册进同一 MCP server，供 dsh agent 调用。
 	review.RegisterReportTools(mcpSrv, reviewer)
@@ -286,7 +316,7 @@ func main() {
 		// Orchestrator 装配可选的画像上下文头（每轮把 owner 概要 + 关键属性 + 当天日期前置到
 		// 「发给 dsh 的文本」，让 agent 天然「认识我」；不改落库，见 agent/context.go）。
 		orch := agent.NewOrchestrator(rt, agentConvs, agentMsgs)
-		orch.Ctx = &agent.ProfileContext{Persons: persons, Attributes: personAttrs}
+		orch.Ctx = &agent.ProfileContext{Persons: persons, Attributes: personAttrs, Retrieve: retriever}
 		agent.RegisterAgent(r, &agent.AgentHandler{
 			Orch:          orch,
 			Conversations: agentConvs,

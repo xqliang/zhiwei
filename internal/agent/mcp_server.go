@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"zhiwei/internal/repo"
+	"zhiwei/internal/retrieve"
 )
 
 // MCPDeps 是工具依赖的仓储集合（主服务装配时注入已开库的实例）。
@@ -29,6 +30,9 @@ type MCPDeps struct {
 	Persons          *repo.PersonRepo
 	PersonAttributes *repo.PersonAttributeRepo
 	PersonEvents     *repo.PersonEventRepo
+	// Retrieve 语义检索（可选）：非 nil 且 query 非空时 search_memory 走「向量+关键词」混合，
+	// 否则退回 Memory.Search 关键词。装配见 main.go（ARK_AUDIO_API_KEY 未配则 nil，降级）。
+	Retrieve *retrieve.Retriever
 }
 
 // pingArgs：无参工具的入参（空 struct → object schema 无属性）。

@@ -167,6 +167,50 @@ func TestProfileOverrides(t *testing.T) {
 	}
 }
 
+// TestEmbedConfigDefaults 验证向量检索（doubao-embedding-vision）相关默认值：
+// EmbedModel/EmbedBaseURL 有默认值；EmbedAPIKey 读 ARK_AUDIO_API_KEY，
+// 未设时为空且不导致 Load 失败（为空时上层不启用向量检索）。
+func TestEmbedConfigDefaults(t *testing.T) {
+	t.Setenv("ARK_API_KEY", "test-key") // Load 要求 ARK_API_KEY 非空
+	t.Setenv("ARK_AUDIO_API_KEY", "")   // 显式置空：验证为空不报错、字段为空
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// 向量检索（doubao-embedding-vision）默认值
+	if cfg.EmbedModel != "doubao-embedding-vision" {
+		t.Errorf("EmbedModel 默认应为 doubao-embedding-vision, got %q", cfg.EmbedModel)
+	}
+	if cfg.EmbedBaseURL != "https://ark.cn-beijing.volces.com/api/plan/v3" {
+		t.Errorf("EmbedBaseURL 默认错: %q", cfg.EmbedBaseURL)
+	}
+	// EmbedAPIKey 读 ARK_AUDIO_API_KEY；未设为空且不报错（Load 不因它失败）
+	if cfg.EmbedAPIKey != "" {
+		t.Errorf("ARK_AUDIO_API_KEY 置空时 EmbedAPIKey 应为空, got %q", cfg.EmbedAPIKey)
+	}
+}
+
+// TestEmbedConfigOverride 验证 ARK_AUDIO_API_KEY / ZW_EMBED_BASE_URL / ZW_EMBED_MODEL 覆盖生效。
+func TestEmbedConfigOverride(t *testing.T) {
+	t.Setenv("ARK_API_KEY", "test-key")
+	t.Setenv("ARK_AUDIO_API_KEY", "embed-key")
+	t.Setenv("ZW_EMBED_BASE_URL", "https://example.com/api/plan/v3")
+	t.Setenv("ZW_EMBED_MODEL", "custom-embed")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EmbedAPIKey != "embed-key" {
+		t.Errorf("EmbedAPIKey 覆盖失败: %q", cfg.EmbedAPIKey)
+	}
+	if cfg.EmbedBaseURL != "https://example.com/api/plan/v3" {
+		t.Errorf("EmbedBaseURL 覆盖失败: %q", cfg.EmbedBaseURL)
+	}
+	if cfg.EmbedModel != "custom-embed" {
+		t.Errorf("EmbedModel 覆盖失败: %q", cfg.EmbedModel)
+	}
+}
+
 func TestGetenvBool(t *testing.T) {
 	t.Run("unset_returns_default", func(t *testing.T) {
 		os.Unsetenv("ZW_TEST_BOOL")

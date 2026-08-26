@@ -8,6 +8,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repo"
 )
 
 const toolUserID = 1 // 单用户 MVP
@@ -16,7 +17,7 @@ const toolUserID = 1 // 单用户 MVP
 func registerReadTools(s *mcp.Server, d MCPDeps) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "search_memory",
-		Description: "按关键词检索我的记忆（title/content）。可选 type 过滤(event|fact|decision|idea|problem|preference)。返回记忆列表(含 id/类型/标题/内容/事件时间/重要度)。",
+		Description: "按语义/关键词检索我的记忆（title/content）。可选 type 过滤(event|fact|decision|idea|problem|preference)。返回记忆列表(含 id/类型/标题/内容/事件时间/重要度)。",
 	}, searchMemoryHandler(d))
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -96,9 +97,20 @@ func searchMemoryHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, 
 		if limit <= 0 {
 			limit = 20
 		}
-		ms, err := d.Memory.Search(ctx, toolUserID, a.Query, a.Type, limit)
-		if err != nil {
-			return nil, nil, err
+		var ms []repo.Memory
+		// 有向量检索且给了 query：优先「向量+关键词」混合；结果为空则退回关键词 LIKE。
+		if d.Retrieve != nil && a.Query != "" {
+			hit, err := d.Retrieve.Search(ctx, toolUserID, a.Query, a.Type, limit)
+			if err == nil && len(hit) > 0 {
+				ms = hit
+			}
+		}
+		if ms == nil {
+			var err error
+			ms, err = d.Memory.Search(ctx, toolUserID, a.Query, a.Type, limit)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 		out := make([]memoryOut, 0, len(ms))
 		for _, m := range ms {

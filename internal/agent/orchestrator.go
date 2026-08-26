@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"zhiwei/internal/repo"
@@ -62,8 +63,15 @@ func (o *Orchestrator) runTurn(ctx context.Context, conv *repo.AgentConversation
 	// now 参数注入固定日期）。
 	sent := userText
 	if o.Ctx != nil {
+		var blocks []string
 		if h := o.Ctx.Head(ctx, time.Now()); h != "" {
-			sent = h + "\n\n" + userText
+			blocks = append(blocks, h)
+		}
+		if s := o.Ctx.Seeds(ctx, userText); s != "" {
+			blocks = append(blocks, s)
+		}
+		if len(blocks) > 0 {
+			sent = strings.Join(blocks, "\n\n") + "\n\n" + userText
 		}
 	}
 
