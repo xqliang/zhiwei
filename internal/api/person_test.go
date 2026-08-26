@@ -500,6 +500,65 @@ func TestPersonEventAPI(t *testing.T) {
 	}
 }
 
+// TestPersonEventMultiRelatedAPI 覆盖 P2a② API 层同行人物：related_person_ids 数组落多元素、
+// 旧单字段 related_person_id 向后兼容、数组含非法 id → 400。跨包非自隔离：cleanup 删掉 owner 的
+// person_event/event 审计与两名被引用人物（含其 person 审计）。
+func TestPersonEventMultiRelatedAPI(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+	owner, _ := svc.Persons.GetOwner(ctx, 1)
+
+	a, err := svc.ManualCreatePerson(ctx, "API多人同行甲", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := svc.ManualCreatePerson(ctx, "API多人同行乙", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_event WHERE person_id = ?", owner.ID.Int64())
+		_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'", owner.ID.Int64())
+		for _, id := range []ids.ID{a.ID, b.ID} {
+			_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person_change_log WHERE person_id = ?", id.Int64())
+			_, _ = svc.DB.ExecContext(cctx, "DELETE FROM person WHERE id = ?", id.Int64())
+		}
+	})
+
+	// ① related_person_ids 数组两人 → 落两元素（顺序同入参）
+	rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "旅行", "title": "API多人-数组两人",
+			"related_person_ids": []string{a.ID.String(), b.ID.String()}})
+	if rec.Code != 200 {
+		t.Fatalf("加事件(数组)失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var ev repo.PersonEvent
+	_ = json.Unmarshal(rec.Body.Bytes(), &ev)
+	if len(ev.RelatedPersonIDs) != 2 || ev.RelatedPersonIDs[0] != a.ID || ev.RelatedPersonIDs[1] != b.ID {
+		t.Fatalf("related_person_ids 两人应落 [甲,乙]，实得 %v", ev.RelatedPersonIDs)
+	}
+
+	// ② 旧单字段 related_person_id 向后兼容 → 落 1 元素
+	rec = doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "会议", "title": "API多人-旧单字段", "related_person_id": a.ID.String()})
+	if rec.Code != 200 {
+		t.Fatalf("加事件(单字段)失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var ev2 repo.PersonEvent
+	_ = json.Unmarshal(rec.Body.Bytes(), &ev2)
+	if len(ev2.RelatedPersonIDs) != 1 || ev2.RelatedPersonIDs[0] != a.ID {
+		t.Fatalf("旧单字段应落 1 元素（甲），实得 %v", ev2.RelatedPersonIDs)
+	}
+
+	// ③ 数组含非法 id → 400
+	if rec := doReq(t, h, "POST", "/api/persons/"+owner.ID.String()+"/events",
+		map[string]any{"event_type": "旅行", "title": "API多人-非法id",
+			"related_person_ids": []string{"not-an-id"}}); rec.Code != 400 {
+		t.Fatalf("数组含非法 id 应 400: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestPersonMetricAPI 覆盖时序指标 API 全链路：手动加测点（数值型 value_num/value_text 双存）、
 // metric_key 枚举校验、空值校验、时间窗查询（半开区间 [from,to) + from 烂串 400）、确认队列含
 // metric 条目并 HTTP 确认、删除转 dismissed。跨包非自隔离：t.Cleanup 删掉 owner 的 person_metric

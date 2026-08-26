@@ -313,7 +313,8 @@ func (s *Service) applyRelationshipFact(ctx context.Context, tx *sqlx.Tx, userID
 // ---- 事件平面（P2 大事记）----
 
 // applyEventFact 事件落库：闸门（同键佐证/新键按置信度）+ 单事务 + 审计。
-// related 为可选增强（解析不到存空 RelatedPersonIDs，不阻断事件创建——见 fact.go 注释）。
+// related 为可选增强（P2a② 多人）：related_people 数组逐人解析、解析不到存空 RelatedPersonIDs，
+// 均不阻断事件创建；数组空时回退旧 Related 单人字段（见下方解析段与 fact.go Fact.EventRelated 注释）。
 //
 // P2a③ 标题归一化去重：两个查询职责不同、刻意用不同的匹配口径——
 //   - dedup（FindByNaturalKeyExt）：**精确**标题的同 session 自然键，防同一 session 重跑重复建行。
@@ -352,9 +353,22 @@ func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 		if dec == DecisionCreateActive {
 			status = "active"
 		}
-		// related 解析（可选）：解析不到存空，不 skip 事件
+		// related 解析（可选，P2a② 多人）：related_people 数组逐个 resolveSubject（单人解析不到
+		// 跳过该人、不阻断事件——多人场景「宁少记一人不丢事件」）；数组为空时回退旧 Related 单人字段
+		// （prompt few-shot 与历史输出向后兼容）。整体解析不到就存空 RelatedPersonIDs，事件照常创建
+		//（见 applyEventFact 顶注释与 fact.go Fact.EventRelated）。
 		var relatedIDs ids.List
-		if f.Related.Kind != "" {
+		if len(f.EventRelated) > 0 {
+			for _, sub := range f.EventRelated {
+				// 逐人容错：resolveSubject 出错或解析到 0（无法归属）都跳过该人，继续下一个——
+				// 不 return err 中断整批（真正的 DB 故障会在后续 Events.CreateExt 处再次暴露并回滚，
+				// 不会因这里吞掉个别人的错误而落下半条脏数据）。
+				if rid, err := s.resolveSubject(ctx, tx, sub, prov); err == nil && rid != 0 {
+					relatedIDs = append(relatedIDs, rid)
+				}
+			}
+		} else if f.Related.Kind != "" {
+			// 旧单人路径原样保留：单人解析的 DB 错误照旧上抛（这条不是多人容错语义）。
 			if rid, err := s.resolveSubject(ctx, tx, f.Related, prov); err != nil {
 				return err
 			} else if rid != 0 {

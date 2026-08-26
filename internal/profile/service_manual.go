@@ -344,12 +344,13 @@ func (s *Service) ManualDeleteRelationship(ctx context.Context, id ids.ID) error
 // ---- event 平面手动 CRUD（P2 大事记）----
 
 // ManualAddEvent 手动加大事记（active/manual conf=1.0 + create 审计）。
-// relatedPersonID 可空；occurredAt/endAt 是原始字符串（YYYY-MM-DD/YYYY-MM/RFC3339，
-// parseEventAt 尽力解析，失败存 NULL）；importance 为事件人生分量（P2a①）——传 0 走事件类型
-// 默认（defaultImportance），>0 clamp 到 (0,1]，不再固定 1.0（手动录入的日常事件不该天然「满分
-// 重要」，与 LLM 路径共用同一取值链 eventImportanceOrDefault）；参数多，调用方为 API handler。
+// relatedPersonIDs 可空/空切片（无同行人物）——P2a② 支持多人同行，逐个落 RelatedPersonIDs 数组；
+// occurredAt/endAt 是原始字符串（YYYY-MM-DD/YYYY-MM/RFC3339，parseEventAt 尽力解析，失败存 NULL）；
+// importance 为事件人生分量（P2a①）——传 0 走事件类型默认（defaultImportance），>0 clamp 到 (0,1]，
+// 不再固定 1.0（手动录入的日常事件不该天然「满分重要」，与 LLM 路径共用同一取值链
+// eventImportanceOrDefault）；参数多，调用方为 API handler。
 func (s *Service) ManualAddEvent(ctx context.Context, personID ids.ID, eventType, title,
-	description, occurredAt, endAt, location string, relatedPersonID *ids.ID, importance float64) (*repo.PersonEvent, error) {
+	description, occurredAt, endAt, location string, relatedPersonIDs []ids.ID, importance float64) (*repo.PersonEvent, error) {
 
 	if !ValidEventTypes[eventType] {
 		return nil, fmt.Errorf("非法事件类型: %s", eventType)
@@ -374,8 +375,8 @@ func (s *Service) ManualAddEvent(ctx context.Context, personID ids.ID, eventType
 	if strings.TrimSpace(location) != "" {
 		row.Location = strPtr(strings.TrimSpace(location))
 	}
-	if relatedPersonID != nil {
-		row.RelatedPersonIDs = ids.List{*relatedPersonID}
+	if len(relatedPersonIDs) > 0 {
+		row.RelatedPersonIDs = ids.List(relatedPersonIDs)
 	}
 	tx, err := s.DB.BeginTxx(ctx, nil)
 	if err != nil {

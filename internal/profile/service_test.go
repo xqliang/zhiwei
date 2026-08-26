@@ -566,6 +566,150 @@ func TestApplyEventFactsImportance(t *testing.T) {
 	}
 }
 
+// TestApplyEventFactsMultiRelated 覆盖 P2a② 多人事件 LLM 路径：
+//   - related_people 两人 → RelatedPersonIDs 落两元素（顺序同输入）；
+//   - 一人解析失败（空名 mentioned → resolveSubject 返回 0）仍落另一人，不阻断事件（宁少记一人不丢事件）；
+//   - EventRelated 为空时回退旧 Related 单人字段（few-shot/历史输出兼容）。
+func TestApplyEventFactsMultiRelated(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+
+	// 共享 owner：收尾删净本用例事件、event 审计与自动新建的同行人物（模式参照 TestApplyEventFacts）。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			ownerPK := o.ID.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_event WHERE person_id = ?`, ownerPK)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'event'`, ownerPK)
+		}
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person WHERE user_id = 1 AND display_name IN ('多人同行甲','多人同行乙','多人同行丙','旧单人同伴')`)
+	})
+	// 基线：清空 owner 既有事件，保证按 title 精确取行不受其他用例残留干扰。
+	_, _ = svc.DB.ExecContext(ctx, `DELETE FROM person_event WHERE person_id = ?`, oid.Int64())
+
+	byTitle := func(title string) repo.PersonEvent {
+		evs, _ := svc.Events.ListByPerson(ctx, oid)
+		for _, e := range evs {
+			if e.Title == title {
+				return e
+			}
+		}
+		t.Fatalf("找不到事件 %q", title)
+		return repo.PersonEvent{}
+	}
+
+	// ① related_people 两人 → 落两元素（均为自动新建 pending 人物，顺序同输入）
+	st, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "旅行", EventTitle: "多人-两人同行",
+			EventRelated: []Subject{
+				{Kind: "mentioned", Name: "多人同行甲"},
+				{Kind: "mentioned", Name: "多人同行乙"},
+			},
+			Confidence: 0.9, EpistemicType: "observed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Active != 1 {
+		t.Fatalf("多人事件应 active: %+v", st)
+	}
+	ga, _ := svc.Persons.FindByName(ctx, 1, "多人同行甲")
+	gb, _ := svc.Persons.FindByName(ctx, 1, "多人同行乙")
+	if ga == nil || gb == nil {
+		t.Fatalf("两名同行应自动建人物: %v %v", ga, gb)
+	}
+	ev := byTitle("多人-两人同行")
+	if len(ev.RelatedPersonIDs) != 2 || ev.RelatedPersonIDs[0] != ga.ID || ev.RelatedPersonIDs[1] != gb.ID {
+		t.Fatalf("related_people 两人应落 [甲,乙]，实得 %v（期望 %v,%v）", ev.RelatedPersonIDs, ga.ID, gb.ID)
+	}
+
+	// ② 一人解析失败（空名 mentioned → 0）仍落另一人
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "聚会", EventTitle: "多人-一失一成",
+			EventRelated: []Subject{
+				{Kind: "mentioned", Name: ""},      // 空名 → resolveSubject 返回 0，跳过该人
+				{Kind: "mentioned", Name: "多人同行丙"}, // 正常解析
+			},
+			Confidence: 0.9, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gc, _ := svc.Persons.FindByName(ctx, 1, "多人同行丙")
+	if gc == nil {
+		t.Fatal("同行丙应自动建人物")
+	}
+	ev2 := byTitle("多人-一失一成")
+	if len(ev2.RelatedPersonIDs) != 1 || ev2.RelatedPersonIDs[0] != gc.ID {
+		t.Fatalf("一人解析失败应仅落另一人（丙），实得 %v", ev2.RelatedPersonIDs)
+	}
+
+	// ③ EventRelated 空 → 回退旧 Related 单人字段（few-shot/历史输出兼容）
+	if _, err := svc.ApplyFacts(ctx, ids.New(), 1, []Fact{
+		{Plane: "event", Subject: Subject{Kind: "self"}, EventType: "会议", EventTitle: "多人-旧单人兼容",
+			Related:    Subject{Kind: "mentioned", Name: "旧单人同伴"},
+			Confidence: 0.9, EpistemicType: "observed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := svc.Persons.FindByName(ctx, 1, "旧单人同伴")
+	if old == nil {
+		t.Fatal("旧单人同伴应自动建人物")
+	}
+	ev3 := byTitle("多人-旧单人兼容")
+	if len(ev3.RelatedPersonIDs) != 1 || ev3.RelatedPersonIDs[0] != old.ID {
+		t.Fatalf("旧 Related 单人兼容应落 1 元素，实得 %v", ev3.RelatedPersonIDs)
+	}
+}
+
+// TestManualAddEventMultiRelated 覆盖 P2a② 手动路径：relatedPersonIDs 数组落多元素；空切片=无同行。
+func TestManualAddEventMultiRelated(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	// 用独立测试人物（非共享 owner），cleanup 删净其事件/审计/人物行。
+	p1, err := svc.ManualCreatePerson(ctx, "手动多人同行甲", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := svc.ManualCreatePerson(ctx, "手动多人同行乙", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := svc.ManualCreatePerson(ctx, "手动多人主人物", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cctx := context.Background()
+		for _, id := range []ids.ID{p1.ID, p2.ID, host.ID} {
+			pk := id.Int64()
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_event WHERE person_id = ?`, pk)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ?`, pk)
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person WHERE id = ?`, pk)
+		}
+	})
+
+	// 多人数组 → 落两元素（顺序同入参）
+	ev, err := svc.ManualAddEvent(ctx, host.ID, "旅行", "手动-多人同行", "", "", "", "",
+		[]ids.ID{p1.ID, p2.ID}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev.RelatedPersonIDs) != 2 || ev.RelatedPersonIDs[0] != p1.ID || ev.RelatedPersonIDs[1] != p2.ID {
+		t.Fatalf("手动多人应落 [p1,p2]，实得 %v", ev.RelatedPersonIDs)
+	}
+
+	// 空切片 → 无同行
+	ev2, err := svc.ManualAddEvent(ctx, host.ID, "会议", "手动-无同行", "", "", "", "", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev2.RelatedPersonIDs) != 0 {
+		t.Fatalf("空切片应无同行，实得 %v", ev2.RelatedPersonIDs)
+	}
+}
+
 func TestApplyMetricFacts(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()

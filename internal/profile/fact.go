@@ -46,6 +46,12 @@ type Fact struct {
 	// EventImportance 事件的人生分量 0~1（P2a①：与 confidence 正交，见 service.go defaultImportance）。
 	// LLM 可显式给值；0=未给（service 层走事件类型默认，不再用 confidence 代偿）。
 	EventImportance float64
+	// EventRelated 同场/同行人物（P2a②：多人事件）。每项是 Subject 指代，service 层 applyEventFact
+	// 逐个 resolveSubject 落 RelatedPersonIDs 数组。json 标签用**新键 related_people**（见 rawFact），
+	// 刻意不复用 related——related 是 relationship 平面「关系对端」与 event 单人「主人物」的共用字段
+	// （同 EventLocation 与 activity location 共用 json:"location" 键的先例）；EventRelated 空时 service
+	// 回退旧 Related 单人（prompt few-shot 与历史输出向后兼容）。
+	EventRelated []Subject
 
 	// ---- metric 平面（P3 时序指标）----
 	MetricKey   string // emotion|state|weight|sleep_late|diet|health
@@ -122,36 +128,37 @@ type rawSubject struct {
 }
 
 type rawFact struct {
-	Plane            string     `json:"plane"`
-	Subject          rawSubject `json:"subject"`
-	AttrKey          string     `json:"attr_key"`
-	Value            string     `json:"value"`
-	ValueType        string     `json:"value_type"`
-	RelationType     string     `json:"relation_type"`
-	Related          rawSubject `json:"related"`
-	Direction        string     `json:"direction"`
-	OrgName          string     `json:"org_name"`
-	Label            string     `json:"label"`
-	EventType        string     `json:"event_type"`
-	EventTitle       string     `json:"title"`
-	EventDescription string     `json:"description"`
-	OccurredAt       string     `json:"occurred_at"`
-	EndAt            string     `json:"end_at"`
-	EventLocation    string     `json:"location"`
-	EventImportance  float64    `json:"importance"` // P2a①：事件人生分量 0~1；无同层标签冲突（confidence 各自独立）
-	MetricKey        string     `json:"metric_key"`
-	MetricValue      string     `json:"metric_value"`
-	MetricUnit       string     `json:"metric_unit"`
-	MeasuredAt       string     `json:"measured_at"`
-	CycleType        string     `json:"cycle_type"`
-	CycleLabel       string     `json:"cycle_label"`
-	AnchorDate       string     `json:"anchor_date"`
-	PeriodDays       int        `json:"period_days"`
-	DurationDays     int        `json:"duration_days"`
-	Dosage           string     `json:"dosage"`
-	FrequencyText    string     `json:"frequency"` // Go 字段 FrequencyText，json 标签 frequency——对齐 prompt v3 契约
-	ActivityText     string     `json:"activity"`  // Go 字段 ActivityText，json 标签 activity——对齐 prompt 契约（同 FrequencyText/frequency 先例）
-	Tool             string     `json:"tool"`
+	Plane            string       `json:"plane"`
+	Subject          rawSubject   `json:"subject"`
+	AttrKey          string       `json:"attr_key"`
+	Value            string       `json:"value"`
+	ValueType        string       `json:"value_type"`
+	RelationType     string       `json:"relation_type"`
+	Related          rawSubject   `json:"related"`
+	Direction        string       `json:"direction"`
+	OrgName          string       `json:"org_name"`
+	Label            string       `json:"label"`
+	EventType        string       `json:"event_type"`
+	EventTitle       string       `json:"title"`
+	EventDescription string       `json:"description"`
+	OccurredAt       string       `json:"occurred_at"`
+	EndAt            string       `json:"end_at"`
+	EventLocation    string       `json:"location"`
+	EventImportance  float64      `json:"importance"`     // P2a①：事件人生分量 0~1；无同层标签冲突（confidence 各自独立）
+	EventRelated     []rawSubject `json:"related_people"` // P2a②：多人事件同场人物数组；新键 related_people，不复用 related（见 Fact.EventRelated 注释）
+	MetricKey        string       `json:"metric_key"`
+	MetricValue      string       `json:"metric_value"`
+	MetricUnit       string       `json:"metric_unit"`
+	MeasuredAt       string       `json:"measured_at"`
+	CycleType        string       `json:"cycle_type"`
+	CycleLabel       string       `json:"cycle_label"`
+	AnchorDate       string       `json:"anchor_date"`
+	PeriodDays       int          `json:"period_days"`
+	DurationDays     int          `json:"duration_days"`
+	Dosage           string       `json:"dosage"`
+	FrequencyText    string       `json:"frequency"` // Go 字段 FrequencyText，json 标签 frequency——对齐 prompt v3 契约
+	ActivityText     string       `json:"activity"`  // Go 字段 ActivityText，json 标签 activity——对齐 prompt 契约（同 FrequencyText/frequency 先例）
+	Tool             string       `json:"tool"`
 	// 注意 activity 的 location 复用上面 EventLocation 的 json:"location"——同一 json 键不能有两个 Go
 	// 字段（重复标签会让二者都被 encoding/json 忽略）；一条 fact 非 event 即 activity，ParseFacts 里
 	// activity 平面的 Location 从 rf.EventLocation 取值即可，故此处不再单列 Location 字段。
@@ -199,7 +206,8 @@ func ParseFacts(raw string) ([]Fact, error) {
 			OccurredAt:       strings.TrimSpace(rf.OccurredAt),
 			EndAt:            strings.TrimSpace(rf.EndAt),
 			EventLocation:    strings.TrimSpace(rf.EventLocation),
-			EventImportance:  clamp01(rf.EventImportance), // P2a①：0=未给（service 走类型默认）
+			EventImportance:  clamp01(rf.EventImportance),   // P2a①：0=未给（service 走类型默认）
+			EventRelated:     trimSubjects(rf.EventRelated), // P2a②：多人同场人物逐个 trim（空→nil，service 回退旧 Related）
 			MetricKey:        strings.TrimSpace(rf.MetricKey),
 			MetricValue:      strings.TrimSpace(rf.MetricValue),
 			MetricUnit:       strings.TrimSpace(rf.MetricUnit),
@@ -289,4 +297,18 @@ func trimSubject(s rawSubject) Subject {
 		Name:     strings.TrimSpace(s.Name),
 		Relation: strings.TrimSpace(s.Relation),
 	}
+}
+
+// trimSubjects 对一组 rawSubject 逐个 trimSubject（P2a② event related_people 多人数组用）。
+// 空/nil 输入返回 nil（不分配空切片）——service 层据 len(EventRelated)==0 回退旧 Related 单人字段，
+// nil 与空切片在此语义等价。每项与 trimSubject 同处理（Name 归一化后才能匹配同一人物）。
+func trimSubjects(ss []rawSubject) []Subject {
+	if len(ss) == 0 {
+		return nil
+	}
+	out := make([]Subject, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, trimSubject(s))
+	}
+	return out
 }

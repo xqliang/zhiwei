@@ -578,6 +578,8 @@ func (h *PersonHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 // AddEvent 手动加大事记（走 Service：active/manual/conf=1.0 + 审计）。
 // event_type 9 枚举校验；occurred_at/endAt 原始串由 Service 的 parseEventAt 尽力解析。
 // importance 可选（P2a①）：缺省/0 走事件类型默认，>0 由 Service clamp 到 (0,1]。
+// 同行人物（P2a②）：related_person_ids 数组为主，旧单字段 related_person_id 非空时并入
+// （向后兼容旧前端/调用方）；两者都空=无同行。任一 id 解析失败 → 400。
 func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 	pid, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
@@ -585,14 +587,15 @@ func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		EventType       string  `json:"event_type"`
-		Title           string  `json:"title"`
-		Description     string  `json:"description"`
-		OccurredAt      string  `json:"occurred_at"`
-		EndAt           string  `json:"end_at"`
-		Location        string  `json:"location"`
-		RelatedPersonID string  `json:"related_person_id"`
-		Importance      float64 `json:"importance"` // P2a①：可选，0/缺省=事件类型默认，>0 clamp 到 (0,1]
+		EventType        string   `json:"event_type"`
+		Title            string   `json:"title"`
+		Description      string   `json:"description"`
+		OccurredAt       string   `json:"occurred_at"`
+		EndAt            string   `json:"end_at"`
+		Location         string   `json:"location"`
+		RelatedPersonID  string   `json:"related_person_id"`  // 单字段，向后兼容保留（P2a② 前）
+		RelatedPersonIDs []string `json:"related_person_ids"` // P2a②：多人同行数组（为主）
+		Importance       float64  `json:"importance"`         // P2a①：可选，0/缺省=事件类型默认，>0 clamp 到 (0,1]
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "请求体非法", http.StatusBadRequest)
@@ -606,14 +609,26 @@ func (h *PersonHandler) AddEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "title 必填", http.StatusBadRequest)
 		return
 	}
-	var related *ids.ID
+	// 同行人物解析（P2a②）：数组为主，旧单字段非空时并入；两者都空 → related 为 nil（无同行）。
+	var related []ids.ID
+	for _, s := range req.RelatedPersonIDs {
+		if strings.TrimSpace(s) == "" {
+			continue // 容忍数组里的空串项
+		}
+		rid, err := ids.ParseID(s)
+		if err != nil {
+			http.Error(w, "related_person_ids 含非法 id", http.StatusBadRequest)
+			return
+		}
+		related = append(related, rid)
+	}
 	if req.RelatedPersonID != "" {
 		rid, err := ids.ParseID(req.RelatedPersonID)
 		if err != nil {
 			http.Error(w, "related_person_id 非法", http.StatusBadRequest)
 			return
 		}
-		related = &rid
+		related = append(related, rid)
 	}
 	e, err := h.Service.ManualAddEvent(r.Context(), pid, req.EventType, req.Title,
 		req.Description, req.OccurredAt, req.EndAt, req.Location, related, req.Importance)
