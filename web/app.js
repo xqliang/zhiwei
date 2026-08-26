@@ -2125,6 +2125,15 @@ const app = createApp({
         agentTyping.value = true; // user 帧会由服务端回显渲染气泡；这里只置「思考中」
       } catch (e) { showError(e); }
     }
+    // 停止：轮次进行中点「停止」→ WS 发 {stop:true}，请求后端优雅中止本轮（dsh abort）。
+    // 不在本地立刻清 agentTyping——以服务端为准：真正收尾的 turn_end 帧回来时由 handleAgentFrame
+    // 置 agentTyping=false 再恢复「发送」，避免「已点停止但后端仍在收尾」的中间态错乱。
+    // WS 未就绪或本就没有进行中的轮次 → 忽略（无轮可停）。
+    function stopAgentMessage() {
+      if (!agentTyping.value) return;
+      if (!agentWS || agentWS.readyState !== WebSocket.OPEN) return;
+      try { agentWS.send(JSON.stringify({ stop: true })); } catch (e) { /* 发送失败无害：轮次仍会靠 idle/超时收尾 */ }
+    }
 
     // ---------- 报告（日报/周报 + 话题状态；后端 internal/api/review.go + internal/review/types.go） ----------
     // 契约（读源确认）：
@@ -2319,7 +2328,7 @@ const app = createApp({
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       // 问知微（流式对话）
       agentConversations, agentConvId, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
-      loadAgentConversations, newAgentConversation, selectAgentConversation, sendAgentMessage,
+      loadAgentConversations, newAgentConversation, selectAgentConversation, sendAgentMessage, stopAgentMessage,
       confirmProposal, dismissProposal,
       renderMarkdown, reportSections, prettyJSON,
       // 报告（日报/周报 + 话题状态）

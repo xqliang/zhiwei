@@ -190,6 +190,82 @@ func TestOrchestratorInterleavedOrder(t *testing.T) {
 
 // TestProfileContextHead 锁定上下文头组装（D2）：有 owner + 关键属性时，头含当天日期 + owner
 // 前缀 + 关键属性值；无 Persons / nil 接收者返回 ""（调用方据此不注入）。
+// TestOrchestratorCancel 锁定 Orchestrator.Cancel：透传到所选运行时的 Cancel，且 sessionID =
+// conv.DSHSessionID。无需 DB——Cancel 不落库、不 drain，只下发取消信号。
+func TestOrchestratorCancel(t *testing.T) {
+	fake := &FakeRuntime{}
+	orch := NewOrchestrator(rtFor(fake), nil, nil)
+	conv := &repo.AgentConversation{UserID: 5, DSHSessionID: "sess-cancel-xyz"}
+	if err := orch.Cancel(t.Context(), conv); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	calls, sid := fake.CancelInfo()
+	if calls != 1 {
+		t.Errorf("FakeRuntime.Cancel 应被调用 1 次, got %d", calls)
+	}
+	if sid != "sess-cancel-xyz" {
+		t.Errorf("Cancel 的 sessionID 应为 conv.DSHSessionID, got %q", sid)
+	}
+}
+
+// TestOrchestratorCancelRoutesByUser 锁定 2B-B：Cancel 按 conv.UserID 命中该用户自己的运行时，
+// 绝不误伤别的用户的轮次。无需 DB。
+func TestOrchestratorCancelRoutesByUser(t *testing.T) {
+	fake7 := &FakeRuntime{}
+	fake9 := &FakeRuntime{}
+	runtimeFor := func(uid int64) AgentRuntime {
+		switch uid {
+		case 7:
+			return fake7
+		case 9:
+			return fake9
+		default:
+			t.Errorf("非预期 userID 路由: %d", uid)
+			return fake7
+		}
+	}
+	orch := NewOrchestrator(runtimeFor, nil, nil)
+	if err := orch.Cancel(t.Context(), &repo.AgentConversation{UserID: 9, DSHSessionID: "sess-9"}); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if c7, _ := fake7.CancelInfo(); c7 != 0 {
+		t.Errorf("用户7 的运行时不应被取消, got %d", c7)
+	}
+	c9, sid9 := fake9.CancelInfo()
+	if c9 != 1 || sid9 != "sess-9" {
+		t.Errorf("用户9 的运行时应被取消 1 次且 sid=sess-9, got calls=%d sid=%q", c9, sid9)
+	}
+}
+
+// TestOrchestratorAbortedTurnEndNotError 锁定 cancel 的收尾语义：turn/end reason.kind=aborted
+// （dsh 被 session/cancel 优雅中止时产生）不被判为错误 → RunTurn 干净返回、turn_end 帧无 error。
+// 这是整个「停止」功能能干净收尾的前提（区别于 kind=error，见 TestOrchestratorTurnError）。
+func TestOrchestratorAbortedTurnEndNotError(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convRepo := &repo.AgentConversationRepo{DB: db}
+	msgRepo := &repo.AgentMessageRepo{DB: db}
+	ctx := t.Context()
+	conv := &repo.AgentConversation{Title: "中止收尾"}
+	if err := convRepo.Create(ctx, conv); err != nil {
+		t.Fatal(err)
+	}
+	abortedData, _ := json.Marshal(map[string]any{"reason": map[string]any{
+		"kind": "aborted", "reason": map[string]any{"kind": "user"},
+	}})
+	fake := &FakeRuntime{Script: [][]Event{{{Type: EvTurnEnd, Data: abortedData}}}}
+	orch := NewOrchestrator(rtFor(fake), convRepo, msgRepo)
+	var frames []StreamFrame
+	if _, err := orch.RunTurnStream(ctx, conv, "停下", func(f StreamFrame) { frames = append(frames, f) }); err != nil {
+		t.Fatalf("aborted 轮次不应返回错误: %v", err)
+	}
+	if n := len(frames); n == 0 || frames[n-1].Type != "turn_end" || frames[n-1].Error != "" {
+		t.Errorf("末帧应为无 error 的 turn_end, got %+v", frames)
+	}
+}
+
 func TestProfileContextHead(t *testing.T) {
 	db, err := repo.NewDB(orchDSN(t))
 	if err != nil {

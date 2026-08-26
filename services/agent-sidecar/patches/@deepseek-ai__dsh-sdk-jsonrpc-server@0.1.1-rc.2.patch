@@ -1,0 +1,56 @@
+diff --git a/lib/index.js b/lib/index.js
+index e29c7e33c60e3c47b35467ad6b419a301b7e0f08..3219d26d9d93b7fbfc48125b386dd6e086c4c616 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -117,6 +117,43 @@ var HarnessSdkJsonRpcServer = class {
+ 		return { messageId: message.id };
+ 	}
+ 	/**
++	* Abort the in-progress turn (or between-turn task) of one session. Safe by
++	* design: an unknown or not-yet-created session reports `ok:false` instead of
++	* throwing, and the runtime treats `cancel()` on an already-idle agent as a
++	* no-op that does not arm later work. The first cause wins for a live turn, so
++	* a duplicate cancel is harmless.
++	* @param params - target session id (`{ sessionId }`).
++	* @returns `{ ok, sessionId, cancelled, reason? }` describing whether a live agent was signalled.
++	*/
++	cancel(params) {
++		const sessionId = params.sessionId;
++		if (typeof sessionId !== "string" || sessionId.length === 0) return {
++			ok: false,
++			cancelled: false,
++			reason: "session/cancel requires a non-empty string sessionId"
++		};
++		const rec = this.sessions.get(sessionId);
++		if (rec === void 0) return {
++			ok: false,
++			sessionId,
++			cancelled: false,
++			reason: "unknown session"
++		};
++		const agent = rec.handle.agent;
++		if (this.ctx.agents.get(agent.id) !== agent) return {
++			ok: false,
++			sessionId,
++			cancelled: false,
++			reason: "session agent was disposed outside the server"
++		};
++		agent.cancel({ kind: "user" });
++		return {
++			ok: true,
++			sessionId,
++			cancelled: true
++		};
++	}
++	/**
+ 	* Dispose server-owned agents, adapter, and subscriptions to quiescence.
+ 	* The surrounding context remains running.
+ 	* @returns empty JSON-RPC result.
+@@ -156,6 +193,7 @@ var HarnessSdkJsonRpcServer = class {
+ 		switch (method) {
+ 			case "initialize": return this.initialize(params);
+ 			case "session/prompt": return this.prompt(params);
++			case "session/cancel": return this.cancel(params);
+ 			case "shutdown": return this.shutdown();
+ 			default: throw new Error(`unknown DeepSeek Harness SDK runtime method: ${method}`);
+ 		}

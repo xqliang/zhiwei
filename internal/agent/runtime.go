@@ -19,6 +19,14 @@ type AgentRuntime interface {
 	// Prompt 向某会话发一条用户消息，返回该轮的事件流 channel（轮次结束时关闭）。
 	// 同一 sessionID 复用会话记忆；channel 关闭表示该轮 idle。
 	Prompt(ctx context.Context, sessionID, text string) (<-chan Event, error)
+	// Cancel 请求 dsh 优雅中止 sessionID 进行中的一轮（用户点「停止」）。
+	// 语义：发 session/cancel RPC 让 dsh 内部 agent.cancel({kind:'user'}) 优雅 abort
+	// → 产生 turn/end reason.kind=aborted + session.status:idle → readLoop 收到 idle 后
+	// close(turns[sid]) → RunTurnStream 的 drain 循环因 channel 关闭而自然返回。
+	// 关键：Cancel【不】取消该轮的事件流 channel、也不碰 turnCtx——那会违反 drain 契约、
+	// wedge 唯一的 readLoop；取消完全靠 dsh 优雅 abort 后 channel 自然关闭来收尾。
+	// dsh 若不支持该 method → 返回 rpc 错误；调用方应吞掉并记日志，轮次照旧靠 idle/超时收尾。
+	Cancel(ctx context.Context, sessionID string) error
 	// Close 关停底层 dsh 进程。
 	Close() error
 }
@@ -294,7 +302,8 @@ func (r *dshRuntime) call(ctx context.Context, method string, params any) (json.
 // 返回的 channel 是 buffered 的；一旦消费者 stall 或提前放弃（不再接收），buffer 填满后就会
 // 阻塞唯一的读 goroutine（readLoop），进而 wedge 整个 runtime——任何 session 都不会再收到
 // 后续的 RPC 响应/事件。P2c 的 WS 消费者必须遵守本契约（即便自身 ctx 已取消，也要把 channel
-// drain 完）。当前暂不引入中止机制；P2b 唯一的消费者会完整 drain。
+// drain 完）。中止一轮请用 Cancel（发 session/cancel 让 dsh 优雅 abort→idle→本 channel 自然
+// 关闭→drain 循环结束）；绝不能用 ctx.cancel/提前弃读来「中止」——那正是会 wedge readLoop 的做法。
 //
 // 单轮次契约：同一 sessionID 同时只能有一个进行中的轮次；若已存在则直接返回错误。
 func (r *dshRuntime) Prompt(ctx context.Context, sessionID, text string) (<-chan Event, error) {
@@ -324,6 +333,26 @@ func (r *dshRuntime) Prompt(ctx context.Context, sessionID, text string) (<-chan
 		return nil, err
 	}
 	return ch, nil
+}
+
+// Cancel 请求 dsh 优雅中止 sessionID 进行中的一轮：发 session/cancel RPC。
+//
+// 机制（见接口注释）：dsh 收到后走进程内 agent.cancel({kind:'user'}) → turn/end aborted +
+// session.status:idle；readLoop 收到 idle 后 close(turns[sid])，进行中那轮的 drain 循环
+// 因 channel 关闭而自然返回。故本方法【只】发一条 RPC，绝不触碰 turns/pending/turnCtx，
+// 与事件流并发进行（session/prompt 异步返回，流式期间 RPC 通道空闲，call/readLoop 按 id 配对）。
+//
+// 未启动即无任何进行中的轮次可中止（stdin 也尚未就绪）→ 直接返回 nil（no-op）。
+// dsh 若不认识该 method → call 返回 rpc 错误，原样上抛，由调用方吞掉记日志。
+func (r *dshRuntime) Cancel(ctx context.Context, sessionID string) error {
+	r.startMu.Lock()
+	started := r.started
+	r.startMu.Unlock()
+	if !started {
+		return nil
+	}
+	_, err := r.call(ctx, "session/cancel", map[string]any{"sessionId": sessionID})
+	return err
 }
 
 func (r *dshRuntime) Close() error {

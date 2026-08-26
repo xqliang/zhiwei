@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@deepseek-ai/dsh-sdk-jsonrpc-server@0.1.1-rc.2': c0de29932aa0cabddb80360a1c303c5870e8e94b4de9eb710de4841ae8a40e75
+
 importers:
 
   .:
@@ -34,7 +37,7 @@ importers:
         version: 0.1.1-rc.2(c9524108c190e71bbdd2fefa0fb6ebb6)
       '@deepseek-ai/dsh-sdk-jsonrpc-server':
         specifier: 0.1.1-rc.2
-        version: 0.1.1-rc.2(bf21f75a91b2795fd405f99bf636583c)
+        version: 0.1.1-rc.2(patch_hash=c0de29932aa0cabddb80360a1c303c5870e8e94b4de9eb710de4841ae8a40e75)(bf21f75a91b2795fd405f99bf636583c)
       '@deepseek-ai/dsh-session-checkpoint-policy':
         specifier: 0.1.1-rc.2
         version: 0.1.1-rc.2(a89f7fb723bc2edff23ecaedc7d274b5)
@@ -1640,7 +1643,7 @@ snapshots:
       - '@deepseek-ai/dsh-launch-environment'
       - '@deepseek-ai/dsh-system-prompt'
 
-  '@deepseek-ai/dsh-sdk-jsonrpc-server@0.1.1-rc.2(bf21f75a91b2795fd405f99bf636583c)':
+  '@deepseek-ai/dsh-sdk-jsonrpc-server@0.1.1-rc.2(patch_hash=c0de29932aa0cabddb80360a1c303c5870e8e94b4de9eb710de4841ae8a40e75)(bf21f75a91b2795fd405f99bf636583c)':
     dependencies:
       '@deepseek-ai/cordis': 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       '@deepseek-ai/dsh-agent': 0.1.1-rc.2(c1537a8836b04097f168b024f1e38d85)

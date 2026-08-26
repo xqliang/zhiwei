@@ -47,12 +47,29 @@ func (c *wsConn) writeJSON(v any) error {
 	return c.conn.WriteJSON(v)
 }
 
+// inMsg 是 reader goroutine 投递给主循环的一条上行消息：普通文本（起一轮）或停止（中止当前活轮）。
+type inMsg struct {
+	Text string
+	Stop bool
+}
+
 // handleWS 处理 GET /api/agent/conversations/{cid}/ws：
-// 上行读用户消息 {"text": "..."}，每条跑一轮 RunTurnStream，下行按事件顺序推 StreamFrame。
+// 上行 {"text":"..."}（起一轮）或 {"stop":true}（中止当前活轮），下行按事件顺序推 StreamFrame。
 //
-// 断连处理（关键）：客户端断开时下一次 ReadJSON 报错→退出循环。若断在轮次中途，emit 的
-// 写失败被吞掉并记录，但 runTurn 仍会把 runtime 事件 channel drain 到关闭（满足单 readLoop
-// 契约）后才返回——绝不因断连提前 return 而拖死 runtime。
+// 并发模型（本次为支持「轮次进行中中止」而从串行读循环改造）：
+//   - reader goroutine：唯一的 raw.ReadJSON 读者，把上行帧投递到 inCh；断连/协议错→close(inCh) 退出。
+//     拆出独立 goroutine 是关键——旧的串行循环要等 RunTurnStream 跑完才回到 ReadJSON，轮次进行中
+//     根本读不到 {stop:true}。
+//   - turn goroutine：一轮 RunTurnStream 单独跑在一个 goroutine（跑完发 turnDone），使主循环在轮次
+//     进行中仍能继续从 inCh 收 stop。
+//   - 主循环：select { inCh | turnDone }，用 turnRunning 维持「单连接单活轮」；收到 stop 且有活轮时
+//     经 h.Orch.Cancel 发 session/cancel（独立 background+短超时 ctx，【绝不】取消 turnCtx——那会
+//     违反 drain 契约、wedge readLoop）。取消后 dsh 优雅 abort→事件流关闭→RunTurnStream 自然收尾。
+//
+// 并发正确性：raw.ReadJSON 只在 reader、写只经 wsConn.writeJSON（c.mu 串行化，满足 gorilla 单读单写）；
+// turnRunning/turnDone 只被主循环触碰；conv 只读。断连时若轮次在跑，不打断落库（drain 契约）——直接
+// 返回让 turn goroutine 自然把事件 drain 完（emit 写失败被吞掉），turnDone 是 buffered(1) 故其收尾发送
+// 即使无人接收也不阻塞、不泄漏。
 func (h *AgentHandler) handleWS(w http.ResponseWriter, r *http.Request) {
 	uid, ok := reqUserID(r)
 	if !ok {
@@ -78,30 +95,84 @@ func (h *AgentHandler) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer raw.Close()
 	c := &wsConn{conn: raw}
 
-	for {
-		var in struct {
-			Text string `json:"text"`
+	// reader goroutine：只管读 + 投递；读错（断连/协议错）→ close(inCh) 通知主循环后退出。
+	inCh := make(chan inMsg, 8)
+	go func() {
+		defer close(inCh)
+		for {
+			var in struct {
+				Text string `json:"text"`
+				Stop bool   `json:"stop"`
+			}
+			if err := raw.ReadJSON(&in); err != nil {
+				return
+			}
+			inCh <- inMsg{Text: in.Text, Stop: in.Stop}
 		}
-		if err := raw.ReadJSON(&in); err != nil {
-			return // 断开 / 协议错误：结束会话循环
-		}
-		if in.Text == "" {
-			_ = c.writeJSON(StreamFrame{Type: "turn_end", Error: "text required"})
-			continue
-		}
-		// 每轮用独立、脱离请求取消的 context：客户端中途断开不应打断落库；runtime 无 turn 级
-		// cancel，轮次靠 dsh 的 idle 自然收尾，5 分钟超时兜底防极端卡死。
-		turnCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		emit := func(f StreamFrame) {
-			if err := c.writeJSON(f); err != nil {
-				log.Printf("[ws] 写帧失败(继续 drain): %v", err)
+	}()
+
+	// 主循环：协调「单连接单活轮」。turnRunning 只被本 goroutine 读写。
+	var turnRunning bool
+	turnDone := make(chan struct{}, 1) // buffered(1)：turn 收尾发送即使主循环已返回也不阻塞
+	// drainDone 机会性回收一个已完成的轮次（把 turnDone 里可能待处理的完成信号先吃掉），避免
+	// 「轮次刚结束、turnDone 尚未被 select 处理」时把紧接着的新一轮误判成并发第二轮而拒绝。
+	drainDone := func() {
+		if turnRunning {
+			select {
+			case <-turnDone:
+				turnRunning = false
+			default:
 			}
 		}
-		_, err := h.Orch.RunTurnStream(turnCtx, conv, in.Text, emit)
-		cancel()
-		if err != nil {
-			log.Printf("[ws] conv=%s 轮次错误: %v", cid, err)
-			// turn_end 帧（含 Error）已在 runTurn 内推出，这里不重复推送。
+	}
+	for {
+		select {
+		case in, ok := <-inCh:
+			if !ok {
+				return // 断连：reader 已退出。若有轮次在跑，不打断它（drain 契约），让其自然收尾。
+			}
+			if in.Stop {
+				drainDone()
+				if turnRunning {
+					// 独立、短超时的 ctx 下发 session/cancel；绝不取消 turnCtx。
+					cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+					if err := h.Orch.Cancel(cctx, conv); err != nil {
+						log.Printf("[ws] conv=%s 取消失败(轮次将靠 idle/超时收尾): %v", cid, err)
+					}
+					ccancel()
+				}
+				continue
+			}
+			if in.Text == "" {
+				_ = c.writeJSON(StreamFrame{Type: "turn_end", Error: "text required"})
+				continue
+			}
+			drainDone()
+			if turnRunning {
+				// 单连接单活轮：已有轮次在跑，拒绝并发第二轮（回一帧错误的 turn_end，前端恢复输入）。
+				_ = c.writeJSON(StreamFrame{Type: "turn_end", Error: "已有进行中的一轮，请稍候"})
+				continue
+			}
+			turnRunning = true
+			text := in.Text
+			// 每轮用独立、脱离请求取消的 context：客户端中途断开不应打断落库；中止靠 dsh 的
+			// session/cancel（上面），不靠 turnCtx；5 分钟超时兜底防极端卡死。
+			turnCtx, turnCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			go func() {
+				defer func() { turnDone <- struct{}{} }()
+				defer turnCancel()
+				emit := func(f StreamFrame) {
+					if err := c.writeJSON(f); err != nil {
+						log.Printf("[ws] 写帧失败(继续 drain): %v", err)
+					}
+				}
+				if _, err := h.Orch.RunTurnStream(turnCtx, conv, text, emit); err != nil {
+					log.Printf("[ws] conv=%s 轮次错误: %v", cid, err)
+					// turn_end 帧（含 Error）已在 runTurn 内推出，这里不重复推送。
+				}
+			}()
+		case <-turnDone:
+			turnRunning = false
 		}
 	}
 }

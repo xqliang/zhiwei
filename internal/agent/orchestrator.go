@@ -41,6 +41,14 @@ func (o *Orchestrator) RunTurnStream(ctx context.Context, conv *repo.AgentConver
 	return o.runTurn(ctx, conv, userText, emit)
 }
 
+// Cancel 请求中止某会话进行中的一轮（ws 收到 {stop:true} 时调用）。按 conv.UserID 选运行时
+// （2B-B：命中该会话自己的 dsh 进程，绝不误伤别人的轮次），对 conv.DSHSessionID 发 session/cancel。
+// dsh 优雅 abort → 事件流自然关闭 → 正在跑的 RunTurnStream 的 drain 循环结束并推 turn_end 收尾。
+// 本方法不参与该轮的落库/drain（编排器不持有 per-turn 句柄），只负责下发取消信号。
+func (o *Orchestrator) Cancel(ctx context.Context, conv *repo.AgentConversation) error {
+	return o.RuntimeFor(conv.UserID).Cancel(ctx, conv.DSHSessionID)
+}
+
 // runTurn 是一轮对话的核心：落用户消息 → 驱动 runtime → 完整消费（drain）事件 channel
 // 直到关闭（满足 AgentRuntime.Prompt 的 drain 契约）→ 每个事件按序各自成行落库（I1：
 // dsh 一轮里「先说一句 → 调工具 → 再答复」必须保序，不能拼成一条排到工具行后）→

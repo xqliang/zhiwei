@@ -847,9 +847,9 @@
           <div class="agent-input">
             <textarea class="txt" v-model="agentInput" rows="1" placeholder="问知微…（Enter 发送，Shift+Enter 换行）"
                       @keydown.enter.exact.prevent="sendAgentMessage"></textarea>
-            <button class="btn primary" :disabled="!agentInput.trim() || agentTyping || !agentConnected" @click="sendAgentMessage">
-              <span v-if="agentTyping" class="spinner"></span>{{ agentTyping ? '回复中' : '发送' }}
-            </button>
+            <!-- 轮次进行中显示「停止」(→ WS {stop:true} 请求优雅中止)，否则显示「发送」；收 turn_end 后 agentTyping 复位自动切回 -->
+            <button v-if="agentTyping" class="btn" @click="stopAgentMessage" :disabled="!agentConnected" title="停止本轮回复">停止</button>
+            <button v-else class="btn primary" :disabled="!agentInput.trim() || !agentConnected" @click="sendAgentMessage">发送</button>
           </div>
         </template>
       </div>
@@ -1856,6 +1856,6 @@
   </template>
 </div>
 
-<script src="/app/app.f3ed50eb.js"></script>
+<script src="/app/app.21ddda0e.js"></script>
 </body>
 </html>
