@@ -22,6 +22,9 @@ var ErrNotFound = errors.New("记录不存在")
 // ErrPersonHasSpeaker 目标人物已绑定其他声纹（API 层映射 409；一人至多一声纹）。
 var ErrPersonHasSpeaker = errors.New("该人物已绑定其他声纹")
 
+// ErrPetNameExists 手动改名为已有同名宠物（active）时拒绝（API 层映射 409）。
+var ErrPetNameExists = errors.New("同名宠物已存在")
+
 // Service 是画像域的编排服务：pipeline profile stage 与 API（回填/确认/手动 CRUD）
 // 共用同一入口，保证「写必带审计 + 单事务 + 闸门」三件事只实现一次。
 type Service struct {
@@ -37,6 +40,7 @@ type Service struct {
 	Metrics       *repo.PersonMetricRepo   // metric 平面（P3 时序个人指标）
 	Cycles        *repo.PersonCycleRepo    // cycle 平面（P3 周期/日程，敏感）
 	Activities    *repo.PersonActivityRepo // activity 平面（P4 生活轨迹，测点流语义）
+	Pets          *repo.PersonPetRepo      // pet 平面（宠物）
 	ChangeLogs    *repo.PersonChangeLogRepo
 
 	LLM           provider.LLMProvider // ExtractSession 用（Task 13）；手动 CRUD 不需要
@@ -178,6 +182,9 @@ func (s *Service) applyFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fa
 	}
 	if f.Plane == "cycle" {
 		return s.applyCycleFact(ctx, tx, userID, f, personID, memID, prov, st)
+	}
+	if f.Plane == "pet" {
+		return s.applyPetFact(ctx, tx, userID, f, personID, memID, prov, st)
 	}
 	if f.Plane == "relationship" {
 		return s.applyRelationshipFact(ctx, tx, userID, f, personID, memID, prov, st)
@@ -605,6 +612,221 @@ func (s *Service) applyCycleFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 		}
 	}
 	return nil
+}
+
+// ---- pet 平面（宠物）----
+
+// applyPetFact 宠物落库：同名单值语义（同 person+name 至多一条 active）+ 字段级合并整行重写。
+//   - 新宠物（无同名 active）→ 按置信度 active/pending（对齐 cycle）；
+//   - 同名现值存在：先同值短路（petFieldsEqual：fact 提到的字段与现值全一致 → 仅 reaffirm 审计，
+//     防确认疲劳，对齐 cycle 同参短路）；有变化 → mergePetRow 字段合并（提到的覆盖、未提到沿用）——
+//     高置信：合并行直接 active + 旧行 superseded（整只替换，对齐手动改值路径 ManualUpdatePet）；
+//     低置信：合并行 pending + supersedes 指向旧行（确认后替换，绝不静默覆盖）。
+func (s *Service) applyPetFact(ctx context.Context, tx *sqlx.Tx, userID int64, f Fact,
+	personID ids.ID, memID *ids.ID, prov Provenance, st *ApplyStats) error {
+
+	name := strings.TrimSpace(f.PetName)
+	existing, err := s.Pets.FindActiveByNameExt(ctx, tx, personID, name)
+	if err != nil {
+		return err
+	}
+	dedup, err := s.Pets.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, name)
+	if err != nil {
+		return err
+	}
+
+	// 同值佐证短路：跨 session 未命中自然键、但 fact 提到的字段与现值全一致（「我家猫小花」
+	// 裸重提）→ 仅审计，不加行不进队列。
+	if dedup == nil && existing != nil && petFieldsEqual(existing, f) {
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: personID, EntityKind: "pet", EntityID: &existing.ID,
+			ChangeType: "reaffirm", ChangedBy: "llm", NewValue: snap(petSummary(existing)),
+			SessionID: &prov.SessionID, MemoryID: memID,
+			TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+			Note:                 strPtr("同值佐证：宠物信息未变化"),
+		}); err != nil {
+			return err
+		}
+		st.Reaffirmed++
+		return nil
+	}
+
+	dec := DecidePet(f, existing, dedup != nil, s.Gate)
+	switch dec {
+	case DecisionSkip:
+		st.Skipped++
+	case DecisionCreateActive, DecisionCreatePending:
+		status := "pending"
+		if dec == DecisionCreateActive {
+			status = "active"
+		}
+		row := petRow(userID, personID, f, status, nil, memID, prov)
+		if err := s.Pets.CreateExt(ctx, tx, row); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, createPetLog(personID, row, memID, prov, "")); err != nil {
+			return err
+		}
+		if status == "active" {
+			st.Active++
+		} else {
+			st.Pending++
+		}
+	case DecisionConflictPending:
+		// DecidePet 仅在 existing != nil 时返回 ConflictPending，此处必非空；仍防御性判空
+		//（与 applyAttributeFact 冲突分支同构）。
+		if existing == nil {
+			st.Skipped++
+			return nil
+		}
+		idv := existing.ID
+		if autoWritable(f, s.Gate) {
+			// 高置信：合并行直接 active，旧行 superseded（整只替换——LLM 高置信新信息
+			// 无须人工确认即可合并，对齐手动改值路径的落库形态）。
+			if err := s.Pets.SetStatusExt(ctx, tx, existing.ID, "superseded"); err != nil {
+				return err
+			}
+			row := mergePetRow(userID, existing, f, "active", &idv, memID, prov)
+			if err := s.Pets.CreateExt(ctx, tx, row); err != nil {
+				return err
+			}
+			if err := s.ChangeLogs.CreateExt(ctx, tx, createPetLog(personID, row, memID, prov, "合并更新：新信息覆盖，未提到字段沿用")); err != nil {
+				return err
+			}
+			st.Active++
+		} else {
+			// 低置信：pending 指向现值，确认后替换（绝不静默覆盖）。
+			row := mergePetRow(userID, existing, f, "pending", &idv, memID, prov)
+			if err := s.Pets.CreateExt(ctx, tx, row); err != nil {
+				return err
+			}
+			if err := s.ChangeLogs.CreateExt(ctx, tx, createPetLog(personID, row, memID, prov, "conflict: 与现有宠物记录待合并，待人工确认")); err != nil {
+				return err
+			}
+			st.Pending++
+			st.Conflicts++
+		}
+	}
+	return nil
+}
+
+// petRow 构造一条新宠物行（新宠物路径）：可空串 trim 空→nil（<=> NULL 约定，对齐 activity）；
+// species 归一（缺省/非法→其他）；birthday 走 parseEventAt（UTC 零点归一，失败存 NULL——
+// 生日是估算增强信息，解析不到不阻断宠物创建，age_text 已保留原始表述）。
+func petRow(userID int64, personID ids.ID, f Fact, status string,
+	sup, memID *ids.ID, prov Provenance) *repo.PersonPet {
+	row := &repo.PersonPet{
+		UserID: userID, PersonID: personID,
+		Name:     strings.TrimSpace(f.PetName),
+		Nickname: trimToPtr(f.PetNickname),
+		Species:  NormalizeSpecies(f.Species),
+		Breed:    trimToPtr(f.Breed),
+		Gender:   trimToPtr(f.Gender),
+		AgeText:  trimToPtr(f.AgeText),
+		Likes:    trimToPtr(f.Likes),
+		Confidence: f.Confidence, EpistemicType: f.EpistemicType,
+		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs), SupersedesID: sup,
+	}
+	if t, ok := parseEventAt(f.Birthday); ok {
+		row.Birthday = &t
+	}
+	return row
+}
+
+// mergePetRow 字段级合并构造（同名现值 + 新事实 → 整只替换的新版本行）：
+// f 提到的字段（trim 非空）覆盖，未提到的字段从 existing 沿用。name 恒用 existing
+//（同名才走合并；改名属手动路径 ManualUpdatePet）。
+func mergePetRow(userID int64, existing *repo.PersonPet, f Fact, status string,
+	sup, memID *ids.ID, prov Provenance) *repo.PersonPet {
+	row := &repo.PersonPet{
+		UserID: userID, PersonID: existing.PersonID,
+		Name:     existing.Name,
+		Nickname: existing.Nickname, Species: existing.Species,
+		Breed: existing.Breed, Gender: existing.Gender,
+		AgeText: existing.AgeText, Birthday: existing.Birthday, Likes: existing.Likes,
+		Confidence: f.Confidence, EpistemicType: f.EpistemicType,
+		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs), SupersedesID: sup,
+	}
+	if v := trimToPtr(f.PetNickname); v != nil {
+		row.Nickname = v
+	}
+	if v := strings.TrimSpace(f.Species); v != "" {
+		row.Species = NormalizeSpecies(v)
+	}
+	if v := trimToPtr(f.Breed); v != nil {
+		row.Breed = v
+	}
+	if v := trimToPtr(f.Gender); v != nil {
+		row.Gender = v
+	}
+	if v := trimToPtr(f.AgeText); v != nil {
+		row.AgeText = v
+	}
+	if v := trimToPtr(f.Likes); v != nil {
+		row.Likes = v
+	}
+	if t, ok := parseEventAt(f.Birthday); ok {
+		row.Birthday = &t
+	}
+	return row
+}
+
+// petFieldsEqual 判断 fact 提到的字段与现值是否全一致（同值佐证短路的判据）。
+// 缺省兼容（对齐 cycleParamsEqual）：f 未给的字段（trim 空）不主张变化、与现值任意值兼容。
+func petFieldsEqual(e *repo.PersonPet, f Fact) bool {
+	if v := strings.TrimSpace(f.PetNickname); v != "" && derefStr(e.Nickname) != v {
+		return false
+	}
+	if v := strings.TrimSpace(f.Species); v != "" && e.Species != NormalizeSpecies(v) {
+		return false
+	}
+	if v := strings.TrimSpace(f.Breed); v != "" && derefStr(e.Breed) != v {
+		return false
+	}
+	if v := strings.TrimSpace(f.Gender); v != "" && derefStr(e.Gender) != v {
+		return false
+	}
+	if v := strings.TrimSpace(f.AgeText); v != "" && derefStr(e.AgeText) != v {
+		return false
+	}
+	if v := strings.TrimSpace(f.Birthday); v != "" {
+		if e.Birthday == nil {
+			return false
+		}
+		if t, ok := parseEventAt(v); !ok || !t.Equal(*e.Birthday) {
+			return false
+		}
+	}
+	if v := strings.TrimSpace(f.Likes); v != "" && derefStr(e.Likes) != v {
+		return false
+	}
+	return true
+}
+
+// petSummary 宠物行摘要（change_log new_value / 确认队列展示用）：名（类别·品种）。
+func petSummary(p *repo.PersonPet) string {
+	b := p.Name + "（" + p.Species
+	if p.Breed != nil {
+		b += "·" + *p.Breed
+	}
+	b += "）"
+	return b
+}
+
+// createPetLog 宠物创建审计（LLM 路径）。
+func createPetLog(personID ids.ID, row *repo.PersonPet, memID *ids.ID, prov Provenance, note string) *repo.PersonChangeLog {
+	l := &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "pet", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "llm", NewValue: snap(petSummary(row)),
+		Confidence: fp(row.Confidence), SessionID: &prov.SessionID, MemoryID: memID,
+		TranscriptSegmentIDs: ids.List(prov.SegmentIDs),
+	}
+	if note != "" {
+		l.Note = strPtr(note)
+	}
+	return l
 }
 
 // ---- 人物归属解析（spec §6.2）----

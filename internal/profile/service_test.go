@@ -40,6 +40,7 @@ func newTestService(t *testing.T) *Service {
 		Metrics:       &repo.PersonMetricRepo{DB: db},
 		Cycles:        &repo.PersonCycleRepo{DB: db},
 		Activities:    &repo.PersonActivityRepo{DB: db},
+		Pets:          &repo.PersonPetRepo{DB: db},
 		ChangeLogs:    &repo.PersonChangeLogRepo{DB: db},
 		Gate:          GateConfig{AutoConf: 0.75},
 	}
