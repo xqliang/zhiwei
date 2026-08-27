@@ -1539,6 +1539,71 @@
         </div>
       </div>
 
+      <!-- 宠物（pet 平面）：一只一行卡片（名/小名/类别·品种/性别/年龄·生日/喜好） -->
+      <div style="margin-bottom:12px">
+        <div class="kv" style="margin-bottom:4px">
+          <div class="muted" style="font-weight:600">宠物</div>
+          <button class="btn mini" @click="toggleAddPet">{{ showAddPet ? '收起' : '＋ 加宠物' }}</button>
+        </div>
+        <div v-if="petLoading" class="muted">加载中…</div>
+        <template v-else>
+          <div v-for="pt in petRows" :key="pt.id" class="seg">
+            <span class="chip" style="background:var(--surface-sunken); color:var(--text-2)">{{ pt.species }}</span>
+            <div class="seg-text">
+              <div>
+                <b>{{ pt.name }}</b>
+                <span v-if="pt.nickname" class="muted"> · 小名 {{ pt.nickname }}</span>
+                <span class="chip" :style="pt.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ pt.source === 'llm' ? 'AI' : '人工' }}</span>
+                <span v-if="pt.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+              </div>
+              <div class="muted" style="font-size:var(--fs-xs)">
+                <span v-if="pt.breed">{{ pt.breed }}</span>
+                <span v-if="pt.gender"> · {{ pt.gender }}</span>
+                <span v-if="pt.age_text"> · {{ pt.age_text }}</span>
+                <span v-if="pt.birthday"> · 生日 {{ fmtDateOnly(pt.birthday) }}</span>
+                <span v-if="pt.likes"> · {{ pt.likes }}</span>
+              </div>
+            </div>
+            <div style="display:flex; gap:4px; flex-shrink:0">
+              <template v-if="deletingPetId === pt.id">
+                <span class="muted">删除？</span>
+                <button class="btn mini danger" @click="confirmDeletePet">确认</button>
+                <button class="btn mini" @click="deletingPetId=null">取消</button>
+              </template>
+              <template v-else>
+                <button class="btn mini" @click="startEditPet(pt)" title="编辑（整只替换，旧行留痕）">✎</button>
+                <button class="btn mini danger" @click="askDeletePet(pt)" title="删除宠物">🗑</button>
+              </template>
+            </div>
+          </div>
+          <div v-if="!petRows.length" class="muted" style="font-size:var(--fs-xs)">暂无宠物。从对话自动抽取或手动添加。</div>
+        </template>
+        <!-- 加/编辑宠物表单（同一张表单：editingPetId 空=新增，非空=编辑回填） -->
+        <div class="card sunken" v-if="showAddPet" style="margin-top:8px">
+          <div class="kv" style="margin-bottom:8px"><b>{{ editingPetId ? '编辑宠物' : '加宠物' }}</b><button class="btn-link" @click="toggleAddPet">✕</button></div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+            <input class="txt" v-model="addPetForm.name" placeholder="名字（如 小花）*" style="flex:1; min-width:100px">
+            <input class="txt" v-model="addPetForm.nickname" placeholder="小名（可空）" style="flex:1; min-width:100px">
+            <select class="txt" v-model="addPetForm.species" style="min-width:90px">
+              <option v-for="sp in PET_SPECIES" :key="sp" :value="sp">{{ sp }}</option>
+            </select>
+            <input class="txt" v-model="addPetForm.breed" placeholder="品种（可空）" style="flex:1; min-width:100px">
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px">
+            <select class="txt" v-model="addPetForm.gender" style="min-width:80px">
+              <option value="">性别</option>
+              <option value="公">公</option>
+              <option value="母">母</option>
+            </select>
+            <input class="txt" v-model="addPetForm.age_text" placeholder="年龄（如 3岁）" style="flex:1; min-width:90px">
+            <input class="txt" v-model="addPetForm.birthday" type="date" title="生日（手动必填）" style="width:auto; min-width:130px">
+            <input class="txt" v-model="addPetForm.likes" placeholder="喜好（可空）" style="flex:1; min-width:120px">
+            <button class="btn primary" :disabled="savingPet" @click="submitPet">{{ savingPet ? '保存中…' : '保存' }}</button>
+          </div>
+          <div class="muted" style="font-size:var(--fs-xs); margin-top:4px">名字与生日必填；生日手动录入须为准确日期（YYYY-MM-DD）。手动添加立即生效（来源=人工 · 置信度 100%）。</div>
+        </div>
+      </div>
+
       <!-- 大事记（按年分组，时间倒序；与属性/关系互补：属性记「有过的」，大事记记「某次发生的」） -->
       <div v-if="personDetail.events && personDetail.events.length" style="margin-bottom:12px">
         <div class="muted" style="font-weight:600; margin-bottom:4px">大事记</div>

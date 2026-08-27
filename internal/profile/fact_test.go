@@ -177,3 +177,38 @@ func TestParseFactsActivity(t *testing.T) {
 		t.Fatalf("activity fact1 错误（可空字段缺省合法）: %+v", f1)
 	}
 }
+
+// TestParsePetFacts 覆盖 pet 平面解析：合法行保留、name 缺失丢弃、species 原样保留
+// （解析层不再归一——非法值/缺省的收敛「其他」推迟到写入期 petRow/mergePetRow）。
+func TestParsePetFacts(t *testing.T) {
+	raw := `{"facts":[
+	  {"plane":"pet","subject":{"kind":"self"},"pet_name":"小花","pet_nickname":"花花",
+	   "species":"猫","breed":"布偶","gender":"母","age_text":"3岁","birthday":"2023-04-01",
+	   "likes":"不吃鱼","confidence":0.9,"epistemic_type":"observed","block_index":1},
+	  {"plane":"pet","subject":{"kind":"self"},"species":"狗","confidence":0.9,"epistemic_type":"observed"},
+	  {"plane":"pet","subject":{"kind":"self"},"pet_name":"豆豆","species":"龙猫","confidence":0.9,"epistemic_type":"observed"},
+	  {"plane":"pet","subject":{"kind":"self"},"pet_name":"旺财","confidence":0.6,"epistemic_type":"observed"}
+	]}`
+	facts, err := ParseFacts(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 3 {
+		t.Fatalf("应保留 3 条（缺 pet_name 的丢弃）: %d", len(facts))
+	}
+	f0 := facts[0]
+	if f0.PetName != "小花" || f0.PetNickname != "花花" || f0.Species != "猫" ||
+		f0.Breed != "布偶" || f0.Gender != "母" || f0.AgeText != "3岁" ||
+		f0.Birthday != "2023-04-01" || f0.Likes != "不吃鱼" {
+		t.Fatalf("① 字段解析异常: %+v", f0)
+	}
+	if facts[1].Species != "龙猫" {
+		t.Fatalf("② 非法 species 应原样保留（收敛推迟到写入期）: %q", facts[1].Species)
+	}
+	if facts[2].Species != "" {
+		t.Fatalf("③ 缺省 species 应保留空串（未提到，收敛推迟到写入期）: %q", facts[2].Species)
+	}
+	if facts[2].PetName != "旺财" {
+		t.Fatalf("③ pet_name 应保留: %q", facts[2].PetName)
+	}
+}

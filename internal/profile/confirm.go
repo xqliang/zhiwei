@@ -243,8 +243,46 @@ func (s *Service) ConfirmPending(ctx context.Context, userID int64, kind string,
 		}); err != nil {
 			return err
 		}
+	case "pet":
+		pet, err := s.Pets.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		if pet == nil {
+			return ErrNotFound
+		}
+		if err := s.assertPersonOwner(ctx, userID, pet.PersonID); err != nil {
+			return err
+		}
+		if pet.Status != "pending" {
+			return fmt.Errorf("仅 pending 状态可确认（当前 %s）", pet.Status)
+		}
+		// pet 有 supersedes_id（低置信合并 pending 指向现值 active 行）——确认时旧 active 行
+		// → superseded 并补 supersede 审计（与 attribute/relationship/cycle 同构）。
+		if pet.SupersedesID != nil {
+			if err := s.Pets.SetStatusExt(ctx, tx, *pet.SupersedesID, "superseded"); err != nil {
+				return err
+			}
+			if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+				PersonID: pet.PersonID, EntityKind: "pet", EntityID: pet.SupersedesID,
+				ChangeType: "supersede", ChangedBy: "user",
+				Note: strPtr("冲突确认：旧宠物记录被合并新记录替换"),
+			}); err != nil {
+				return err
+			}
+		}
+		if err := s.Pets.SetStatusExt(ctx, tx, id, "active"); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: pet.PersonID, EntityKind: "pet", EntityID: &id,
+			ChangeType: "confirm", ChangedBy: "user", NewValue: snap(petSummary(pet)),
+			Confidence: fp(pet.Confidence),
+		}); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric|cycle|activity）", kind)
+		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric|cycle|activity|pet）", kind)
 	}
 	return tx.Commit()
 }
@@ -397,8 +435,28 @@ func (s *Service) DismissPending(ctx context.Context, userID int64, kind string,
 		}); err != nil {
 			return err
 		}
+	case "pet":
+		pet, err := s.Pets.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		if pet == nil {
+			return ErrNotFound
+		}
+		if err := s.assertPersonOwner(ctx, userID, pet.PersonID); err != nil {
+			return err
+		}
+		if err := s.Pets.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: pet.PersonID, EntityKind: "pet", EntityID: &id,
+			ChangeType: "dismiss", ChangedBy: "user", OldValue: snap(petSummary(pet)),
+		}); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric|cycle|activity）", kind)
+		return fmt.Errorf("未知 kind: %s（可选 person|attribute|relationship|event|metric|cycle|activity|pet）", kind)
 	}
 	return tx.Commit()
 }

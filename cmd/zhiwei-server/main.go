@@ -89,6 +89,7 @@ func main() {
 	personMetrics := &repo.PersonMetricRepo{DB: db}
 	personCycles := &repo.PersonCycleRepo{DB: db}
 	personActivities := &repo.PersonActivityRepo{DB: db}
+	personPets := &repo.PersonPetRepo{DB: db}
 	personLogs := &repo.PersonChangeLogRepo{DB: db}
 	// 画像回填：owner「我」+ speaker→person（幂等，见 repo.EnsurePersonBootstrap）
 	if err := repo.EnsurePersonBootstrap(context.Background(), persons, speakers); err != nil {
@@ -155,11 +156,11 @@ func main() {
 	}
 
 	// 画像抽取 prompt（版本化文件；版本号见文件名）
-	profilePromptBytes, err := os.ReadFile("prompts/profile_extraction_v3.md")
+	profilePromptBytes, err := os.ReadFile("prompts/profile_extraction_v4.md")
 	if err != nil {
 		log.Fatal("读取画像抽取 prompt 失败: ", err)
 	}
-	profilePromptVersion := strings.TrimSuffix(filepath.Base("prompts/profile_extraction_v3.md"), ".md")
+	profilePromptVersion := strings.TrimSuffix(filepath.Base("prompts/profile_extraction_v4.md"), ".md")
 
 	// pipeline 装配：ASR 默认 file（StepFun 异步文件 ASR，原生 diarization + ms 时间戳）。
 	// ZW_ASR_PROVIDER=realtime 切回 WebSocket 方案（免 TOS、靠 prompt diarization）。
@@ -203,7 +204,7 @@ func main() {
 		DB: db, Sessions: sessions, Transcripts: transcripts, Memories: memories,
 		Speakers: speakers, Persons: persons, Attributes: personAttrs,
 		Relationships: personRels, Events: personEvents, ChangeLogs: personLogs,
-		Metrics: personMetrics, Cycles: personCycles, Activities: personActivities,
+		Metrics: personMetrics, Cycles: personCycles, Activities: personActivities, Pets: personPets,
 		LLM: llm, Model: cfg.LLMFastModel, Prompt: string(profilePromptBytes),
 		PromptVersion: profilePromptVersion,
 		Window:        cfg.ProfileExtractWindow, Gate: profile.GateConfig{AutoConf: cfg.ProfileAutoConfidence},
@@ -285,7 +286,7 @@ func main() {
 	api.RegisterPerson(r, &api.PersonHandler{
 		Persons: persons, Speakers: speakers, Attributes: personAttrs, Relationships: personRels,
 		Events: personEvents, Metrics: personMetrics, Cycles: personCycles,
-		Activities: personActivities, ChangeLogs: personLogs, Service: profileSvc,
+		Activities: personActivities, Pets: personPets, ChangeLogs: personLogs, Service: profileSvc,
 	})
 
 	// MCP 工具端点（仅供本机 dsh 边车经 streamable-http 连回；不对外）。

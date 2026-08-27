@@ -193,3 +193,30 @@ func TestDecideActivity(t *testing.T) {
 		t.Fatalf("默认阈值 0.75，0.9 应 active: %v", d)
 	}
 }
+
+// TestDecidePet 宠物闸门：同 cycle 单值模式——同名现值 → 冲突 pending（绝不静默覆盖）；
+// 无现值按置信度；自然键命中 skip。
+func TestDecidePet(t *testing.T) {
+	cfg := GateConfig{AutoConf: 0.75}
+	f := Fact{Plane: "pet", PetName: "小花", Confidence: 0.9, EpistemicType: "observed"}
+	existing := &repo.PersonPet{Name: "小花", Species: "猫"}
+
+	if d := DecidePet(f, nil, false, cfg); d != DecisionCreateActive {
+		t.Fatalf("无现值高置信应 create_active: %v", d)
+	}
+	low := Fact{Plane: "pet", PetName: "小花", Confidence: 0.5, EpistemicType: "observed"}
+	if d := DecidePet(low, nil, false, cfg); d != DecisionCreatePending {
+		t.Fatalf("无现值低置信应 create_pending: %v", d)
+	}
+	if d := DecidePet(f, existing, false, cfg); d != DecisionConflictPending {
+		t.Fatalf("有现值应 conflict_pending: %v", d)
+	}
+	if d := DecidePet(f, nil, true, cfg); d != DecisionSkip {
+		t.Fatalf("自然键命中应 skip: %v", d)
+	}
+	// suggested 一律 pending（同其他平面）。
+	sug := Fact{Plane: "pet", PetName: "小花", Confidence: 0.99, EpistemicType: "suggested"}
+	if d := DecidePet(sug, nil, false, cfg); d != DecisionCreatePending {
+		t.Fatalf("suggested 应 pending: %v", d)
+	}
+}

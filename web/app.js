@@ -1293,6 +1293,7 @@ const app = createApp({
         personDetail.value = await api('GET', '/api/persons/' + id);
         // 指标(metric)已内嵌在人物详情响应里(personDetail.metrics 分组)，无需单独拉取；此处补拉活动时间线。
         await loadActivities(); // 同步加载「生活轨迹」活动时间线（对齐 loadPending 的挂接方式）
+        await loadPets(); // 人物详情的「宠物」分区（对齐 loadActivities 的挂接方式）
       }
       catch (e) { showError(e); }
     }
@@ -1314,6 +1315,8 @@ const app = createApp({
       healthOpen.value = false; cycles.value = []; cyclesNote.value = ''; showAddCycle.value = false; resetAddCycleForm(); deletingCycleId.value = null;
       // 生活轨迹临时态（P4）：清列表/加载态 / 加活动表单(含草稿) / 提交态 / 删除确认一并清空
       activities.value = []; activityLoading.value = false; showAddActivity.value = false; resetAddActivityForm(); addingActivity.value = false; deletingActivityId.value = null;
+      // 宠物临时态（pet 平面）：清列表/加载态 / 加编辑表单(含草稿+回填 id) / 保存态 / 删除确认一并清空
+      pets.value = []; petLoading.value = false; showAddPet.value = false; resetAddPetForm(); savingPet.value = false; deletingPetId.value = null;
     }
     async function reloadPersonDetail() {
       if (!personDetail.value) return;
@@ -1345,6 +1348,7 @@ const app = createApp({
       try {
         personDetail.value = await api('GET', '/api/persons/' + pid);
         await loadActivities(); // 人物详情的「生活轨迹」活动时间线（对齐 togglePerson）
+        await loadPets(); // 人物详情的「宠物」分区（对齐 loadActivities 的挂接方式）
       } catch (e) { showError(e); }
     }
 
@@ -1921,6 +1925,92 @@ const app = createApp({
       } catch (e) { showError(e); }
     }
 
+    // ---------- 宠物（pet 平面：多只；名/小名/类别/品种/性别/年龄/生日/喜好） ----------
+    const PET_SPECIES = ['猫', '狗', '鸟', '鱼', '兔', '仓鼠', '爬行', '其他'];
+    const pets = ref([]);                 // 当前人物全状态宠物（后端按 id 升序）
+    const petLoading = ref(false);
+    const showAddPet = ref(false);        // 加/编辑表单开合（编辑复用同一张表单）
+    const editingPetId = ref(null);       // 非空=编辑模式（PATCH）；空=新增（POST）
+    const addPetForm = reactive({ name: '', nickname: '', species: '猫', breed: '', gender: '', age_text: '', birthday: '', likes: '' });
+    const savingPet = ref(false);
+    const deletingPetId = ref(null);      // 2 步删除确认
+
+    async function loadPets() {
+      if (!personDetail.value) return;
+      // 记下请求时的人物 id，await 回来后校验（快速切人丢弃过期响应，对齐 loadActivities）。
+      const pid = personDetail.value.person.id;
+      petLoading.value = true;
+      try {
+        const d = await api('GET', '/api/persons/' + pid + '/pets');
+        if (personDetail.value?.person?.id !== pid) return;
+        pets.value = d.pets || [];
+      } catch (e) { showError(e); }
+      finally { petLoading.value = false; }
+    }
+    // 展示视图：排除 dismissed（软删不显示，与详情各平面过滤一致）。
+    const petRows = computed(() => pets.value.filter(p => p.status !== 'dismissed'));
+    function resetAddPetForm() {
+      addPetForm.name = ''; addPetForm.nickname = ''; addPetForm.species = '猫';
+      addPetForm.breed = ''; addPetForm.gender = ''; addPetForm.age_text = '';
+      addPetForm.birthday = ''; addPetForm.likes = '';
+      editingPetId.value = null;
+    }
+    function toggleAddPet() {
+      if (showAddPet.value) { showAddPet.value = false; resetAddPetForm(); return; }
+      showAddPet.value = true;
+    }
+    // 编辑：回填现值后展开同一张表单（PATCH 即整只替换——未提到字段会被清空，回填保证全量）。
+    function startEditPet(p) {
+      editingPetId.value = p.id;
+      addPetForm.name = p.name || '';
+      addPetForm.nickname = p.nickname || '';
+      addPetForm.species = p.species || '其他';
+      addPetForm.breed = p.breed || '';
+      addPetForm.gender = p.gender || '';
+      addPetForm.age_text = p.age_text || '';
+      addPetForm.birthday = p.birthday ? String(p.birthday).slice(0, 10) : '';
+      addPetForm.likes = p.likes || '';
+      showAddPet.value = true;
+    }
+    async function submitPet() {
+      if (savingPet.value) return;
+      if (!addPetForm.name.trim()) { notify('请输入宠物名字', 2000); return; }
+      if (!addPetForm.birthday) { notify('生日必填（YYYY-MM-DD）', 2000); return; }
+      savingPet.value = true;
+      try {
+        const pid = personDetail.value.person.id;
+        const body = {
+          name: addPetForm.name.trim(),
+          species: addPetForm.species || '其他',
+          birthday: addPetForm.birthday,
+        };
+        if (addPetForm.nickname.trim()) body.nickname = addPetForm.nickname.trim();
+        if (addPetForm.breed.trim()) body.breed = addPetForm.breed.trim();
+        if (addPetForm.gender) body.gender = addPetForm.gender;
+        if (addPetForm.age_text.trim()) body.age_text = addPetForm.age_text.trim();
+        if (addPetForm.likes.trim()) body.likes = addPetForm.likes.trim();
+        if (editingPetId.value) {
+          await api('PATCH', '/api/persons/' + pid + '/pets/' + editingPetId.value, body);
+        } else {
+          await api('POST', '/api/persons/' + pid + '/pets', body);
+        }
+        showAddPet.value = false;
+        resetAddPetForm();
+        await loadPets(); await loadPersons(); // pending 计数可能变化
+      } catch (e) { showError(e); }
+      finally { savingPet.value = false; }
+    }
+    function askDeletePet(p) { deletingPetId.value = p.id; }
+    async function confirmDeletePet() {
+      const id = deletingPetId.value;
+      if (!id) return;
+      try {
+        await api('DELETE', '/api/persons/' + personDetail.value.person.id + '/pets/' + id);
+        deletingPetId.value = null;
+        await loadPets(); await loadPersons();
+      } catch (e) { showError(e); }
+    }
+
     // ---------- 确认队列（跨平面 pending 并集；与名册/详情独立刷新） ----------
     const pendingItems = ref([]);
     const pendingLoading = ref(false);
@@ -1971,11 +2061,12 @@ const app = createApp({
         const v = it.value || '';
         return it.cycle_type ? v.replace(it.cycle_type, cycleTypeLabel(it.cycle_type)) : v;
       }
+      if (it.kind === 'pet') return (it.value || '') + (it.label ? '（' + it.label + '）' : ''); // pet：value=名字，label=类别·品种·性别·年龄摘要
       if (it.kind === 'activity') return it.value || ''; // activity：value = activity 串（做什么）
       return it.value || it.person_name; // person：名字
     }
     function pendingKindText(k) {
-      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记', metric: '指标', cycle: '周期', activity: '活动' }[k] || k;
+      return { attribute: '属性', relationship: '关系', person: '新人物', event: '大事记', metric: '指标', cycle: '周期', activity: '活动', pet: '宠物' }[k] || k;
     }
 
     // ---------- 从历史回填抽取（POST /api/profile/extract：不带 session_id = 最近 50 个 completed，同步） ----------
@@ -2945,6 +3036,7 @@ const app = createApp({
       METRIC_CATALOG, showAddMetric, addMetricForm, addingMetric, addMetricDef, onPickMetricKey, toggleAddMetric, submitAddMetric, metricCharts, metricPointValue, deletingMetricId, askDeleteMetric, confirmDeleteMetric,
       CYCLE_TYPES, healthOpen, cycles, cyclesNote, cycleLoading, toggleHealth, showAddCycle, addCycleForm, addingCycle, toggleAddCycle, submitAddCycle, deletingCycleId, askDeleteCycle, confirmDeleteCycle, cycleTypeLabel, fmtDateOnly,
       activities, activityRows, activityLoading, showAddActivity, addActivityForm, addingActivity, toggleAddActivity, submitAddActivity, deletingActivityId, askDeleteActivity, confirmDeleteActivity,
+      PET_SPECIES, pets, petRows, petLoading, showAddPet, editingPetId, addPetForm, savingPet, toggleAddPet, startEditPet, submitPet, deletingPetId, askDeletePet, confirmDeletePet,
       pendingItems, pendingLoading, queueBusyIds, loadPending, refreshAfterQueue, confirmPendingItem, dismissPendingItem, pendingSummary, pendingKindText,
       backfilling, backfillInfo, runBackfill,
     };
