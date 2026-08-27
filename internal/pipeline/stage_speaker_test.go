@@ -3,10 +3,13 @@ package pipeline
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"zhiwei/internal/ids"
@@ -483,5 +486,159 @@ func TestStageSpeakerEnrollPrefersCleanSeg(t *testing.T) {
 	}
 	if sp2.SampleCount != 2 {
 		t.Fatalf("聚合登记 sample_count 应为 2（两段），实际 %d", sp2.SampleCount)
+	}
+}
+
+// libEntry 有状态 fake 库里的一条声纹（说话人 id → 向量）。
+type libEntry struct {
+	id  ids.ID
+	vec []float32
+}
+
+// libVoiceprint 有状态 fake：模拟真实 sidecar/FAISS —— Add 把 (speaker_id, 向量) 入库，
+// Search 对库内向量算余弦、按说话人取 max 得 top-1，次高取「另一个说话人」的最高分作 top-2
+// （与真实 sidecar second_distance 语义一致；库不足 2 人时 top-2=0）。
+// 静态 fakeVoiceprint 的 Search 返回固定结果、与查询向量/库状态无关，无法覆盖
+// 「本 run 内 Add 后对后续组 Search 可见」这类时序相关行为——正是本 bug 的触发条件，故单独造此 fake。
+// 向量按段 SequenceNo 指定（Embed 从切片路径 seg-{N}.wav 解析 N），模拟不同说话人的声纹。
+type libVoiceprint struct {
+	vecBySeq    map[int][]float32
+	entries     []libEntry // 已登记声纹（预置 = 历史库；Add 追加 = 本 run 新登记）
+	added       []ids.ID
+	searchCalls int
+}
+
+func (f *libVoiceprint) Embed(_ context.Context, path string) ([]float32, error) {
+	base := filepath.Base(path) // seg-{N}.wav
+	numStr := strings.TrimSuffix(strings.TrimPrefix(base, "seg-"), ".wav")
+	n, err := strconv.Atoi(numStr)
+	if err != nil {
+		return nil, err
+	}
+	v, ok := f.vecBySeq[n]
+	if !ok {
+		return nil, fmt.Errorf("libVoiceprint: 未为 seq %d 配置向量", n)
+	}
+	return append([]float32(nil), v...), nil
+}
+
+func (f *libVoiceprint) Search(_ context.Context, vec []float32) (voiceprint.SearchResult, error) {
+	f.searchCalls++
+	if len(f.entries) == 0 {
+		return voiceprint.SearchResult{Matched: false}, nil // 空库
+	}
+	// 每个说话人取与 query 的最高余弦（多向量按人去重）
+	bySpk := map[ids.ID]float64{}
+	for _, e := range f.entries {
+		if c := cosineSim(vec, e.vec); c > bySpk[e.id] {
+			bySpk[e.id] = c
+		}
+	}
+	var top1ID ids.ID
+	top1, top2 := -1.0, -1.0
+	for id, c := range bySpk {
+		if c > top1 {
+			top2, top1, top1ID = top1, c, id
+		} else if c > top2 {
+			top2 = c
+		}
+	}
+	if top2 < 0 {
+		top2 = 0 // 库中不足 2 人 → 次高为 0（对齐真实 sidecar 契约）
+	}
+	return voiceprint.SearchResult{SpeakerID: top1ID, Distance: top1, SecondDistance: top2, Matched: true}, nil
+}
+
+func (f *libVoiceprint) Add(_ context.Context, vec []float32, id ids.ID) error {
+	f.entries = append(f.entries, libEntry{id: id, vec: append([]float32(nil), vec...)})
+	f.added = append(f.added, id)
+	return nil
+}
+func (f *libVoiceprint) Remove(_ context.Context, _ ids.ID) error { return nil }
+
+var _ voiceprint.Client = (*libVoiceprint)(nil)
+
+// cosineSim 余弦相似度（fake 内联，供 libVoiceprint.Search 打分）。
+func cosineSim(a, b []float32) float64 {
+	var dot, na, nb float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		na += float64(a[i]) * float64(a[i])
+		nb += float64(b[i]) * float64(b[i])
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(na) * math.Sqrt(nb))
+}
+
+// TestStageSpeakerFirstMultiSpeakerEmptyLibrary 复现并守护「声纹库为空时首次多人录入只建 1 个声纹」的 bug：
+// 空库 + 两个 ASR 标签（不同人，互相余弦 0.75，落在弱命中 [0.72,0.8) 区间）。
+// 旧逻辑（边搜边登记）：label1 先登记 → label2 的 Search 看到 label1 刚登记的声纹、top2=0，令弱命中门槛
+// 退化成 0.72 → label2 被并入 label1 → 只建 1 个。
+// 修复（先全部检索、再统一登记）：两组都只对「本 run 开始前的库」检索（此处为空）→ 均未命中 → 各建 1 个。
+func TestStageSpeakerFirstMultiSpeakerEmptyLibrary(t *testing.T) {
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	vA := make([]float32, 256)
+	vA[0] = 1
+	vB := make([]float32, 256)
+	vB[0] = 0.75
+	vB[1] = float32(math.Sqrt(1 - 0.75*0.75)) // cos(vA,vB)=0.75
+	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vA, 2: vA, 3: vB}}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(context.Background(), d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 2 {
+		t.Fatalf("空库首次两人应各建 1 个声纹，实际登记 %d 个（弱命中把第二人并进了第一人）", len(fv.added))
+	}
+	segs, _ := transcripts.ListSegments(context.Background(), tr.ID)
+	distinct := map[ids.ID]bool{}
+	for _, s := range segs {
+		if s.SpeakerID == nil {
+			t.Fatalf("段 %d 未回填 speaker_id", s.SequenceNo)
+		}
+		distinct[*s.SpeakerID] = true
+	}
+	if len(distinct) != 2 {
+		t.Fatalf("应回填到 2 个不同说话人，实际 %d", len(distinct))
+	}
+}
+
+// TestStageSpeakerHistoricalSingleVoiceprintWeakMatchReuses 守护修复不误伤「历史单声纹库的弱命中重认」：
+// 库里已有 1 个历史说话人（上次录音登记），本次某人与其余弦 0.75、top2=0 → 应复用该历史声纹、不建新。
+// 这正是弱命中规则存在的目的（同一人换环境相似度掉到 0.72~0.8 仍能重认）；B 方案只屏蔽「本 run 内新登记」
+// 的声纹对后续组的可见性，历史声纹的弱命中保持不变。
+func TestStageSpeakerHistoricalSingleVoiceprintWeakMatchReuses(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	hist := &repo.Speaker{Name: "历史人", Source: "auto"}
+	if err := speakers.Create(ctx, hist); err != nil {
+		t.Fatal(err)
+	}
+	// 未绑定 active speaker 会被 repo 包 EnsurePersonBootstrap 物化成 person，跨包污染共享库——收尾删掉
+	// （对齐本文件 TestStageSpeakerMatchesExisting 的 cleanup）。
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), hist.ID) })
+	vHist := make([]float32, 256)
+	vHist[0] = 1
+	vNear := make([]float32, 256)
+	vNear[0] = 0.75
+	vNear[1] = float32(math.Sqrt(1 - 0.75*0.75)) // cos(vNear,vHist)=0.75
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vNear, 2: vNear, 3: vNear},
+		entries:  []libEntry{{id: hist.ID, vec: vHist}}, // 预置历史库（本 run 开始前已存在）
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 0 {
+		t.Fatalf("与历史单声纹弱命中应复用、不建新，实际登记 %d 个", len(fv.added))
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SpeakerID == nil || *s.SpeakerID != hist.ID {
+			t.Fatalf("段 %d 应复用历史声纹 %s，实际 %+v", s.SequenceNo, hist.ID, s.SpeakerID)
+		}
 	}
 }
