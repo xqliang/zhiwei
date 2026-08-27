@@ -398,3 +398,114 @@ func TestReassignSpeakerInTranscript(t *testing.T) {
 		t.Fatalf("另一会话的甲段不应被本 transcript 改判波及, got %+v", gotOther[0].SpeakerID)
 	}
 }
+
+// TestCorrectSegmentSpeakerAndClearOnManual 覆盖幽灵声纹纠正的标记读写 + 手动/重识别清标记：
+// CorrectSegmentSpeaker 按 label 整组改判并写 corrected_from；手动换人(SetSegmentSpeakerByID)、
+// 整人改判(ReassignSpeakerSegments)、重新识别(ClearSegmentSpeakers)三条路径都应清掉标记。
+func TestCorrectSegmentSpeakerAndClearOnManual(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tr := &TranscriptRepo{DB: db}
+	speakers := &SpeakerRepo{DB: db}
+
+	// 两个说话人：ghost=被顶掉的历史人，real=真正说话人
+	ghost := &Speaker{Name: "铉晔", Source: "auto"}
+	real := &Speaker{Name: "说话人real", Source: "auto"}
+	if err := speakers.Create(ctx, ghost); err != nil {
+		t.Fatal(err)
+	}
+	if err := speakers.Create(ctx, real); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), ghost.ID); _ = speakers.Delete(context.Background(), real.ID) })
+
+	sid := ids.New()
+	if err := (&SessionRepo{DB: db}).Create(ctx, &AudioSession{
+		ID: sid, Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := &Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := tr.Create(ctx, tc); err != nil {
+		t.Fatal(err)
+	}
+	segs := []TranscriptSegment{
+		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "2", Text: "幽灵段甲", StartMS: 0, EndMS: 1000},
+		{TranscriptID: tc.ID, SequenceNo: 2, SpeakerLabel: "2", Text: "幽灵段乙", StartMS: 1000, EndMS: 2000},
+	}
+	if err := tr.InsertSegments(ctx, segs); err != nil {
+		t.Fatal(err)
+	}
+	// 先把 label "2" 归到 ghost（模拟回填结果）
+	if err := tr.SetSegmentSpeaker(ctx, tc.ID, "2", ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 纠正：label "2" 从 ghost 改判给 real，写 corrected_from=ghost
+	if err := tr.CorrectSegmentSpeaker(ctx, tc.ID, "2", ghost.ID, real.ID); err != nil {
+		t.Fatalf("CorrectSegmentSpeaker: %v", err)
+	}
+	got, _ := tr.ListSegments(ctx, tc.ID)
+	for _, s := range got {
+		if s.SpeakerID == nil || *s.SpeakerID != real.ID {
+			t.Fatalf("段 %d 应改判给 real，实际 %+v", s.SequenceNo, s.SpeakerID)
+		}
+		if s.CorrectedFromSpeakerID == nil || *s.CorrectedFromSpeakerID != ghost.ID {
+			t.Fatalf("段 %d 应有 corrected_from=ghost，实际 %+v", s.SequenceNo, s.CorrectedFromSpeakerID)
+		}
+	}
+
+	// 手动单段换人 → 清标记
+	if err := tr.SetSegmentSpeakerByID(ctx, tc.ID, got[0].ID, ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	if got[0].CorrectedFromSpeakerID != nil {
+		t.Fatalf("手动换人后应清标记，实际 %+v", got[0].CorrectedFromSpeakerID)
+	}
+	if got[1].CorrectedFromSpeakerID == nil {
+		t.Fatalf("未手动改的段标记不应被清")
+	}
+
+	// 整人改判 → 清标记
+	if _, err := tr.ReassignSpeakerSegments(ctx, tc.ID, real.ID, ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	if got[1].CorrectedFromSpeakerID != nil {
+		t.Fatalf("整人改判后应清标记，实际 %+v", got[1].CorrectedFromSpeakerID)
+	}
+
+	// 「用此段录音纹」批量改判(ReassignSpeakerInTranscript) → 清标记
+	// 此刻两段皆 speaker_id=ghost、无标记：先重新纠正打上标记（ghost→real，
+	// 满足纠正的 speaker_id==fromID 前置），再把 real 整体改判回 ghost，验证标记被清。
+	if err := tr.CorrectSegmentSpeaker(ctx, tc.ID, "2", ghost.ID, real.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.ReassignSpeakerInTranscript(ctx, tc.ID, real.ID, ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	for _, s := range got {
+		if s.CorrectedFromSpeakerID != nil {
+			t.Fatalf("ReassignSpeakerInTranscript 后应清标记，实际 %+v", s.CorrectedFromSpeakerID)
+		}
+	}
+
+	// 重新纠正后再 ClearSegmentSpeakers → 清标记 + 清 speaker_id
+	if err := tr.CorrectSegmentSpeaker(ctx, tc.ID, "2", ghost.ID, real.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.ClearSegmentSpeakers(ctx, tc.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	for _, s := range got {
+		if s.SpeakerID != nil || s.CorrectedFromSpeakerID != nil {
+			t.Fatalf("重新识别后 speaker_id 与标记都应清 NULL，实际 %+v / %+v", s.SpeakerID, s.CorrectedFromSpeakerID)
+		}
+	}
+}

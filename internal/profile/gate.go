@@ -141,3 +141,21 @@ func DecideActivity(f Fact, dedupHit bool, cfg GateConfig) Decision {
 	}
 	return DecisionCreatePending
 }
+
+// DecidePet 宠物闸门：单值语义（同 person+name 至多一条 active，对齐 cycle 模式）——
+// 有同名现值 → 冲突 pending（supersedes 指向现值，绝不静默覆盖；「字段有变化才走这里」的
+// 预判与合并由 service 层 petFieldsEqual/mergePetRow 负责）；无 → 按置信度。
+// 高置信冲突时 service 层会走「合并行直接 active + 旧行 superseded」的整只替换路径（对齐
+// 手动改值），故本闸门仍返回 ConflictPending、由 applyPetFact 再分流。
+func DecidePet(f Fact, existing *repo.PersonPet, dedupHit bool, cfg GateConfig) Decision {
+	if dedupHit {
+		return DecisionSkip
+	}
+	if existing != nil {
+		return DecisionConflictPending
+	}
+	if autoWritable(f, cfg) {
+		return DecisionCreateActive
+	}
+	return DecisionCreatePending
+}

@@ -642,3 +642,156 @@ func TestStageSpeakerHistoricalSingleVoiceprintWeakMatchReuses(t *testing.T) {
 		}
 	}
 }
+
+// buildCorrectionVecs 构造纠正 pass 测试用的三组单位向量：
+// vR   真人/新登记说话人方向（e0）
+// vHist 历史库说话人方向（与 vR 余弦 = corrHistR，模拟两人声纹相关）
+// vSeg  某幽灵段向量：cos(vSeg,vR)=simR、cos(vSeg,vHist)=simHist
+// 返回三者（256 维，L2 归一）。要求 simR、simHist、corrHistR 几何可解（z²≥0）。
+func buildCorrectionVecs(t *testing.T, corrHistR, simR, simHist float64) (vR, vHist, vSeg []float32) {
+	t.Helper()
+	vR = make([]float32, 256)
+	vR[0] = 1
+	h1 := math.Sqrt(1 - corrHistR*corrHistR)
+	vHist = make([]float32, 256)
+	vHist[0] = float32(corrHistR)
+	vHist[1] = float32(h1)
+	// vSeg = x*e0 + y*e1 + z*e2，x=simR；x*corrHistR + y*h1 = simHist
+	x := simR
+	y := (simHist - x*corrHistR) / h1
+	z2 := 1 - x*x - y*y
+	if z2 < 0 {
+		t.Fatalf("几何不可解: simR=%v simHist=%v corr=%v (z²=%v)", simR, simHist, corrHistR, z2)
+	}
+	vSeg = make([]float32, 256)
+	vSeg[0] = float32(x)
+	vSeg[1] = float32(y)
+	vSeg[2] = float32(math.Sqrt(z2))
+	return vR, vHist, vSeg
+}
+
+// TestStageSpeakerCorrectsPhantomHistoricalMatch 幽灵历史声纹纠正主链路：
+// label "1"(seq1,2)=真人 → 空历史库中登记为新声纹；label "2"(seq3)=幽灵 → 弱命中历史人铉晔。
+// 铉晔在幽灵段上 max=0.73，真人在幽灵段上 max=0.88 > 0.73+0.06 → 整组改判给真人，写 corrected_from=铉晔。
+func TestStageSpeakerCorrectsPhantomHistoricalMatch(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	vR, vHist, vSeg := buildCorrectionVecs(t, 0.7, 0.88, 0.73)
+	ghost := &repo.Speaker{Name: "铉晔", Source: "auto", Embedding: float32Blob(vHist), SampleCount: 1}
+	if err := speakers.Create(ctx, ghost); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), ghost.ID) })
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vR, 2: vR, 3: vSeg},
+		entries:  []libEntry{{id: ghost.ID, vec: vHist}}, // 本 run 开始前的历史库
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	bySeq := map[int]repo.TranscriptSegment{}
+	for _, s := range segs {
+		bySeq[s.SequenceNo] = s
+	}
+	realID := bySeq[1].SpeakerID // 真人 = seq1 归属
+	if realID == nil {
+		t.Fatal("seq1 未回填")
+	}
+	seg3 := bySeq[3]
+	if seg3.SpeakerID == nil || *seg3.SpeakerID != *realID {
+		t.Fatalf("幽灵段 seq3 应改判给真人 %v，实际 %+v", *realID, seg3.SpeakerID)
+	}
+	if seg3.CorrectedFromSpeakerID == nil || *seg3.CorrectedFromSpeakerID != ghost.ID {
+		t.Fatalf("幽灵段应有 corrected_from=铉晔 %v，实际 %+v", ghost.ID, seg3.CorrectedFromSpeakerID)
+	}
+	if len(fv.added) != 1 {
+		t.Fatalf("应只新登记真人 1 个声纹，实际 %d", len(fv.added))
+	}
+}
+
+// TestStageSpeakerKeepsHistoricalMatchWhenSelfHighest 历史命中且在自己段上最高 → 不纠正。
+// 幽灵段 cos 到铉晔=0.85(强命中)、到真人=0.5：0.5 不 > 0.85+0.06 → 保持铉晔、无标记。
+func TestStageSpeakerKeepsHistoricalMatchWhenSelfHighest(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	vR, vHist, vSeg := buildCorrectionVecs(t, 0.7, 0.5, 0.85)
+	ghost := &repo.Speaker{Name: "铉晔", Source: "auto", Embedding: float32Blob(vHist), SampleCount: 1}
+	if err := speakers.Create(ctx, ghost); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), ghost.ID) })
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vR, 2: vR, 3: vSeg},
+		entries:  []libEntry{{id: ghost.ID, vec: vHist}},
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SequenceNo == 3 {
+			if s.SpeakerID == nil || *s.SpeakerID != ghost.ID {
+				t.Fatalf("seq3 应保持铉晔，实际 %+v", s.SpeakerID)
+			}
+			if s.CorrectedFromSpeakerID != nil {
+				t.Fatalf("未纠正段不应有标记，实际 %+v", s.CorrectedFromSpeakerID)
+			}
+		}
+	}
+}
+
+// TestStageSpeakerNeverCorrectsAutoRegistered 空历史库 → 两组都是新登记(非历史命中)：
+// 即使一组段更像另一组，也不参与纠正（只有历史命中组是候选）。断言无任何 corrected_from。
+func TestStageSpeakerNeverCorrectsAutoRegistered(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	vA := make([]float32, 256)
+	vA[0] = 1
+	vB := make([]float32, 256)
+	vB[0] = 0.9
+	vB[1] = float32(math.Sqrt(1 - 0.81))                                   // cos(vA,vB)=0.9
+	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vA, 2: vA, 3: vB}} // 空历史库
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.CorrectedFromSpeakerID != nil {
+			t.Fatalf("新登记组不应被纠正，seq%d 却有标记 %+v", s.SequenceNo, s.CorrectedFromSpeakerID)
+		}
+	}
+	if len(fv.added) != 2 {
+		t.Fatalf("空库两人应各建 1 个，实际 %d", len(fv.added))
+	}
+}
+
+// TestStageSpeakerCorrectionMarginBoundary 边界：真人在幽灵段上恰好 = self+margin（严格大于才纠正）→ 不纠正。
+// self(铉晔)=0.73，margin=0.06 → 真人=0.79 恰好不触发。
+func TestStageSpeakerCorrectionMarginBoundary(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	vR, vHist, vSeg := buildCorrectionVecs(t, 0.7, 0.79, 0.73)
+	ghost := &repo.Speaker{Name: "铉晔", Source: "auto", Embedding: float32Blob(vHist), SampleCount: 1}
+	if err := speakers.Create(ctx, ghost); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), ghost.ID) })
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vR, 2: vR, 3: vSeg},
+		entries:  []libEntry{{id: ghost.ID, vec: vHist}},
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SequenceNo == 3 && s.CorrectedFromSpeakerID != nil {
+			t.Fatalf("恰好等于 self+margin 不应触发（需严格大于），实际标记 %+v", s.CorrectedFromSpeakerID)
+		}
+	}
+}

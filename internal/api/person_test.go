@@ -48,6 +48,7 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 		Events:  &repo.PersonEventRepo{DB: db},
 		Metrics: &repo.PersonMetricRepo{DB: db}, Cycles: &repo.PersonCycleRepo{DB: db},
 		Activities: &repo.PersonActivityRepo{DB: db},
+		Pets:       &repo.PersonPetRepo{DB: db},
 		LLM:        &profileTestLLM{}, Model: "test", Prompt: "sys", Window: 10,
 		Gate: profile.GateConfig{AutoConf: 0.75},
 	}
@@ -59,7 +60,7 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 		Persons: svc.Persons, Speakers: svc.Speakers, Attributes: svc.Attributes,
 		Relationships: svc.Relationships, ChangeLogs: svc.ChangeLogs,
 		Events: svc.Events, Metrics: svc.Metrics, Cycles: svc.Cycles,
-		Activities: svc.Activities, Service: svc,
+		Activities: svc.Activities, Pets: svc.Pets, Service: svc,
 	})
 	return r, svc
 }
@@ -1201,5 +1202,106 @@ func TestPersonMetricAPI(t *testing.T) {
 	}
 	if d, _ := svc.Metrics.Get(ctx, pm.ID); d == nil || d.Status != "active" {
 		t.Fatalf("确认后应 active: %+v", d)
+	}
+}
+
+// TestPetAPIFlow 覆盖宠物 API：POST（birthday 必填 400 / 正常 200 / 同名 409）、GET 列表、
+// 详情含 pets、PATCH 整只替换、DELETE、?status=dismissed 查回。
+func TestPetAPIFlow(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+	oid, _ := svc.Persons.GetOwner(ctx, 1)
+
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if o, err := svc.Persons.GetOwner(cctx, 1); err == nil && o != nil {
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_pet WHERE person_id = ?`, o.ID.Int64())
+			_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'pet'`, o.ID.Int64())
+		}
+	})
+
+	// birthday 缺失 → 400（handler 校验）。
+	rec := doReq(t, h, "POST", "/api/persons/"+oid.ID.String()+"/pets",
+		map[string]any{"name": "小花", "species": "猫"})
+	if rec.Code != 400 {
+		t.Fatalf("birthday 缺失应 400: %d %s", rec.Code, rec.Body.String())
+	}
+	// 正常新增。
+	rec = doReq(t, h, "POST", "/api/persons/"+oid.ID.String()+"/pets",
+		map[string]any{"name": "小花", "nickname": "花花", "species": "猫", "breed": "布偶",
+			"gender": "母", "age_text": "3岁", "birthday": "2023-04-01", "likes": "不吃鱼"})
+	if rec.Code != 200 {
+		t.Fatalf("新增宠物失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var pet struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pet)
+	if pet.Status != "active" {
+		t.Fatalf("手动新增应 active: %+v", pet)
+	}
+	// 同名再增 → 409。
+	rec = doReq(t, h, "POST", "/api/persons/"+oid.ID.String()+"/pets",
+		map[string]any{"name": "小花", "species": "猫", "birthday": "2023-04-01"})
+	if rec.Code != 409 {
+		t.Fatalf("同名新增应 409: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// GET 列表。
+	rec = doReq(t, h, "GET", "/api/persons/"+oid.ID.String()+"/pets", nil)
+	if rec.Code != 200 {
+		t.Fatalf("列表失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var listR struct {
+		Pets []repo.PersonPet `json:"pets"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if len(listR.Pets) != 1 || listR.Pets[0].Name != "小花" {
+		t.Fatalf("列表应 1 只小花: %+v", listR.Pets)
+	}
+
+	// 详情含 pets。
+	rec = doReq(t, h, "GET", "/api/persons/"+oid.ID.String(), nil)
+	if rec.Code != 200 {
+		t.Fatalf("详情失败: %d", rec.Code)
+	}
+	var det struct {
+		Pets []repo.PersonPet `json:"pets"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &det)
+	if len(det.Pets) != 1 {
+		t.Fatalf("详情应含 1 只宠物: %+v", det.Pets)
+	}
+
+	// PATCH 整只替换（改 likes）。
+	rec = doReq(t, h, "PATCH", "/api/persons/"+oid.ID.String()+"/pets/"+pet.ID,
+		map[string]any{"name": "小花", "species": "猫", "breed": "布偶",
+			"birthday": "2023-04-01", "likes": "爱吃鱼罐头"})
+	if rec.Code != 200 {
+		t.Fatalf("编辑失败: %d %s", rec.Code, rec.Body.String())
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &pet) // PATCH 返回新行（新 ID），后续 DELETE 用它
+	rec = doReq(t, h, "GET", "/api/persons/"+oid.ID.String()+"/pets", nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if len(listR.Pets) != 1 || listR.Pets[0].Likes == nil || *listR.Pets[0].Likes != "爱吃鱼罐头" {
+		t.Fatalf("编辑后列表应只剩 1 只 active 且 likes 更新: %+v", listR.Pets)
+	}
+
+	// DELETE → dismissed（默认列表不再返回）。
+	rec = doReq(t, h, "DELETE", "/api/persons/"+oid.ID.String()+"/pets/"+pet.ID, nil)
+	if rec.Code != 200 {
+		t.Fatalf("删除失败: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doReq(t, h, "GET", "/api/persons/"+oid.ID.String()+"/pets", nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if len(listR.Pets) != 0 {
+		t.Fatalf("删除后默认列表应为空: %+v", listR.Pets)
+	}
+	// ?status=dismissed 可查回（对齐 ListCycles）。
+	rec = doReq(t, h, "GET", "/api/persons/"+oid.ID.String()+"/pets?status=dismissed", nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
+	if len(listR.Pets) != 1 {
+		t.Fatalf("dismissed 过滤应查回 1 行: %+v", listR.Pets)
 	}
 }

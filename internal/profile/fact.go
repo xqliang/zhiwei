@@ -79,6 +79,16 @@ type Fact struct {
 	StartedAt    string // 原始日期串（YYYY-MM-DD/RFC3339），解析在 service 层 parseEventAt
 	DurationMin  int    // 持续分钟
 
+	// ---- pet 平面（宠物）----
+	PetName     string // 宠物名（必填，自然键成分 person_id+name）
+	PetNickname string // 小名
+	Species     string // 狗|猫|鸟|鱼|兔|仓鼠|爬行|其他（缺省/非法收敛「其他」，见 NormalizeSpecies）
+	Breed       string // 品种自由文本（柯基/布偶猫…）
+	Gender      string // 公|母（可空，不做强枚举校验）
+	AgeText     string // 年龄原始表述（「3岁」「8个月」）
+	Birthday    string // YYYY-MM-DD（LLM 按年龄估算；解析在 service 层 parseEventAt）
+	Likes       string // 喜好/习惯（「不吃鱼」「爱跑圈」）
+
 	// ---- 通用 ----
 	Confidence    float64
 	EpistemicType string // observed|inferred|predicted|suggested
@@ -88,7 +98,7 @@ type Fact struct {
 	SegmentIDs []ids.ID // provenance：来源块的 segment id
 }
 
-var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true, "metric": true, "cycle": true, "activity": true}
+var validPlanes = map[string]bool{"attribute": true, "relationship": true, "event": true, "metric": true, "cycle": true, "activity": true, "pet": true}
 
 // validSubjectKinds 是人物指代 Subject.Kind（也用于 Related.Kind）的合法取值。
 // 非法或缺失的指代无法归属到具体人物，直接丢弃该条（宁少勿错）。
@@ -118,6 +128,22 @@ var ValidCycleTypes = map[string]bool{
 	"menstrual": true, "medication": true, "injection": true, "followup": true,
 }
 
+// ValidSpecies 宠物类别开放枚举（spec 2026-08-27-pet-plane-design.md）。
+var ValidSpecies = map[string]bool{
+	"狗": true, "猫": true, "鸟": true, "鱼": true,
+	"兔": true, "仓鼠": true, "爬行": true, "其他": true,
+}
+
+// NormalizeSpecies 类别归一：空/非法值收敛「其他」（species 列 NOT NULL 的兜底，
+// 对齐 spec「缺省或非法值均收敛到其他」）。
+func NormalizeSpecies(s string) string {
+	s = strings.TrimSpace(s)
+	if ValidSpecies[s] {
+		return s
+	}
+	return "其他"
+}
+
 type rawSubject struct {
 	Kind     string `json:"kind"`
 	Name     string `json:"name"`
@@ -125,22 +151,22 @@ type rawSubject struct {
 }
 
 type rawFact struct {
-	Plane            string     `json:"plane"`
-	Subject          rawSubject `json:"subject"`
-	AttrKey          string     `json:"attr_key"`
-	Value            string     `json:"value"`
-	ValueType        string     `json:"value_type"`
-	RelationType     string     `json:"relation_type"`
-	Related          rawSubject `json:"related"`
-	Direction        string     `json:"direction"`
-	OrgName          string     `json:"org_name"`
-	Label            string     `json:"label"`
-	EventType        string     `json:"event_type"`
-	EventTitle       string     `json:"title"`
-	EventDescription string     `json:"description"`
-	OccurredAt       string     `json:"occurred_at"`
-	EndAt            string     `json:"end_at"`
-	EventLocation    string     `json:"location"`
+	Plane            string       `json:"plane"`
+	Subject          rawSubject   `json:"subject"`
+	AttrKey          string       `json:"attr_key"`
+	Value            string       `json:"value"`
+	ValueType        string       `json:"value_type"`
+	RelationType     string       `json:"relation_type"`
+	Related          rawSubject   `json:"related"`
+	Direction        string       `json:"direction"`
+	OrgName          string       `json:"org_name"`
+	Label            string       `json:"label"`
+	EventType        string       `json:"event_type"`
+	EventTitle       string       `json:"title"`
+	EventDescription string       `json:"description"`
+	OccurredAt       string       `json:"occurred_at"`
+	EndAt            string       `json:"end_at"`
+	EventLocation    string       `json:"location"`
 	EventImportance  float64      `json:"importance"`     // P2a①：事件人生分量 0~1；无同层标签冲突（confidence 各自独立）
 	EventRelated     []rawSubject `json:"related_people"` // P2a②：多人事件同场人物数组；新键 related_people，不复用 related
 	// ---- metric 平面 ----（value_text 为 metric 专用 json key，与 attribute 的 value、event 的 title 不冲突）
@@ -164,6 +190,16 @@ type rawFact struct {
 	CommuteMode  string `json:"commute_mode"`
 	StartedAt    string `json:"started_at"`
 	DurationMin  int    `json:"duration_min"`
+
+	// ---- pet 平面 ----
+	PetName     string `json:"pet_name"`
+	PetNickname string `json:"pet_nickname"`
+	Species     string `json:"species"`
+	Breed       string `json:"breed"`
+	Gender      string `json:"gender"`
+	AgeText     string `json:"age_text"`
+	Birthday    string `json:"birthday"`
+	Likes       string `json:"likes"`
 
 	Confidence    float64 `json:"confidence"`
 	EpistemicType string  `json:"epistemic_type"`
@@ -226,6 +262,14 @@ func ParseFacts(raw string) ([]Fact, error) {
 			CommuteMode:      strings.TrimSpace(rf.CommuteMode),
 			StartedAt:        strings.TrimSpace(rf.StartedAt),
 			DurationMin:      rf.DurationMin, // int，不 trim
+			PetName:          strings.TrimSpace(rf.PetName),
+			PetNickname:      strings.TrimSpace(rf.PetNickname),
+			Species:          strings.TrimSpace(rf.Species), // 归一推迟到写入期（petRow/mergePetRow 的 NormalizeSpecies）：解析期保留空串=「未提到」，避免合并层把「未提 species」误当「其他」而静默降级现值、并使 reaffirm 同值短路失效
+			Breed:            strings.TrimSpace(rf.Breed),
+			Gender:           strings.TrimSpace(rf.Gender),
+			AgeText:          strings.TrimSpace(rf.AgeText),
+			Birthday:         strings.TrimSpace(rf.Birthday),
+			Likes:            strings.TrimSpace(rf.Likes),
 			Confidence:       clamp01(rf.Confidence),
 			EpistemicType:    strings.TrimSpace(rf.EpistemicType),
 			BlockIndex:       rf.BlockIndex,
@@ -281,6 +325,13 @@ func ParseFacts(raw string) ([]Fact, error) {
 			// 活动流：仅强制 activity 非空（started_at 可空，service 落 session 时间；tool 等
 			// 全可空——「下午去游泳了」没说工具地点也是有效活动）。
 			if f.ActivityText == "" {
+				continue
+			}
+		case "pet":
+			// 宠物：pet_name 必填（自然键成分，无名无法匹配/落库，宁少勿错直接丢）。
+			// species 不在此归一：保留原始/空串，缺省=「未提到」的语义交由写入期（petRow/
+			// mergePetRow 的 NormalizeSpecies）收敛「其他」（列 NOT NULL 的兜底）。
+			if f.PetName == "" {
 				continue
 			}
 		}

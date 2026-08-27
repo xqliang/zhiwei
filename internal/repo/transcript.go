@@ -30,6 +30,10 @@ type TranscriptSegment struct {
 	// 000004 迁移给 transcript_segment 加了 speaker_id 列，NewDB 走 sqlx safe 模式
 	// （无对应字段的列会扫描报错），故此处同步加字段，保 SELECT * 可扫描。
 	SpeakerID *ids.ID `db:"speaker_id" json:"speaker_id,omitempty"`
+	// CorrectedFromSpeakerID 幽灵历史声纹纠正（000017 迁移加列）：非 NULL = 该段被 speaker stage
+	// 的纠正 pass 自动改判过，值为被顶掉的原历史说话人 id（前端"已修改"徽章 + 审计 + 手动改回依据）。
+	// 手动换人 / 整人改判 / 重新识别时清 NULL。存量 / 未纠正段为 NULL。
+	CorrectedFromSpeakerID *ids.ID `db:"corrected_from_speaker_id" json:"corrected_from_speaker_id,omitempty"`
 	// Embedding 该段的 256 维声纹向量 BLOB（000007 迁移加列；speaker stage 逐段
 	// 提取后落库，供详情页按段展示与声纹库的相似度 top-N）。json:"-" 不外泄，
 	// API 层按需转成 top-N 明文列表。存量会话（新列前处理）为 NULL。
@@ -188,15 +192,29 @@ func (r *TranscriptRepo) SetSegmentSpeaker(ctx context.Context, transcriptID ids
 // 注意：会覆盖手动纠正的换人（调用方需在 UI 二次确认）。
 func (r *TranscriptRepo) ClearSegmentSpeakers(ctx context.Context, transcriptID ids.ID) error {
 	_, err := r.DB.ExecContext(ctx,
-		`UPDATE transcript_segment SET speaker_id = NULL WHERE transcript_id = ?`, transcriptID.Int64())
+		`UPDATE transcript_segment SET speaker_id = NULL, corrected_from_speaker_id = NULL WHERE transcript_id = ?`, transcriptID.Int64())
 	return err
 }
 
 // SetSegmentSpeakerByID 单段换人（前端"换人"下拉用）。带 transcript_id 作用域防跨会话误写。
 func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID, segID, speakerID ids.ID) error {
 	_, err := r.DB.ExecContext(ctx,
-		`UPDATE transcript_segment SET speaker_id = ? WHERE id = ? AND transcript_id = ?`,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = NULL WHERE id = ? AND transcript_id = ?`,
 		speakerID.Int64(), segID.Int64(), transcriptID.Int64())
+	return err
+}
+
+// CorrectSegmentSpeaker 幽灵历史声纹纠正：把本 transcript 内某 speaker_label 的全部段
+// 从原历史说话人 fromID 改判给 toID，并记录 corrected_from_speaker_id=fromID（前端"已修改"
+// 徽章 + 审计）。纠正 pass 以「组=speaker_label」为单位，故按 label 定位；带 transcript_id
+// 作用域防跨会话误写；WHERE 再限定 speaker_id=fromID，只改「当前确实归原说话人」的段
+// （与 SetSegmentSpeaker 只碰 NULL 段同一纪律：不越界踩用户手动改过的段）；
+// 单条 UPDATE 原子写、并发安全。
+func (r *TranscriptRepo) CorrectSegmentSpeaker(ctx context.Context, transcriptID ids.ID, speakerLabel string, fromID, toID ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = ?
+		 WHERE transcript_id = ? AND speaker_label = ? AND speaker_id = ?`,
+		toID.Int64(), fromID.Int64(), transcriptID.Int64(), speakerLabel, fromID.Int64())
 	return err
 }
 
@@ -221,7 +239,7 @@ func (r *TranscriptRepo) SaveSegmentEmbeddings(ctx context.Context, transcriptID
 // 返回受影响段数（0 = 本会话没有该说话人的段）。
 func (r *TranscriptRepo) ReassignSpeakerSegments(ctx context.Context, transcriptID, fromID, toID ids.ID) (int, error) {
 	res, err := r.DB.ExecContext(ctx,
-		`UPDATE transcript_segment SET speaker_id = ? WHERE transcript_id = ? AND speaker_id = ?`,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = NULL WHERE transcript_id = ? AND speaker_id = ?`,
 		toID.Int64(), transcriptID.Int64(), fromID.Int64())
 	if err != nil {
 		return 0, err
@@ -238,7 +256,7 @@ func (r *TranscriptRepo) ReassignSpeakerSegments(ctx context.Context, transcript
 // 用于 timeline「用此段录音纹」：录入新说话人后，把该说话人在本会话的全部段一并改判到新说话人。
 func (r *TranscriptRepo) ReassignSpeakerInTranscript(ctx context.Context, transcriptID, fromID, toID ids.ID) (int, error) {
 	res, err := r.DB.ExecContext(ctx,
-		`UPDATE transcript_segment SET speaker_id = ? WHERE transcript_id = ? AND speaker_id = ?`,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = NULL WHERE transcript_id = ? AND speaker_id = ?`,
 		toID.Int64(), transcriptID.Int64(), fromID.Int64())
 	if err != nil {
 		return 0, err

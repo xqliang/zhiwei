@@ -974,6 +974,107 @@ func TestReextractReidentifyBlockedWhileProcessing(t *testing.T) {
 	}
 }
 
+// TestGetSessionCorrectedMarker 详情返回被纠正段的 corrected_from + corrected_from_name（原历史人名，
+// 即便它已不在本会话说话人列表里，也从 Speakers 兜底解析）。
+func TestGetSessionCorrectedMarker(t *testing.T) {
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+
+	ghost := &repo.Speaker{Name: "铉晔", Source: "auto"}
+	real := &repo.Speaker{Name: "说话人real", Source: "auto"}
+	if err := speakers.Create(ctx, ghost); err != nil {
+		t.Fatal(err)
+	}
+	if err := speakers.Create(ctx, real); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), ghost.ID); _ = speakers.Delete(context.Background(), real.ID) })
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tc); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "2", Text: "幽灵段", StartMS: 0, EndMS: 1000},
+		{TranscriptID: tc.ID, SequenceNo: 2, SpeakerLabel: "1", Text: "普通段", StartMS: 1000, EndMS: 2000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 先归到 ghost，再纠正给 real（写 corrected_from=ghost）
+	if err := transcripts.SetSegmentSpeaker(ctx, tc.ID, "2", ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.CorrectSegmentSpeaker(ctx, tc.ID, "2", ghost.ID, real.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 第二段直接归到 real，不经纠正——用于验证未纠正段不输出 corrected_from* 键（omitempty 契约）
+	if err := transcripts.SetSegmentSpeaker(ctx, tc.ID, "1", real.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(w, req.WithContext(auth.WithUserID(req.Context(), 1)))
+		})
+	})
+	RegisterQuery(r, &QueryHandler{Sessions: sessions, Transcripts: transcripts, Speakers: speakers})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Segments []struct {
+			CorrectedFrom     string `json:"corrected_from"`
+			CorrectedFromName string `json:"corrected_from_name"`
+		} `json:"segments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Segments) != 2 {
+		t.Fatalf("应有 2 段，实际 %d", len(resp.Segments))
+	}
+	// 段按 sequence_no 排序，seq1（幽灵段）是被纠正的那一段——以非空 corrected_from 定位
+	var corrected *struct {
+		CorrectedFrom     string `json:"corrected_from"`
+		CorrectedFromName string `json:"corrected_from_name"`
+	}
+	for i := range resp.Segments {
+		if resp.Segments[i].CorrectedFrom != "" {
+			corrected = &resp.Segments[i]
+			break
+		}
+	}
+	if corrected == nil {
+		t.Fatalf("未找到被纠正段（corrected_from 全空）: %s", rec.Body.String())
+	}
+	if corrected.CorrectedFrom != ghost.ID.String() {
+		t.Fatalf("corrected_from 应为铉晔 id，实际 %q", corrected.CorrectedFrom)
+	}
+	if corrected.CorrectedFromName != "铉晔" {
+		t.Fatalf("corrected_from_name 应为铉晔，实际 %q", corrected.CorrectedFromName)
+	}
+	// omitempty 契约：只有 1 段被纠正，raw body 中 "corrected_from" 恰好出现 2 次
+	// （该段的 corrected_from + corrected_from_name），未纠正段不输出这两个键。
+	if n := strings.Count(rec.Body.String(), "corrected_from"); n != 2 {
+		t.Fatalf("未纠正段不应输出 corrected_from* 键，期望恰好 2 处（仅纠正段），实际 %d", n)
+	}
+}
+
 // mustJobID 取 session 当前指向的 job id（测试 helper）。
 func mustJobID(t *testing.T, sessions *repo.SessionRepo, sid ids.ID) ids.ID {
 	t.Helper()
