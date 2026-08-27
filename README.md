@@ -47,10 +47,33 @@ make sidecar-start
 # 4. 起服务（会读取 .env 里的密钥）
 set -a; source .env; set +a
 make dev
-# 打开 http://localhost:8080 —— 时间线 / 录音 / 声纹 / 人物 / 主题 / 记忆 / 待办 标签页
+# 打开 http://localhost:8080 —— 登录后进入 时间线 / 录音 / 声纹 / 人物 / 主题 / 记忆 / 待办 / 问知微 / 报告
 ```
 
 > 启动顺序：MySQL → 声纹 sidecar → 服务。sidecar 未起时转写仍可用，但说话人解析 stage 会失败重试（不丢转写）。
+
+## 账号与登录
+
+系统是多用户的，访问需登录（cookie + 服务端 session 鉴权）。**没有硬编码默认密码**——用户名固定播种，口令由你首次启动时引导设置。
+
+- **初始用户**：迁移 `000012_auth` 播种 `id=1`、**用户名 `owner`**、显示名「我」，存量数据（录音/画像等）都归它。其 `password_hash` 初始为空（**空 = 不可登录**）。
+- **首次设 owner 口令**：在 `.env`（或环境）里配 `ZW_OWNER_PASSWORD=你的口令`，然后启动服务——若 owner 口令仍为空，服务会用它引导设置（`cmd/zhiwei-server/main.go`）。**一旦设过就不再被覆盖**（改 `ZW_OWNER_PASSWORD` 重启无效）。之后用 **`owner` / 你设的口令** 登录。
+- **本地 http 调试**：session cookie 默认带 `Secure`，纯 http 下浏览器不会回传 cookie → 登不进。本地调试设 `ZW_COOKIE_SECURE=false`。
+- **会话有效期**：默认 30 天，`ZW_SESSION_TTL_DAYS` 可调。
+
+### 用户管理 CLI
+
+```bash
+# 加载 .env（拿到 ZW_MYSQL_DSN 等），下面命令都需要
+set -a; . ./.env; set +a
+
+# 新增用户（建 app_user + 为其引导画像 owner「我」根节点）
+go run ./cmd/zhiwei-adduser -u alice -p 口令 -n 爱丽丝    # -n 显示名可选，缺省取用户名
+
+# 重置 / 清空口令（仅改 password_hash，不动其它数据）
+go run ./cmd/zhiwei-resetpw -u owner -p 新口令           # 重置为新口令
+go run ./cmd/zhiwei-resetpw -u owner                     # 省略 -p 即清空口令（禁登；可随后配 ZW_OWNER_PASSWORD 重启重新引导 owner）
+```
 
 ## 运行测试
 
@@ -82,6 +105,8 @@ make spike-asr    # StepFun realtime 转写
 | `make compose-up / down` | 启停 MySQL |
 | `make migrate-up / down` | 数据库迁移（golang-migrate） |
 | `make init-testdb` | 重建集成测试库 |
+| `go run ./cmd/zhiwei-adduser -u <名> -p <口令> [-n <显示名>]` | 新增登录用户 + 引导其画像 owner |
+| `go run ./cmd/zhiwei-resetpw -u <名> [-p <新口令>]` | 重置口令；省略 `-p` 即清空（禁登） |
 | `make dev-start / dev-stop / dev-restart` | 后台启停调试进程（另有 `dev-status` / `dev-logs`） |
 
 ## API 一览
