@@ -283,11 +283,18 @@ const app = createApp({
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || '上传失败');
         uploadInfo.value = { filename: file.name, status: 'running', text: '已上传，处理中…' };
+        // 记录上次轮询到的 job.stage：阶段每推进一步就刷新一次时间线列表。
+        // 这样 ASR 落库后（stage 由 asr → segment）卡片标题 asr_preview 立即可见，
+        // 不用等整条流水线（说话人/提取/画像…）跑完；badge 的阶段文案也同步更新。
+        let lastStage = '';
         pollTimer = setInterval(async () => {
           try {
             const rr = await fetch('/api/sessions/' + d.session_id, { credentials: 'same-origin' });
             const dd = await rr.json();
-            const st = dd.job ? dd.job.status : dd.session.status;
+            const job = dd.job;
+            const st = job ? job.status : dd.session.status;
+            const stage = job ? (job.stage || '') : '';
+            if (stage && stage !== lastStage) { lastStage = stage; loadSessions(); }
             if (st === 'done' || st === 'completed') {
               clearInterval(pollTimer);
               uploadInfo.value = { filename: file.name, status: 'done', text: '处理完成 ✓' };
@@ -347,6 +354,12 @@ const app = createApp({
       try {
         topicDetail.value = await api('GET', '/api/topics/' + id);
       } catch (e) { showError(e); }
+    }
+    // 主题详情页的统一刷新：重开当前详情 + 刷主题列表（记忆/待办增删或关联变化会影响列表计数）。
+    // 供主题页里记忆忽略、待办编辑/删除、关联变更等操作的 reload 回调复用。
+    async function reloadTopicDetail() {
+      if (topicDetail.value && topicDetail.value.topic) await openTopic(topicDetail.value.topic.id);
+      await loadTopics();
     }
     async function confirmTopic(t) {
       deletingTopicId.value = null; dismissingTopicId.value = null; // topic 状态变 active，清理删除/忽略确认态
@@ -603,9 +616,15 @@ const app = createApp({
     // ---------- 待办 ----------
     const todos = ref([]);
     const doneCollapsed = ref(true);
-    const suggestedTodos = computed(() => todos.value.filter(t => t.status === 'suggested'));
-    const activeTodos = computed(() => todos.value.filter(t => t.status === 'confirmed'));
-    const doneTodos = computed(() => todos.value.filter(t => t.status === 'done'));
+    // 搜索框关键词（客户端过滤标题，与记忆 tab 同模式）；三个分组共用一个搜索词。
+    const todoSearch = ref('');
+    const todoMatch = t => {
+      const q = todoSearch.value.trim().toLowerCase();
+      return !q || (t.title || '').toLowerCase().includes(q);
+    };
+    const suggestedTodos = computed(() => todos.value.filter(t => t.status === 'suggested' && todoMatch(t)));
+    const activeTodos = computed(() => todos.value.filter(t => t.status === 'confirmed' && todoMatch(t)));
+    const doneTodos = computed(() => todos.value.filter(t => t.status === 'done' && todoMatch(t)));
 
     async function loadTodos() {
       try {
@@ -629,17 +648,24 @@ const app = createApp({
     // 下拉选项：排除已忽略（dismissed）的 topic
     const availableTopics = computed(() => topics.value.filter(t => t.status !== 'dismissed'));
     async function addTodoTopic(t, topicId) {
-      try { await api('POST', '/api/todos/' + t.id + '/topics', { topic_id: topicId }); await loadTodos(); }
+      try { await api('POST', '/api/todos/' + t.id + '/topics', { topic_id: topicId }); await reloadAfterTodoTopic(); }
       catch (e) { showError(e); }
     }
     async function removeTodoTopic(t, topicId) {
-      try { await api('DELETE', '/api/todos/' + t.id + '/topics/' + topicId); await loadTodos(); }
+      try { await api('DELETE', '/api/todos/' + t.id + '/topics/' + topicId); await reloadAfterTodoTopic(); }
       catch (e) { showError(e); }
     }
-    // 关联变更后按当前视图刷新：记忆 tab 刷 memories，时间线详情刷 session。
-    // 原先硬编码 reloadSession(detail.session.id)——在记忆 tab（无展开 session）会崩。
+    // 关联变更后按当前视图刷新：待办 tab 刷 todos，主题详情页重开当前主题
+    // （原先硬编码 loadTodos()——在主题页改关联时详情列表不刷新）。
+    async function reloadAfterTodoTopic() {
+      if (tab.value === 'topics' && topicDetail.value) await reloadTopicDetail();
+      else await loadTodos();
+    }
+    // 关联变更后按当前视图刷新：记忆 tab 刷 memories，时间线详情刷 session，
+    // 主题详情页重开当前主题（原先硬编码 reloadSession——在主题页改关联时详情列表不刷新）。
     async function reloadAfterMemoryTopic() {
       if (tab.value === 'memories') await loadMemories();
+      else if (tab.value === 'topics' && topicDetail.value) await reloadTopicDetail();
       else if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
     }
     async function addMemoryTopic(m, topicId) {
@@ -691,6 +717,41 @@ const app = createApp({
         detail.value = await api('GET', '/api/sessions/' + sessionId);
         expandedId.value = sessionId;
       } catch (e) { showError(e); }
+    }
+
+    // ---------- 待办批量操作（待确认/进行中/已完成 分组各自勾选、统一处理） ----------
+    // todoSel：勾选中的 todo id 集合（跨组共用，批量按钮只作用于本组勾选项）；
+    // todoBatchAsk：破坏性批量操作（忽略/删除）的 2 步确认态 {act, group}，与单条操作的行内确认同风格。
+    const todoSel = reactive(new Set());
+    const todoBatchAsk = ref(null);
+    function toggleTodoSel(id) { todoSel.has(id) ? todoSel.delete(id) : todoSel.add(id); }
+    // 组内已勾选条目
+    function todoGroupSel(list) { return list.filter(td => todoSel.has(td.id)); }
+    // 组内全选/全不选切换（已全选 → 清空；否则全选）
+    function toggleTodoGroupSel(list) {
+      if (list.length && todoGroupSel(list).length === list.length) list.forEach(td => todoSel.delete(td.id));
+      else list.forEach(td => todoSel.add(td.id));
+    }
+    // 批量改状态：逐条 PATCH（单用户量级足够；状态机已放行 suggested→done 与 done→confirmed）。
+    // 失败逐条计数（不刷屏），最后统一刷新列表并清掉已处理项的勾选。
+    async function batchTodoStatus(items, status) {
+      todoBatchAsk.value = null;
+      let failed = 0;
+      await Promise.all(items.map(td =>
+        api('PATCH', '/api/todos/' + td.id, { status }).catch(() => { failed++; })));
+      items.forEach(td => todoSel.delete(td.id));
+      await reloadAllTodos();
+      notify(failed ? `批量操作完成，${failed} 条失败` : '批量操作完成');
+    }
+    // 批量删除：逐条 DELETE（幂等，404 视为已删不失败）
+    async function batchTodoDelete(items) {
+      todoBatchAsk.value = null;
+      let failed = 0;
+      await Promise.all(items.map(td =>
+        api('DELETE', '/api/todos/' + td.id).catch(() => { failed++; })));
+      items.forEach(td => todoSel.delete(td.id));
+      await reloadAllTodos();
+      notify(failed ? `批量删除完成，${failed} 条失败` : '批量删除完成');
     }
 
     // ---------- 时间线筛选 / 按天分组（纯前端） ----------
@@ -2610,6 +2671,23 @@ const app = createApp({
     // 选主题：清旧结果并按最新快照加载（无快照则后端现算）
     function onPickStatusTopic() { topicStatusRow.value = null; topicStatusError.value = ''; loadTopicStatus(false); }
 
+    // ---------- 主题/人物/声纹 搜索（客户端过滤，与记忆 tab 同模式） ----------
+    // 主题：名称 + 描述；人物：显示名；声纹：说话人名称。
+    const topicSearch = ref('');
+    const filteredTopics = computed(() => {
+      const q = topicSearch.value.trim().toLowerCase();
+      return topics.value.filter(t => !q || ((t.name || '') + ' ' + (t.description || '')).toLowerCase().includes(q));
+    });
+    const personSearch = ref('');
+    const filteredPersons = computed(() => {
+      const q = personSearch.value.trim().toLowerCase();
+      return persons.value.filter(p => !q || (p.display_name || '').toLowerCase().includes(q));
+    });
+    const speakerSearch = ref('');
+    const filteredSpeakers = computed(() => {
+      const q = speakerSearch.value.trim().toLowerCase();
+      return allSpeakers.value.filter(sp => !q || (sp.name || '').toLowerCase().includes(q));
+    });
     // ---------- 标签页切换 ----------
     function switchTab(name) {
       const prev = tab.value;
@@ -2618,16 +2696,16 @@ const app = createApp({
       if (prev === 'agent' && name !== 'agent') closeAgentWS();
       if (name === 'timeline') { deletingSessionId.value = null; reextractConfirmId.value = null; segDraft.value = {}; loadSessions(); loadAllSpeakers(); }
       if (name === 'memories') { memSearch.value = ''; loadMemories(); }
-      if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; dismissingTopicId.value = null; cancelManualMerge(); loadDismissedTopics(); loadTopics(); }
-      if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; loadTopics(); loadTodos(); loadDismissedTodos(); }
+      if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; dismissingTopicId.value = null; topicSearch.value = ''; cancelManualMerge(); loadDismissedTopics(); loadTopics(); }
+      if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; todoSel.clear(); todoBatchAsk.value = null; todoSearch.value = ''; loadTopics(); loadTodos(); loadDismissedTodos(); }
       // 声纹 tab：进入时复位本 tab 的临时态（收起录入表单/展开项/改名/播放）并拉全量名册。
-      if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; loadAllSpeakers(); }
+      if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; speakerSearch.value = ''; loadAllSpeakers(); }
       // 问知微 tab：拉会话列表；若已有选中会话，重拉历史 + 重连 WS（切回时恢复现场）。
       if (name === 'agent') { loadAgentConversations(); if (agentConvId.value) { const cid = agentConvId.value; loadAgentHistory(cid); openAgentWS(cid); } }
       // 报告 tab：拉主题列表（话题状态选择器数据源）+ 按当前日报/周报类型加载报告。
       if (name === 'reports') { loadTopics(); loadReport(); }
       // 人物 tab：进入时复位详情/删除确认态，拉名册 + 已删除列表 + 确认队列（跨平面 pending 并集，独立刷新）+ 属性目录（受控输入元数据，懒加载缓存）。
-      if (name === 'persons') { closePersonDetail(); deletingPersonId.value = null; loadPersons(); loadDeletedPersons(); loadPending(); loadAttrCatalog(); }
+      if (name === 'persons') { closePersonDetail(); deletingPersonId.value = null; personSearch.value = ''; loadPersons(); loadDeletedPersons(); loadPending(); loadAttrCatalog(); }
     }
     // 启动先校验登录态（登录门）：GET /api/auth/me → 200 进主界面并加载首屏数据（bootMainData）；
     // 401 → api() 已置 authed=false，显示登录页。未登录时不再盲发 sessions/topics/speakers 等请求。
@@ -2661,12 +2739,14 @@ const app = createApp({
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       lastAudioFile, matchInfo, voiceprintMatching, tryMatchVoiceprint,
       topics, topicDetail, showNewTopic, newTopic, creating, toggleNewTopic, cancelNewTopic, renaming,
-      loadTopics, openTopic, closeTopicDetail, confirmTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, consolidating, toggleMergeMember, applyMerge, deletingTopicId, askDeleteTopic, cancelDeleteTopic, confirmDeleteTopic, dismissingTopicId, askDismissTopic, cancelDismissTopic, confirmDismissTopic, restoreTopic, dismissedTopics, dismissedCollapsed, loadDismissedTopics,
+      loadTopics, openTopic, reloadTopicDetail, closeTopicDetail, confirmTopic, startRename, commitRename, createTopic, suspectOf, mergeDraft, startConsolidate, consolidating, toggleMergeMember, applyMerge, deletingTopicId, askDeleteTopic, cancelDeleteTopic, confirmDeleteTopic, dismissingTopicId, askDismissTopic, cancelDismissTopic, confirmDismissTopic, restoreTopic, dismissedTopics, dismissedCollapsed, loadDismissedTopics,
       manualMergeMode, manualSelected, manualMergeName, manualConfirming, startManualMerge, cancelManualMerge, toggleManualSelect, applyManualMerge, startManualConfirm,
       memories, loadMemories, memoryDraft, startMemoryConsolidate, memConsolidating, toggleMemoryMember, toggleMemoryAdjustment, applyMemoryConsolidation,
       memSearch, memConfMin, filteredMemories,
+      todoSearch, topicSearch, filteredTopics, personSearch, filteredPersons, speakerSearch, filteredSpeakers,
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos, dismissedTodos, dismissedTodoCollapsed, loadDismissedTodos,
       loadTodos, setTodoStatus, jumpToSession,
+      todoSel, todoBatchAsk, toggleTodoSel, todoGroupSel, toggleTodoGroupSel, batchTodoStatus, batchTodoDelete,
       editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       // 问知微（流式对话）

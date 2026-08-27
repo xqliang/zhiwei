@@ -1096,6 +1096,13 @@
       </div>
     </div>
 
+    <!-- 搜索（客户端过滤说话人名称） -->
+    <div class="toolbar" v-if="allSpeakers.length">
+      <input class="txt" v-model="speakerSearch" placeholder="搜索声纹名称…" style="max-width:280px">
+      <div class="spacer"></div>
+      <span class="muted">{{ filteredSpeakers.length }} 人</span>
+    </div>
+
     <!-- 录入表单（复用 enrollForm / enrolling / submitEnroll / onEnrollDrop） -->
     <div class="card" v-if="showEnrollForm">
       <div class="kv" style="margin-bottom:12px"><b>录入声纹</b><button class="btn-link" @click="showEnrollForm=false">✕</button></div>
@@ -1123,9 +1130,10 @@
     </div>
 
     <div v-if="!allSpeakers.length" class="card empty">还没有声纹。点上方「录入」或上传录音后自动登记。</div>
+    <div v-if="allSpeakers.length && !filteredSpeakers.length" class="card empty">没有匹配的声纹。</div>
     <!-- 追加声纹的隐藏文件选择器（点「＋ 追加声纹」时按目标说话人唤起） -->
     <input type="file" accept="audio/*" style="display:none" ref="embFileInput" @change="onAddEmbFile">
-    <div class="card" v-for="(sp, idx) in allSpeakers" :key="sp.id">
+    <div class="card" v-for="(sp, idx) in filteredSpeakers" :key="sp.id">
       <div class="kv">
         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
           <input v-if="spMergeMode" type="checkbox" :checked="spMergeSelected.includes(sp.id)" @change="toggleSpSelect(sp)" style="margin:0; flex-shrink:0" title="选择参与合并">
@@ -1320,8 +1328,15 @@
 
     <!-- 名册卡片 + 就地展开的详情：template 包一层，让详情卡渲染在所点人物卡片正下方
          （对齐时间线 session 的就地展开模式），而不是整个列表末尾——长名册时列表末尾的详情根本看不到 -->
+    <!-- 搜索（客户端过滤姓名） -->
+    <div class="toolbar" v-if="persons.length">
+      <input class="txt" v-model="personSearch" placeholder="搜索人物姓名…" style="max-width:280px">
+      <div class="spacer"></div>
+      <span class="muted">{{ filteredPersons.length }} 人</span>
+    </div>
     <div v-if="!persons.length" class="card empty">还没有人物。点「新建」，或上传录音后由画像抽取自动生成。</div>
-    <template v-for="p in persons" :key="p.id">
+    <div v-if="persons.length && !filteredPersons.length" class="card empty">没有匹配的人物。</div>
+    <template v-for="p in filteredPersons" :key="p.id">
     <div class="card clickable" @click="togglePerson(p.id)">
       <div class="kv">
         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap">
@@ -1842,8 +1857,15 @@
           <button class="btn ghost" @click="cancelNewTopic">取消</button>
         </div>
       </div>
+      <!-- 搜索（客户端过滤名称/描述） -->
+      <div class="toolbar" v-if="topics.length">
+        <input class="txt" v-model="topicSearch" placeholder="搜索主题名称 / 描述…" style="max-width:280px">
+        <div class="spacer"></div>
+        <span class="muted">{{ filteredTopics.length }} 个</span>
+      </div>
       <div v-if="!topics.length" class="card empty">还没有主题。录音抽取后会自动归类，也可以手动新建。</div>
-      <div class="card" v-for="t in topics" :key="t.id">
+      <div v-if="topics.length && !filteredTopics.length" class="card empty">没有匹配的主题。</div>
+      <div class="card" v-for="t in filteredTopics" :key="t.id">
         <div class="kv">
           <div style="display:flex; align-items:center; gap:8px">
             <input v-if="manualMergeMode" type="checkbox" :checked="manualSelected.includes(t.id)" @change="toggleManualSelect(t)">
@@ -1922,31 +1944,61 @@
             <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
             <b v-if="!editingMem || editingMem.id !== m.id" class="editable" @click="startEditMemory(m)" title="点击编辑">{{ m.title }}<span class="hint">✎</span></b>
           </div>
+          <!-- 忽略（软删除）：与记忆 tab 同款 2 步行内确认 -->
+          <button v-if="dismissingMemId !== m.id" class="btn ghost" @click="askDismissMem(m)" title="忽略此记忆">✕</button>
+          <button v-if="dismissingMemId === m.id" class="btn warn" @click="confirmDismissMem(m, reloadTopicDetail)">确认忽略?</button>
+          <button v-if="dismissingMemId === m.id" class="btn ghost" @click="cancelDismissMem()">取消</button>
         </div>
         <div v-if="editingMem && editingMem.id === m.id" class="edit-form">
           <input class="txt" v-model="editingMem.title" style="margin-bottom:8px">
           <textarea class="txt" v-model="editingMem.content" rows="3"></textarea>
           <div class="edit-actions" style="margin-top:8px">
-            <button class="btn primary" style="padding:6px 14px" @click="saveEditMemory(() => openTopic(topicDetail.topic.id))">保存</button>
+            <button class="btn primary" style="padding:6px 14px" @click="saveEditMemory(reloadTopicDetail)">保存</button>
             <button class="btn mini" @click="cancelEditMemory()">取消</button>
           </div>
         </div>
         <div v-else style="margin:6px 0">{{ m.content }}</div>
         <div class="muted">置信 {{ (m.confidence ?? 0).toFixed(2) }}<template v-if="m.event_at"> · {{ fmtTime(m.event_at) }}</template></div>
-        <div v-if="topicChips(m).length" class="topic-row">
-          <span v-for="tp in topicChips(m)" :key="tp.id" class="chip">{{ tp.name }}</span>
+        <!-- 关联主题管理：✕ 取消关联 + 下拉添加（与其他页记忆卡片一致） -->
+        <div class="topic-row">
+          <span v-for="tp in topicChips(m)" :key="tp.id" class="chip">{{ tp.name }}<button class="chip-x" @click.stop="removeMemoryTopic(m, tp.id)" title="取消关联">✕</button></span>
+          <select class="mini" style="padding:3px 8px" title="关联主题"
+                  @change="if($event.target.value){addMemoryTopic(m,$event.target.value);$event.target.value=''}">
+            <option value="">+ 关联主题</option>
+            <option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </select>
+        </div>
+        <div class="card-actions">
+          <div class="muted" v-if="m.session_id" style="cursor:pointer" @click="jumpToSession(m.session_id)">↗ 查看来源对话</div>
         </div>
       </div>
       <div class="todo-group-title">关联待办</div>
       <div v-if="!topicDetail.todos || !topicDetail.todos.length" class="card empty">暂无待办</div>
       <div class="card" v-for="td in topicDetail.todos" :key="td.id">
         <div class="kv">
-          <div>☑️ {{ td.title }}</div>
-          <span class="badge" :class="td.status">{{ todoStatusText(td.status) }}</span>
+          <div v-if="!editingTodo || editingTodo.id !== td.id" class="editable" @click="startEditTodo(td)" title="点击编辑">☑️ {{ td.title }}<span class="hint">✎</span></div>
+          <div v-else style="min-width:0; flex:1">
+            <input class="txt" v-model="editingTodo.title">
+          </div>
+          <div style="display:flex; gap:6px; flex-shrink:0; align-items:center">
+            <span v-if="!editingTodo || editingTodo.id !== td.id" class="badge" :class="td.status">{{ todoStatusText(td.status) }}</span>
+            <button v-if="editingTodo && editingTodo.id === td.id" class="btn primary" style="padding:6px 12px" @click="saveEditTodo(reloadTopicDetail)">保存</button>
+            <button v-if="editingTodo && editingTodo.id === td.id" class="btn mini" @click="cancelEditTodo()">取消</button>
+            <button v-if="(!editingTodo || editingTodo.id !== td.id) && deletingTodoId !== td.id" class="btn mini" @click="askDeleteTodo(td)">删除</button>
+            <button v-if="deletingTodoId === td.id" class="btn danger" @click="confirmDeleteTodo(td, reloadTopicDetail)">确认删除?</button>
+            <button v-if="deletingTodoId === td.id" class="btn ghost" @click="cancelDeleteTodo()">取消</button>
+          </div>
         </div>
-        <div v-if="topicChips(td).length" class="topic-row">
-          <span v-for="tp in topicChips(td)" :key="tp.id" class="chip">{{ tp.name }}</span>
+        <div class="muted" v-if="td.due_at" :class="{overdue: new Date(td.due_at) < new Date()}">截止 {{ fmtDue(td.due_at) }}</div>
+        <div class="topic-row">
+          <span v-for="tp in topicChips(td)" :key="tp.id" class="chip">{{ tp.name }}<button class="chip-x" @click.stop="removeTodoTopic(td, tp.id)" title="取消关联">✕</button></span>
+          <select class="mini" style="padding:3px 8px" title="关联主题"
+                  @change="if($event.target.value){addTodoTopic(td,$event.target.value);$event.target.value=''}">
+            <option value="">+ 关联主题</option>
+            <option v-for="t in availableTopics" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </select>
         </div>
+        <div class="muted" v-if="td.source_session_id" style="cursor:pointer" @click="jumpToSession(td.source_session_id)">↗ 查看来源对话</div>
       </div>
     </template>
   </div>
@@ -1998,10 +2050,37 @@
 
   <!-- ============ 待办 ============ -->
   <div class="wrap" v-if="tab==='todos'">
-    <div class="todo-group-title">待确认（{{ suggestedTodos.length }}）</div>
+    <!-- 搜索（客户端过滤标题，三个分组共用） -->
+    <div class="toolbar">
+      <input class="txt" v-model="todoSearch" placeholder="搜索待办标题…" style="max-width:280px">
+      <div class="spacer"></div>
+      <span class="muted">{{ suggestedTodos.length + activeTodos.length + doneTodos.length }} 条</span>
+    </div>
+    <div class="todo-group-title" style="display:flex; align-items:center; gap:10px">
+      <span>待确认（{{ suggestedTodos.length }}）</span>
+      <label v-if="suggestedTodos.length" style="font-weight:400; font-size:var(--fs-xs); cursor:pointer; display:flex; align-items:center; gap:4px">
+        <input type="checkbox" :checked="suggestedTodos.length > 0 && todoGroupSel(suggestedTodos).length === suggestedTodos.length" @change="toggleTodoGroupSel(suggestedTodos)"> 全选
+      </label>
+    </div>
+    <!-- 批量操作条：本组有勾选才显示。忽略（终态不可恢复）走 2 步确认 -->
+    <div v-if="todoGroupSel(suggestedTodos).length" class="card" style="padding:8px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#f0f6ff">
+      <b style="font-size:var(--fs-sm)">已选 {{ todoGroupSel(suggestedTodos).length }} 条</b>
+      <button class="btn mini primary" @click="batchTodoStatus(todoGroupSel(suggestedTodos), 'confirmed')">统一加入</button>
+      <button class="btn mini primary" @click="batchTodoStatus(todoGroupSel(suggestedTodos), 'done')">统一完成</button>
+      <template v-if="todoBatchAsk && todoBatchAsk.act==='dismiss' && todoBatchAsk.group==='suggested'">
+        <button class="btn mini warn" @click="batchTodoStatus(todoGroupSel(suggestedTodos), 'dismissed')">确认忽略 {{ todoGroupSel(suggestedTodos).length }} 条?</button>
+        <button class="btn mini ghost" @click="todoBatchAsk = null">取消</button>
+      </template>
+      <button v-else class="btn mini" @click="todoBatchAsk = {act:'dismiss', group:'suggested'}">统一忽略</button>
+      <span style="flex:1"></span>
+      <button class="btn mini ghost" @click="toggleTodoGroupSel(suggestedTodos)">全选/清空</button>
+    </div>
     <div v-if="!suggestedTodos.length" class="card empty">没有待确认的待办</div>
     <div class="card" v-for="td in suggestedTodos" :key="td.id" style="background:#fffdf5">
       <div class="kv">
+        <label style="display:flex; align-items:center; cursor:pointer; flex-shrink:0" title="勾选后可用上方批量操作">
+          <input type="checkbox" :checked="todoSel.has(td.id)" @change="toggleTodoSel(td.id)">
+        </label>
         <div v-if="!editingTodo || editingTodo.id !== td.id" class="editable" @click="startEditTodo(td)" title="点击编辑">☑️ {{ td.title }}<span class="hint">✎</span></div>
         <div v-else style="min-width:0; flex:1">
           <input class="txt" v-model="editingTodo.title">
@@ -2027,10 +2106,35 @@
       <div class="muted" v-if="td.source_session_id" style="cursor:pointer" @click="jumpToSession(td.source_session_id)">↗ 查看来源对话</div>
     </div>
 
-    <div class="todo-group-title">进行中（{{ activeTodos.length }}）</div>
+    <div class="todo-group-title" style="display:flex; align-items:center; gap:10px">
+      <span>进行中（{{ activeTodos.length }}）</span>
+      <label v-if="activeTodos.length" style="font-weight:400; font-size:var(--fs-xs); cursor:pointer; display:flex; align-items:center; gap:4px">
+        <input type="checkbox" :checked="activeTodos.length > 0 && todoGroupSel(activeTodos).length === activeTodos.length" @change="toggleTodoGroupSel(activeTodos)"> 全选
+      </label>
+    </div>
+    <!-- 批量操作条：完成即改状态；忽略（终态）与删除（硬删）均 2 步确认 -->
+    <div v-if="todoGroupSel(activeTodos).length" class="card" style="padding:8px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#f0f6ff">
+      <b style="font-size:var(--fs-sm)">已选 {{ todoGroupSel(activeTodos).length }} 条</b>
+      <button class="btn mini primary" @click="batchTodoStatus(todoGroupSel(activeTodos), 'done')">统一完成</button>
+      <template v-if="todoBatchAsk && todoBatchAsk.act==='dismiss' && todoBatchAsk.group==='active'">
+        <button class="btn mini warn" @click="batchTodoStatus(todoGroupSel(activeTodos), 'dismissed')">确认忽略 {{ todoGroupSel(activeTodos).length }} 条?</button>
+        <button class="btn mini ghost" @click="todoBatchAsk = null">取消</button>
+      </template>
+      <button v-else class="btn mini" @click="todoBatchAsk = {act:'dismiss', group:'active'}">统一忽略</button>
+      <template v-if="todoBatchAsk && todoBatchAsk.act==='delete' && todoBatchAsk.group==='active'">
+        <button class="btn mini danger" @click="batchTodoDelete(todoGroupSel(activeTodos))">确认删除 {{ todoGroupSel(activeTodos).length }} 条?</button>
+        <button class="btn mini ghost" @click="todoBatchAsk = null">取消</button>
+      </template>
+      <button v-else class="btn mini" @click="todoBatchAsk = {act:'delete', group:'active'}">统一删除</button>
+      <span style="flex:1"></span>
+      <button class="btn mini ghost" @click="toggleTodoGroupSel(activeTodos)">全选/清空</button>
+    </div>
     <div v-if="!activeTodos.length" class="card empty">没有进行中的待办</div>
     <div class="card" v-for="td in activeTodos" :key="td.id">
       <div class="kv">
+        <label style="display:flex; align-items:center; cursor:pointer; flex-shrink:0" title="勾选后可用上方批量操作">
+          <input type="checkbox" :checked="todoSel.has(td.id)" @change="toggleTodoSel(td.id)">
+        </label>
         <div v-if="!editingTodo || editingTodo.id !== td.id" class="editable" @click="startEditTodo(td)" title="点击编辑">☑️ {{ td.title }}<span class="hint">✎</span></div>
         <div v-else style="min-width:0; flex:1">
           <input class="txt" v-model="editingTodo.title">
@@ -2056,13 +2160,32 @@
       <div class="muted" v-if="td.source_session_id" style="cursor:pointer" @click="jumpToSession(td.source_session_id)">↗ 查看来源对话</div>
     </div>
 
-    <div class="todo-group-title" style="cursor:pointer" @click="doneCollapsed = !doneCollapsed">
-      已完成（{{ doneTodos.length }}）{{ doneCollapsed ? ' ▸' : ' ▾' }}
+    <div class="todo-group-title" style="cursor:pointer; display:flex; align-items:center; gap:10px" @click="doneCollapsed = !doneCollapsed">
+      <span>已完成（{{ doneTodos.length }}）{{ doneCollapsed ? ' ▸' : ' ▾' }}</span>
+      <!-- @click.stop：全选不触发行折叠切换 -->
+      <label v-if="doneTodos.length" @click.stop style="font-weight:400; font-size:var(--fs-xs); cursor:pointer; display:flex; align-items:center; gap:4px">
+        <input type="checkbox" :checked="doneTodos.length > 0 && todoGroupSel(doneTodos).length === doneTodos.length" @change="toggleTodoGroupSel(doneTodos)"> 全选
+      </label>
     </div>
     <template v-if="!doneCollapsed">
+      <!-- 批量操作条：重新打开（done→confirmed）与删除（硬删） -->
+      <div v-if="todoGroupSel(doneTodos).length" class="card" style="padding:8px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#f0f6ff">
+        <b style="font-size:var(--fs-sm)">已选 {{ todoGroupSel(doneTodos).length }} 条</b>
+        <button class="btn mini primary" @click="batchTodoStatus(todoGroupSel(doneTodos), 'confirmed')">统一重新打开</button>
+        <template v-if="todoBatchAsk && todoBatchAsk.act==='delete' && todoBatchAsk.group==='done'">
+          <button class="btn mini danger" @click="batchTodoDelete(todoGroupSel(doneTodos))">确认删除 {{ todoGroupSel(doneTodos).length }} 条?</button>
+          <button class="btn mini ghost" @click="todoBatchAsk = null">取消</button>
+        </template>
+        <button v-else class="btn mini" @click="todoBatchAsk = {act:'delete', group:'done'}">统一删除</button>
+        <span style="flex:1"></span>
+        <button class="btn mini ghost" @click="toggleTodoGroupSel(doneTodos)">全选/清空</button>
+      </div>
       <div v-if="!doneTodos.length" class="card empty">没有已完成的待办</div>
       <div class="card" v-for="td in doneTodos" :key="td.id" style="opacity:.62">
         <div class="kv">
+          <label style="display:flex; align-items:center; cursor:pointer; flex-shrink:0" title="勾选后可用上方批量操作">
+            <input type="checkbox" :checked="todoSel.has(td.id)" @change="toggleTodoSel(td.id)">
+          </label>
           <div>✅ <s>{{ td.title }}</s></div>
           <div style="display:flex; gap:6px">
             <button v-if="deletingTodoId !== td.id" class="btn mini" @click="askDeleteTodo(td)">删除</button>
@@ -2101,6 +2224,6 @@
   </template>
 </div>
 
-<script src="/app/app.59470bf1.js"></script>
+<script src="/app/app.2451a68a.js"></script>
 </body>
 </html>

@@ -33,13 +33,18 @@ type TodoRow struct {
 }
 
 // CanTransition 校验 todo 状态流转。
-// 合法路径：suggested→confirmed、confirmed→done、任意非 dismissed→dismissed。
+// 合法路径：suggested→confirmed、suggested→done（待确认批量完成，跳过确认）、
+// confirmed→done、done→confirmed（已完成重新打开）、任意非 dismissed→dismissed。
 // dismissed 是终态，任何状态不可回退（重跑 extract 生成新 suggested 行而非复活旧行）。
 func CanTransition(from, to string) bool {
 	switch {
 	case from == "suggested" && to == "confirmed":
 		return true
+	case from == "suggested" && to == "done": // 批量完成：待确认跳过确认直接完成
+		return true
 	case from == "confirmed" && to == "done":
+		return true
+	case from == "done" && to == "confirmed": // 重新打开：已完成回到进行中
 		return true
 	case (from == "suggested" || from == "confirmed" || from == "done") && to == "dismissed":
 		return true
