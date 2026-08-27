@@ -479,6 +479,22 @@ func TestCorrectSegmentSpeakerAndClearOnManual(t *testing.T) {
 		t.Fatalf("整人改判后应清标记，实际 %+v", got[1].CorrectedFromSpeakerID)
 	}
 
+	// 「用此段录音纹」批量改判(ReassignSpeakerInTranscript) → 清标记
+	// 此刻两段皆 speaker_id=ghost、无标记：先重新纠正打上标记（ghost→real，
+	// 满足纠正的 speaker_id==fromID 前置），再把 real 整体改判回 ghost，验证标记被清。
+	if err := tr.CorrectSegmentSpeaker(ctx, tc.ID, "2", ghost.ID, real.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.ReassignSpeakerInTranscript(ctx, tc.ID, real.ID, ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	for _, s := range got {
+		if s.CorrectedFromSpeakerID != nil {
+			t.Fatalf("ReassignSpeakerInTranscript 后应清标记，实际 %+v", s.CorrectedFromSpeakerID)
+		}
+	}
+
 	// 重新纠正后再 ClearSegmentSpeakers → 清标记 + 清 speaker_id
 	if err := tr.CorrectSegmentSpeaker(ctx, tc.ID, "2", ghost.ID, real.ID); err != nil {
 		t.Fatal(err)

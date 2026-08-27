@@ -207,12 +207,14 @@ func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID
 // CorrectSegmentSpeaker 幽灵历史声纹纠正：把本 transcript 内某 speaker_label 的全部段
 // 从原历史说话人 fromID 改判给 toID，并记录 corrected_from_speaker_id=fromID（前端"已修改"
 // 徽章 + 审计）。纠正 pass 以「组=speaker_label」为单位，故按 label 定位；带 transcript_id
-// 作用域防跨会话误写；单条 UPDATE 原子写、并发安全。
+// 作用域防跨会话误写；WHERE 再限定 speaker_id=fromID，只改「当前确实归原说话人」的段
+// （与 SetSegmentSpeaker 只碰 NULL 段同一纪律：不越界踩用户手动改过的段）；
+// 单条 UPDATE 原子写、并发安全。
 func (r *TranscriptRepo) CorrectSegmentSpeaker(ctx context.Context, transcriptID ids.ID, speakerLabel string, fromID, toID ids.ID) error {
 	_, err := r.DB.ExecContext(ctx,
 		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = ?
-		 WHERE transcript_id = ? AND speaker_label = ?`,
-		toID.Int64(), fromID.Int64(), transcriptID.Int64(), speakerLabel)
+		 WHERE transcript_id = ? AND speaker_label = ? AND speaker_id = ?`,
+		toID.Int64(), fromID.Int64(), transcriptID.Int64(), speakerLabel, fromID.Int64())
 	return err
 }
 
