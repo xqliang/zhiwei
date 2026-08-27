@@ -1008,6 +1008,7 @@ func TestGetSessionCorrectedMarker(t *testing.T) {
 	}
 	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
 		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "2", Text: "幽灵段", StartMS: 0, EndMS: 1000},
+		{TranscriptID: tc.ID, SequenceNo: 2, SpeakerLabel: "1", Text: "普通段", StartMS: 1000, EndMS: 2000},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1016,6 +1017,10 @@ func TestGetSessionCorrectedMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := transcripts.CorrectSegmentSpeaker(ctx, tc.ID, "2", ghost.ID, real.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 第二段直接归到 real，不经纠正——用于验证未纠正段不输出 corrected_from* 键（omitempty 契约）
+	if err := transcripts.SetSegmentSpeaker(ctx, tc.ID, "1", real.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1040,14 +1045,33 @@ func TestGetSessionCorrectedMarker(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Segments) != 1 {
-		t.Fatalf("应有 1 段，实际 %d", len(resp.Segments))
+	if len(resp.Segments) != 2 {
+		t.Fatalf("应有 2 段，实际 %d", len(resp.Segments))
 	}
-	if resp.Segments[0].CorrectedFrom != ghost.ID.String() {
-		t.Fatalf("corrected_from 应为铉晔 id，实际 %q", resp.Segments[0].CorrectedFrom)
+	// 段按 sequence_no 排序，seq1（幽灵段）是被纠正的那一段——以非空 corrected_from 定位
+	var corrected *struct {
+		CorrectedFrom     string `json:"corrected_from"`
+		CorrectedFromName string `json:"corrected_from_name"`
 	}
-	if resp.Segments[0].CorrectedFromName != "铉晔" {
-		t.Fatalf("corrected_from_name 应为铉晔，实际 %q", resp.Segments[0].CorrectedFromName)
+	for i := range resp.Segments {
+		if resp.Segments[i].CorrectedFrom != "" {
+			corrected = &resp.Segments[i]
+			break
+		}
+	}
+	if corrected == nil {
+		t.Fatalf("未找到被纠正段（corrected_from 全空）: %s", rec.Body.String())
+	}
+	if corrected.CorrectedFrom != ghost.ID.String() {
+		t.Fatalf("corrected_from 应为铉晔 id，实际 %q", corrected.CorrectedFrom)
+	}
+	if corrected.CorrectedFromName != "铉晔" {
+		t.Fatalf("corrected_from_name 应为铉晔，实际 %q", corrected.CorrectedFromName)
+	}
+	// omitempty 契约：只有 1 段被纠正，raw body 中 "corrected_from" 恰好出现 2 次
+	// （该段的 corrected_from + corrected_from_name），未纠正段不输出这两个键。
+	if n := strings.Count(rec.Body.String(), "corrected_from"); n != 2 {
+		t.Fatalf("未纠正段不应输出 corrected_from* 键，期望恰好 2 处（仅纠正段），实际 %d", n)
 	}
 }
 

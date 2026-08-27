@@ -407,6 +407,7 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 				lib = libraryWithEntries(all, loadSpeakerEntries(r.Context(), h.SpeakerEmbeddings, all))
 			}
 		}
+		ghostNames := make(map[ids.ID]string) // 纠正原说话人名兜底缓存：同一幽灵 id 只查一次库（避免 N+1）
 		views := make([]segmentView, len(segs))
 		for i, sg := range segs {
 			views[i] = segmentView{
@@ -423,15 +424,23 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 			} else {
 				views[i].Speaker = speakerLabelName(sg.SpeakerLabel) // 未解析→"说话人 N"
 			}
-			// 幽灵历史声纹纠正标记：原历史人可能已不在本会话 speaker 列表（spMap），从 Speakers 兜底解析名字。
+			// 幽灵历史声纹纠正标记：原历史人可能已不在本会话 speaker 列表（spMap），从 Speakers 兜底解析名字（带缓存）。
 			if sg.CorrectedFromSpeakerID != nil {
-				views[i].CorrectedFrom = sg.CorrectedFromSpeakerID.String()
-				if name, ok := spMap[*sg.CorrectedFromSpeakerID]; ok {
+				gid := *sg.CorrectedFromSpeakerID
+				views[i].CorrectedFrom = gid.String()
+				if name, ok := spMap[gid]; ok {
 					views[i].CorrectedFromName = name
 				} else if h.Speakers != nil {
-					if sp, err := h.Speakers.Get(r.Context(), *sg.CorrectedFromSpeakerID); err == nil {
-						views[i].CorrectedFromName = sp.Name
+					name, cached := ghostNames[gid]
+					if !cached {
+						if sp, err := h.Speakers.Get(r.Context(), gid); err != nil {
+							log.Printf("[speaker] 纠正原说话人名兜底解析失败 id=%s: %v", gid, err) // FIX 2：与本 handler 其他降级一致，不静默
+						} else {
+							name = sp.Name
+						}
+						ghostNames[gid] = name // 命中/失败都缓存，避免重复查库
 					}
+					views[i].CorrectedFromName = name
 				}
 			}
 			// 段级声纹 top-3（含归属者）：speaker stage 落库的逐段向量 vs 全库余弦
