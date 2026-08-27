@@ -1141,6 +1141,10 @@
           <template v-if="!renamingSpeaker || renamingSpeaker.id !== sp.id">
             <b class="editable" @click="startRenameSpeaker(sp)" title="点击改名">{{ sp.name }}<span class="hint">✎</span></b>
             <span class="muted">{{ sp.source==='enrolled' ? '手动录入' : '自动登记' }} · {{ sp.sample_count || 0 }} 样本</span>
+            <!-- 绑定人物（名册富化 person_id/person_name）：点击跳人物 tab 展开详情；未绑定为「未关联」提示（引导去人物页建关联） -->
+            <span v-if="sp.person_id" class="chip" style="cursor:pointer; background:var(--accent-soft); color:var(--accent)"
+                  @click="jumpToPerson(sp.person_id)" title="查看人物详情">👤 {{ sp.person_name }}</span>
+            <span v-else class="muted" style="font-size:var(--fs-xs)">未关联人物</span>
           </template>
           <template v-else>
             <input class="txt inline" v-model="renamingSpeaker.name" @keyup.enter="commitRenameSpeaker" @keyup.esc="renamingSpeaker=null">
@@ -1364,13 +1368,30 @@
           <template v-if="!renamingPerson">
             <b style="font-size:var(--fs-md)">{{ personDetail.person.display_name }}</b>
             <span v-if="personDetail.person.is_owner" class="chip">我</span>
-            <span v-if="personDetail.person.speaker_id" class="muted">🎙 {{ personDetail.person.speaker_id }}</span>
+            <!-- 声纹徽标：显示声纹名（详情接口 speaker_name 富化；声纹行被删的悬挂外键降级显 id）。 -->
+            <span v-if="personDetail.person.speaker_id" class="muted">🎙 {{ personDetail.speaker_name || personDetail.person.speaker_id }}</span>
             <button class="btn-link" @click="startRenamePerson" title="改名">✎</button>
           </template>
           <template v-else>
             <input class="txt inline" v-model="renamingPerson.name" @keyup.enter="commitRenamePerson" @keyup.esc="renamingPerson=null">
             <button class="btn primary" style="padding:6px 12px" @click="commitRenamePerson">保存</button>
             <button class="btn mini" @click="renamingPerson=null">取消</button>
+          </template>
+        </div>
+        <!-- 声纹关联行：非编辑态显示当前绑定 + 「关联/换绑」入口；编辑态为下拉（不关联=解绑，
+             选项已过滤被其他人物占用的声纹，冲突兜底后端 409）。 -->
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:4px">
+          <template v-if="!bindingSpeaker">
+            <span class="muted" style="font-size:var(--fs-xs)">{{ personDetail.person.speaker_id ? '已关联声纹' : '未关联声纹' }}</span>
+            <button class="btn-link" @click="startBindingSpeaker" title="关联/换绑声纹">{{ personDetail.person.speaker_id ? '🎙 换绑' : '🎙 关联声纹' }}</button>
+          </template>
+          <template v-else>
+            <select class="txt inline" v-model="bindingSpeaker.speaker_id">
+              <option value="">不关联（解绑）</option>
+              <option v-for="s in bindableSpeakers" :key="s.id" :value="s.id">{{ s.name }}（{{ s.sample_count }} 条样本）</option>
+            </select>
+            <button class="btn primary" style="padding:6px 12px" :disabled="bindingSaving" @click="commitBindingSpeaker">保存</button>
+            <button class="btn mini" @click="bindingSpeaker=null">取消</button>
           </template>
         </div>
         <button class="btn mini" @click="closePersonDetail">收起 ✕</button>
@@ -2224,6 +2245,6 @@
   </template>
 </div>
 
-<script src="/app/app.2451a68a.js"></script>
+<script src="/app/app.6026bb71.js"></script>
 </body>
 </html>

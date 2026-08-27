@@ -253,6 +253,71 @@ func TestSpeakerListWithCandidates(t *testing.T) {
 	}
 }
 
+// TestSpeakerListWithPersons 名册接口富化人物绑定：已绑人物的声纹带 person_id/person_name
+// （名册「跳人物」入口），未绑者为空字段。Persons 未装配（nil）时降级不填充不报错。
+func TestSpeakerListWithPersons(t *testing.T) {
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ids.InitForTest()
+	speakers := &repo.SpeakerRepo{DB: db}
+	persons := &repo.PersonRepo{DB: db}
+	r := chi.NewRouter()
+	RegisterSpeaker(r, &SpeakerHandler{
+		Speakers: speakers, Transcripts: &repo.TranscriptRepo{DB: db},
+		Voiceprint: fakeVoiceprintAPI{}, DataDir: t.TempDir(),
+		Persons: persons,
+	})
+	ctx := context.Background()
+	bound := &repo.Speaker{Name: "绑定声纹测试", Source: "enrolled"}
+	free := &repo.Speaker{Name: "未绑定声纹测试", Source: "enrolled"}
+	_ = speakers.Create(ctx, bound)
+	_ = speakers.Create(ctx, free)
+	// 绑定人物 + 收尾清理（person 行残留会污染 EnsurePersonBootstrap 类用例的 FindByName）
+	p := &repo.Person{DisplayName: "绑定人物测试", SpeakerID: &bound.ID}
+	if err := persons.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = persons.SetStatus(context.Background(), p.ID, "dismissed")
+		_ = speakers.Delete(context.Background(), bound.ID)
+		_ = speakers.Delete(context.Background(), free.ID)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/speakers", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Speakers []struct {
+			Name       string  `json:"name"`
+			PersonID   *string `json:"person_id"`
+			PersonName string  `json:"person_name"`
+		} `json:"speakers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]int{}
+	for i, s := range out.Speakers {
+		byName[s.Name] = i
+	}
+	i, ok := byName["绑定声纹测试"]
+	if !ok {
+		t.Fatalf("缺绑定声纹: %+v", out.Speakers)
+	}
+	if out.Speakers[i].PersonID == nil || *out.Speakers[i].PersonID != p.ID.String() ||
+		out.Speakers[i].PersonName != "绑定人物测试" {
+		t.Fatalf("绑定声纹应带 person_id/person_name: %+v", out.Speakers[i])
+	}
+	if j, ok := byName["未绑定声纹测试"]; !ok || out.Speakers[j].PersonID != nil || out.Speakers[j].PersonName != "" {
+		t.Fatalf("未绑定声纹应无人物字段: %+v", out.Speakers)
+	}
+}
+
 // TestSpeakerRenameClearsCandidates 改名（=用户采纳候选或手动命名）后清空该说话人候选。
 func TestSpeakerRenameClearsCandidates(t *testing.T) {
 	db, err := repo.NewDB(repotest.DSN(t))

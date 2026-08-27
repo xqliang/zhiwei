@@ -267,6 +267,7 @@ func main() {
 		EnrollMinDurationMS:   cfg.EnrollMinDurationMS,
 		VoiceprintThreshold:   cfg.VoiceprintThreshold,
 		SpeakerNameCandidates: nameCandidates,
+		Persons:               persons,
 	})
 	api.RegisterMemory(r, &api.MemoryHandler{
 		Memories: memories, Topics: topics, MemoryTopics: memoryTopics,
@@ -280,7 +281,7 @@ func main() {
 	// 报告 API：/api/reviews/daily|weekly（取最新或生成/强制重生）+ /api/topics/{id}/status。
 	api.RegisterReviews(r, reviewer)
 	api.RegisterPerson(r, &api.PersonHandler{
-		Persons: persons, Attributes: personAttrs, Relationships: personRels,
+		Persons: persons, Speakers: speakers, Attributes: personAttrs, Relationships: personRels,
 		Events: personEvents, Metrics: personMetrics, Cycles: personCycles,
 		Activities: personActivities, ChangeLogs: personLogs, Service: profileSvc,
 	})

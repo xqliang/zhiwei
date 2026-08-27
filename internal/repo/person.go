@@ -212,6 +212,22 @@ SELECT session_id FROM (
 	return out, err
 }
 
+// MapBySpeakers 一次查全部非 dismissed 人物，建 speaker_id → 人物映射（声纹名册富化用，
+// 避免 N+1；同一声纹至多绑一人（唯一键），map 无冲突）。未绑定的声纹不在 map 里。
+func (r *PersonRepo) MapBySpeakers(ctx context.Context) (map[ids.ID]*Person, error) {
+	var list []Person
+	if err := r.DB.SelectContext(ctx, &list, `SELECT * FROM person WHERE status != 'dismissed'`); err != nil {
+		return nil, err
+	}
+	m := make(map[ids.ID]*Person, len(list))
+	for i := range list {
+		if list[i].SpeakerID != nil {
+			m[*list[i].SpeakerID] = &list[i]
+		}
+	}
+	return m, nil
+}
+
 // EnsureOwnerForUser 幂等：确保 userID 域下存在 owner「我」（is_owner=1）。
 // 已存在则 no-op；不存在则建 {UserID, DisplayName:"我", IsOwner:true}。
 // 供新用户创建引导（cmd/zhiwei-adduser）与启动 bootstrap（user-1）复用。

@@ -36,6 +36,8 @@ type SpeakerHandler struct {
 	SpeakerEmbeddings *repo.SpeakerEmbeddingRepo // 多条声纹样本（nil = 未装配，条目功能降级，兼容旧装配/测试）
 
 	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // 名字候选 repo（nil = 不富化/不清理，兼容旧装配）
+
+	Persons *repo.PersonRepo // 人物 repo（nil = 不富化人物绑定，兼容旧装配/测试）
 }
 
 // NameCandidateView 前端展示的候选名：名称 + 置信度数值（硬性要求：用户确认时
@@ -50,6 +52,8 @@ type NameCandidateView struct {
 type speakerWithCandidates struct {
 	repo.Speaker
 	NameCandidates []NameCandidateView `json:"name_candidates"`
+	PersonID       *ids.ID             `json:"person_id,omitempty"`   // 绑定人物 id（声纹名册「跳人物」用；未绑定为空）
+	PersonName     string              `json:"person_name,omitempty"` // 绑定人物显示名（person 表冗余快照，人物改名后需重拉）
 }
 
 // attachCandidates 为说话人列表批量附候选名（一次查询避免 N+1）。
@@ -204,11 +208,30 @@ func (h *SpeakerHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	withCands := h.attachCandidates(r.Context(), list)
+	h.attachPersons(r.Context(), withCands) // 原地富化人物绑定（失败降级不阻断列表）
 	if h.SpeakerEmbeddings != nil {
 		writeJSON(w, map[string]any{"speakers": h.attachEmbeddings(r.Context(), withCands)})
 		return
 	}
 	writeJSON(w, map[string]any{"speakers": withCands})
+}
+
+// attachPersons 为说话人列表原地富化「绑定人物」（person_id/person_name，一次查询避免 N+1）。
+// Persons 未装配或查询失败时降级为不填充（仅影响名册跳转入口，不阻断列表）。
+func (h *SpeakerHandler) attachPersons(ctx context.Context, list []speakerWithCandidates) {
+	if h.Persons == nil {
+		return
+	}
+	m, err := h.Persons.MapBySpeakers(ctx)
+	if err != nil {
+		return // 降级：人物富化失败不阻断声册
+	}
+	for i := range list {
+		if p, ok := m[list[i].ID]; ok {
+			list[i].PersonID = &p.ID
+			list[i].PersonName = p.DisplayName
+		}
+	}
 }
 
 // speakerWithEmbeddings speaker + 候选名 + 声纹样本列表（名册富化视图）。
