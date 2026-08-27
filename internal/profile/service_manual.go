@@ -1025,6 +1025,11 @@ func (s *Service) ManualUpdatePet(ctx context.Context, userID int64, petID ids.I
 	} else if p == nil {
 		return nil, ErrNotFound
 	}
+	// 状态闸门：只允许编辑活跃态（active=正常改、pending=用户手动改即视为确认替换）；
+	// dismissed/superseded 是历史版本，编辑它们会「复活」出第二只 active，拒绝。
+	if old.Status != "active" && old.Status != "pending" {
+		return nil, ErrNotFound
+	}
 	// 改名撞名：新名已有**其他** active 宠物（本行的旧 active 行不算——它即将被替换）。
 	newName := strings.TrimSpace(name)
 	if ex, err := s.Pets.FindActiveByNameExt(ctx, s.DB, old.PersonID, newName); err != nil {

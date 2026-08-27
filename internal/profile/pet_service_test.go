@@ -295,6 +295,13 @@ func TestManualPetCRUD(t *testing.T) {
 		t.Fatalf("改名撞名应 ErrPetNameExists: %v", err)
 	}
 
+	// 状态闸门：编辑已 superseded 的历史行（p2.ID，被 p2b 替换）应 ErrNotFound——
+	// 否则会「复活」出第二只 active，破坏单值语义。
+	_, err = svc.ManualUpdatePet(ctx, 1, p2.ID, "旺财2", "", "狗", "", "", "", "2024-06-15", "")
+	if err != ErrNotFound {
+		t.Fatalf("编辑历史版本行应 ErrNotFound: %v", err)
+	}
+
 	// 确认流：低置信合并 pending（经 ApplyFacts），ConfirmPending 后替换现值。
 	sess := ids.New()
 	_, err = svc.ApplyFacts(ctx, sess, 1, []Fact{
