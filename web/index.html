@@ -1141,10 +1141,14 @@
           <template v-if="!renamingSpeaker || renamingSpeaker.id !== sp.id">
             <b class="editable" @click="startRenameSpeaker(sp)" title="点击改名">{{ sp.name }}<span class="hint">✎</span></b>
             <span class="muted">{{ sp.source==='enrolled' ? '手动录入' : '自动登记' }} · {{ sp.sample_count || 0 }} 样本</span>
-            <!-- 绑定人物（名册富化 person_id/person_name）：点击跳人物 tab 展开详情；未绑定为「未关联」提示（引导去人物页建关联） -->
-            <span v-if="sp.person_id" class="chip" style="cursor:pointer; background:var(--accent-soft); color:var(--accent)"
-                  @click="jumpToPerson(sp.person_id)" title="查看人物详情">👤 {{ sp.person_name }}</span>
-            <span v-else class="muted" style="font-size:var(--fs-xs)">未关联人物</span>
+            <!-- 绑定人物（名册富化 person_id/person_name）：绑定后声纹名已同步为人物名（不变式），
+                 徽标点击跳人物 tab 展开详情；✎ 打开「关联/换绑/解绑」编辑行。 -->
+            <template v-if="sp.person_id">
+              <span class="chip" style="cursor:pointer; background:var(--accent-soft); color:var(--accent)"
+                    @click="jumpToPerson(sp.person_id)" title="查看人物详情">👤 {{ sp.person_name }}</span>
+              <button class="btn-link" @click="startSpPersonEdit(sp)" title="换绑/解绑人物">✎</button>
+            </template>
+            <button v-else class="btn-link" @click="startSpPersonEdit(sp)" title="关联人物">＋ 关联人物</button>
           </template>
           <template v-else>
             <input class="txt inline" v-model="renamingSpeaker.name" @keyup.enter="commitRenameSpeaker" @keyup.esc="renamingSpeaker=null">
@@ -1159,6 +1163,18 @@
           </button>
           <button class="btn mini" @click="askDeleteSpeaker(sp)">删除</button>
         </div>
+      </div>
+
+      <!-- 人物关联编辑行：下拉选已有人物 / 新建并关联 / 解绑；保存后后端同步声纹名=人物名 -->
+      <div v-if="spPersonEdit && spPersonEdit.speakerId === sp.id" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:6px 0">
+        <span class="muted" style="font-size:var(--fs-xs)">关联人物</span>
+        <select class="txt inline" v-model="spPersonEdit.personId">
+          <option v-if="spPersonEdit.boundPersonId" value="">解绑（声纹保留现名）</option>
+          <option value="__new__">＋ 新建人物（用声纹名「{{ sp.name }}」）</option>
+          <option v-for="p in unboundPersons" :key="p.id" :value="p.id">{{ p.display_name }}</option>
+        </select>
+        <button class="btn primary" style="padding:6px 12px" :disabled="spPersonSaving" @click="commitSpPersonEdit">保存</button>
+        <button class="btn mini" @click="spPersonEdit=null">取消</button>
       </div>
 
       <!-- 建议名字：随机名声纹的 LLM 候选（名称+置信度数值，倒排）；采纳后名字即确认、候选清空 -->
@@ -2245,6 +2261,6 @@
   </template>
 </div>
 
-<script src="/app/app.6026bb71.js"></script>
+<script src="/app/app.9d2a3c4b.js"></script>
 </body>
 </html>

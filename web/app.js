@@ -1035,6 +1035,40 @@ const app = createApp({
       } catch (e) { showError(e); }
       finally { enrolling.value = false; }
     }
+    // ---------- 声纹名册的人物关联管理（关联/换绑/解绑/新建并关联） ----------
+    // 编辑态 { speakerId, personId, boundPersonId }：personId ''=解绑（须已有绑定）、
+    // '__new__'=新建人物并关联（人物名取当前声纹名）、其余=换绑到该人物。
+    const spPersonEdit = ref(null);
+    const spPersonSaving = ref(false);  // 防重复提交
+    // 可关联的人物：名册里未绑声纹的（已绑的走解绑后才能换人；后端唯一键兜底）。
+    const unboundPersons = computed(() => persons.value.filter(p => !p.speaker_id));
+    function startSpPersonEdit(sp) {
+      loadPersons(); // 声纹 tab 开着时人物 tab 可能没拉过名册，懒加载（已加载则缓存跳过）
+      spPersonEdit.value = { speakerId: sp.id, personId: sp.person_id || '', boundPersonId: sp.person_id || '' };
+    }
+    async function commitSpPersonEdit() {
+      const d = spPersonEdit.value;
+      if (!d || spPersonSaving.value) return;
+      spPersonSaving.value = true;
+      spPersonEdit.value = null;
+      try {
+        if (d.personId === '__new__') {
+          // 新建人物（暂不绑声纹）→ 经声纹侧转移端点绑上：两步而非一步，是因 POST /api/persons
+          // 对「已被人占用的声纹」回 409（占用保护），转移语义只在 speakers/{id}/person 上有。
+          const sp = allSpeakers.value.find(s => s.id === d.speakerId);
+          const np = await api('POST', '/api/persons', { display_name: sp ? sp.name : '未命名' });
+          await api('PATCH', '/api/speakers/' + d.speakerId + '/person', { person_id: np.id });
+        } else {
+          // ''=解绑 / 其余=转移到该人物：后端单事务清原持有人+绑目标+声纹名同步为人物名
+          await api('PATCH', '/api/speakers/' + d.speakerId + '/person', { person_id: d.personId });
+        }
+        await loadAllSpeakers(); // 名册刷新：sp.name 已同步为人物名、person_id/person_name 更新
+        await loadPersons();     // 人物名册的占用关系同步
+        notify('人物关联已更新', 2000);
+      } catch (e) { showError(e); } // 409（目标人物已被并发绑定其他声纹）等纯文本透传
+      finally { spPersonSaving.value = false; }
+    }
+
     // 改名：点 chip/名字的 ✎ 进入改名行；保存 PATCH /api/speakers/{id}，成功后重拉详情（面板名同步）+ 全量列表。
     // 说话人对象有两种来源：时间线面板的 detail.speakers 用 speaker_id 字段；声纹 tab 的 allSpeakers 用 id 字段。
     // 用 `sp.speaker_id || sp.id` 兼容两者（两者都是同一个 speaker 主键，只是响应结构里的字段名不同）。
@@ -2813,7 +2847,7 @@ const app = createApp({
       // 人物 / 画像
       persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, deletingPersonId, askDeletePerson, cancelDeletePerson, confirmDeletePerson, deletedPersons, deletedCollapsed, loadDeletedPersons, restorePerson,
       bindingSpeaker, bindingSaving, bindableSpeakers, startBindingSpeaker, commitBindingSpeaker,
-      jumpToPerson,
+      jumpToPerson, spPersonEdit, spPersonSaving, unboundPersons, startSpPersonEdit, commitSpPersonEdit,
       epiText, personNameOf,
       attrCatalog, attrDefOf, addAttrDef, editAttrDef, onAddAttrKeyChange, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,

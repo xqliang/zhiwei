@@ -268,6 +268,7 @@ func main() {
 		VoiceprintThreshold:   cfg.VoiceprintThreshold,
 		SpeakerNameCandidates: nameCandidates,
 		Persons:               persons,
+		Service:               profileSvc,
 	})
 	api.RegisterMemory(r, &api.MemoryHandler{
 		Memories: memories, Topics: topics, MemoryTopics: memoryTopics,

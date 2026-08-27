@@ -19,7 +19,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
+	"zhiwei/internal/profile"
 	"zhiwei/internal/repo"
 	"zhiwei/internal/voiceprint"
 )
@@ -38,6 +40,8 @@ type SpeakerHandler struct {
 	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // 名字候选 repo（nil = 不富化/不清理，兼容旧装配）
 
 	Persons *repo.PersonRepo // 人物 repo（nil = 不富化人物绑定，兼容旧装配/测试）
+
+	Service *profile.Service // 人物服务（nil = 声纹改名不联动人物名，兼容旧装配/测试）
 }
 
 // NameCandidateView 前端展示的候选名：名称 + 置信度数值（硬性要求：用户确认时
@@ -90,6 +94,7 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Get("/api/speakers", h.List)
 	r.Post("/api/speakers", h.Enroll)
 	r.Patch("/api/speakers/{id}", h.Rename)
+	r.Patch("/api/speakers/{id}/person", h.SetPerson) // 名册「关联/换绑/解绑人物」（转移语义）
 	r.Delete("/api/speakers/{id}", h.Delete)
 	r.Delete("/api/speakers/{id}/name-candidates", h.DeleteNameCandidate) // 忽略单个候选名（建议区 ✕）
 	r.Post("/api/speakers/merge", h.Merge)                                // 声纹页「手动合并」：多说话人并入一个目标（声纹样本累加）
@@ -380,9 +385,24 @@ func (h *SpeakerHandler) Rename(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "缺少 name", http.StatusBadRequest)
 		return
 	}
-	if err := h.Speakers.UpdateName(r.Context(), id, req.Name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	// 已绑人物的声纹改名 → 走 Service 改人物名（保审计 + 同事务把声纹名同步回来，
+	// 与本请求的新名一致幂等）。绑定不变式是双向的：人物名为主，但声纹侧改名也
+	// 联动人物，避免两处入口改出名分叉。未绑定（或 Service 未装配）走原直改路径。
+	renamed := false
+	if h.Persons != nil && h.Service != nil {
+		if p, err := h.Persons.GetBySpeaker(r.Context(), id); err == nil && p != nil {
+			if err := h.Service.ManualUpdatePerson(r.Context(), p.UserID, p.ID, req.Name, p.SpeakerID, p.Summary); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			renamed = true
+		}
+	}
+	if !renamed {
+		if err := h.Speakers.UpdateName(r.Context(), id, req.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	// 改名 = 用户已确认称呼（采纳候选或手动命名）：清空候选——名字不再是随机名，
 	// 后续也不再重跑推断。清空失败不回滚改名（候选残留仅影响建议展示，前端对
@@ -391,6 +411,54 @@ func (h *SpeakerHandler) Rename(w http.ResponseWriter, r *http.Request) {
 		if err := h.SpeakerNameCandidates.DeleteBySpeaker(r.Context(), id); err != nil {
 			log.Printf("[speaker] 改名后清候选失败 speaker=%s: %v", id, err)
 		}
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// SetPerson 声纹侧人物关联（名册「关联/换绑/解绑」）：person_id 空串=解绑（声纹名保留），
+// 非空=**转移**到该人物（先清原持有人再绑目标，单事务；区别于人物侧 PATCH 的占用 409）。
+// 绑定后声纹名同步为人物名（绑定不变式，时间线/转写随 speaker.name 自动跟随）。
+func (h *SpeakerHandler) SetPerson(w http.ResponseWriter, r *http.Request) {
+	if h.Persons == nil || h.Service == nil {
+		http.Error(w, "人物关联功能未装配", http.StatusNotImplemented)
+		return
+	}
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		PersonID string `json:"person_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	var target *ids.ID
+	if req.PersonID != "" {
+		pid, err := ids.ParseID(req.PersonID)
+		if err != nil {
+			http.Error(w, "person_id 非法", http.StatusBadRequest)
+			return
+		}
+		target = &pid
+	}
+	// 目标人物按登录用户域校验；无鉴权上下文（旧测试装配无 auth 中间件）兜底 user-1。
+	uid := int64(1)
+	if u, ok := auth.UserID(r.Context()); ok {
+		uid = u.Int64()
+	}
+	if err := h.Service.BindSpeakerToPerson(r.Context(), uid, id, target); err != nil {
+		switch {
+		case errors.Is(err, profile.ErrNotFound):
+			http.Error(w, "人物不存在", http.StatusNotFound)
+		case errors.Is(err, profile.ErrPersonHasSpeaker):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
