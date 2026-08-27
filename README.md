@@ -75,6 +75,25 @@ go run ./cmd/zhiwei-resetpw -u owner -p 新口令           # 重置为新口令
 go run ./cmd/zhiwei-resetpw -u owner                     # 省略 -p 即清空口令（禁登；可随后配 ZW_OWNER_PASSWORD 重启重新引导 owner）
 ```
 
+## 多 worktree / 分支开发（数据库约定）
+
+**共享 `zhiwei` 库（`ZW_MYSQL_DSN` 默认库）极易被并行分支的迁移序列搞脏。** 多个 git worktree / 特性分支若迁移文件编号或内容不同（例如两分支都有 `000012` 但一个是 `auth`、一个是 `speaker_embedding`），轮流对同一个 `zhiwei` 库 `migrate up` 会导致版本号对不上、撞表（`table already exists`）、留下 `schema_migrations.dirty=1` 的中途失败状态，服务连库即报错（如 `Table 'zhiwei.app_user' doesn't exist`）。
+
+约定：
+
+- **每个 worktree / 特性分支做「运行调试」时，用自己的临时库**——通过 `ZW_MYSQL_DSN` 指向 `zhiwei_<feature_name>`（如 agent-chatbot 特性用过 `zhiwei_agentchat`），各自迁移、互不干扰：
+  ```bash
+  # 建库（root 一次性；通配 zhiwei_% 授权已覆盖，见 init-testdb 说明）
+  docker exec zhiwei-mvp-mysql mysql -uroot -proot \
+    -e "CREATE DATABASE IF NOT EXISTS zhiwei_myfeat CHARACTER SET utf8mb4; GRANT ALL ON zhiwei_myfeat.* TO 'zhiwei'@'%'; FLUSH PRIVILEGES;"
+  migrate -path migrations -database "mysql://zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei_myfeat" up
+  # 起服务时用它（覆盖 .env 的 ZW_MYSQL_DSN）
+  ZW_MYSQL_DSN="zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei_myfeat?parseTime=true&charset=utf8mb4&multiStatements=true" make dev
+  ```
+- **只在 `main`（或即将 FF 回 main 的集成分支）迁移共享 `zhiwei` 库**——那时迁移序列已统一，不会撞号。
+- **集成测试已自动隔离**：`repotest.DSN` 按包懒建 `zhiwei_test_<pkg>` 库（内嵌迁移、各包互不可见），无需手动管理。
+- 库被搞脏（`dirty=1` / 撞表）时：dev 库直接 drop 重建最省事（`DROP DATABASE zhiwei_myfeat; CREATE ...; migrate up`）；有要留的数据先 `mysqldump` 备份。
+
 ## 运行测试
 
 ```bash
