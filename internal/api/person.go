@@ -1519,6 +1519,9 @@ func writePendingErr(w http.ResponseWriter, err error) {
 
 // petReq 是 POST/PATCH 共用的请求体（整只提交；PATCH 即整只替换，未提到的字段被清空——
 // 前端编辑表单始终回填现值，天然全量）。
+// 注：AddPet/PatchPet 对 birthday 用严格 time.Parse("2006-01-02") 校验，刻意比 Service 更严——
+// HTTP 入口只收标准 YYYY-MM-DD；Service 的 validatePetInput/parseEventAt 接受的宽格式
+// （2006/01/02、2006-01、RFC3339）仅供内部调用方（LLM 抽取等）使用，非不一致 bug。
 type petReq struct {
 	Name     string `json:"name"`
 	Nickname string `json:"nickname"`
