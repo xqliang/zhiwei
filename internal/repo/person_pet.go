@@ -75,11 +75,11 @@ func (r *PersonPetRepo) CreateExt(ctx context.Context, ext ExecerContext, p *Per
 	_, err := ext.NamedExecContext(ctx, `
 INSERT INTO person_pet
   (id, user_id, person_id, name, nickname, species, breed, gender, age_text, birthday, likes,
-   confidence, epistemic_type, source, status, pre_dismiss_status, session_id, memory_id,
+   confidence, epistemic_type, source, status, session_id, memory_id,
    transcript_segment_ids, supersedes_id, version)
 VALUES
   (:id, :user_id, :person_id, :name, :nickname, :species, :breed, :gender, :age_text, :birthday, :likes,
-   :confidence, :epistemic_type, :source, :status, :pre_dismiss_status, :session_id, :memory_id,
+   :confidence, :epistemic_type, :source, :status, :session_id, :memory_id,
    :transcript_segment_ids, :supersedes_id, :version)`, p)
 	return err
 }
