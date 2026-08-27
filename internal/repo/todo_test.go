@@ -15,9 +15,11 @@ import (
 func TestTodoCanTransition(t *testing.T) {
 	ok := [][2]string{
 		{"suggested", "confirmed"},
+		{"suggested", "done"},   // 批量完成：待确认跳过确认直接完成
 		{"suggested", "dismissed"},
 		{"confirmed", "done"},
 		{"confirmed", "dismissed"},
+		{"done", "confirmed"}, // 重新打开：已完成回到进行中
 		{"done", "dismissed"},
 	}
 	for _, c := range ok {
@@ -26,9 +28,8 @@ func TestTodoCanTransition(t *testing.T) {
 		}
 	}
 	bad := [][2]string{
-		{"suggested", "done"}, // 必须先确认
-		{"done", "confirmed"}, // 完成不回退
 		{"dismissed", "confirmed"},
+		{"dismissed", "done"},
 		{"confirmed", "suggested"},
 		{"", "done"},
 	}

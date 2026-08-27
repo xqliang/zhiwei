@@ -64,7 +64,7 @@ func TestTodoList(t *testing.T) {
 }
 
 func TestTodoPatchTransitions(t *testing.T) {
-	r, _, td := setupTodoAPI(t)
+	r, tr, td := setupTodoAPI(t)
 	patch := func(body string) int {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPatch, "/api/todos/"+td.ID.String(),
@@ -74,25 +74,62 @@ func TestTodoPatchTransitions(t *testing.T) {
 		return rec.Code
 	}
 
-	// suggested → done 非法（必须先确认）
-	if code := patch(`{"status":"done"}`); code != http.StatusConflict {
-		t.Fatalf("suggested→done 应 409, got %d", code)
+	// suggested → done（批量完成引入：跳过确认直接完成）
+	if code := patch(`{"status":"done"}`); code != http.StatusOK {
+		t.Fatalf("suggested→done: %d", code)
 	}
-	// suggested → confirmed
+	// done → confirmed（重新打开）
 	if code := patch(`{"status":"confirmed"}`); code != http.StatusOK {
-		t.Fatalf("confirm: %d", code)
+		t.Fatalf("reopen done→confirmed: %d", code)
 	}
 	// confirmed → done
 	if code := patch(`{"status":"done"}`); code != http.StatusOK {
 		t.Fatalf("done: %d", code)
 	}
-	// done → confirmed 非法
-	if code := patch(`{"status":"confirmed"}`); code != http.StatusConflict {
-		t.Fatalf("done→confirmed 应 409, got %d", code)
+	// done → suggested 非法（不可回退为待确认）
+	if code := patch(`{"status":"suggested"}`); code != http.StatusConflict {
+		t.Fatalf("done→suggested 应 409, got %d", code)
 	}
 	// 任意 → dismissed
 	if code := patch(`{"status":"dismissed"}`); code != http.StatusOK {
 		t.Fatalf("dismiss: %d", code)
+	}
+	// dismissed → confirmed 非法（终态）——换一条新 suggested 待办验证
+	ctx := context.Background()
+	td2 := &repo.Todo{Title: "终态流转用例", SourceMemoryID: td.SourceMemoryID,
+		Status: "suggested", Confidence: 0.8}
+	if err := tr.InsertExt(ctx, tr.DB, []*repo.Todo{td2}); err != nil {
+		t.Fatal(err)
+	}
+	recD := httptest.NewRecorder()
+	reqD := httptest.NewRequest(http.MethodPatch, "/api/todos/"+td2.ID.String(),
+		strings.NewReader(`{"status":"dismissed"}`))
+	reqD.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(recD, reqD)
+	if recD.Code != http.StatusOK {
+		t.Fatalf("dismiss td2: %d", recD.Code)
+	}
+	recR := httptest.NewRecorder()
+	reqR := httptest.NewRequest(http.MethodPatch, "/api/todos/"+td2.ID.String(),
+		strings.NewReader(`{"status":"confirmed"}`))
+	reqR.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(recR, reqR)
+	if recR.Code != http.StatusConflict {
+		t.Fatalf("dismissed→confirmed 应 409, got %d", recR.Code)
+	}
+	// suggested → confirmed 单条确认路径仍合法（td2 已 dismissed，用第三条验证）
+	td3 := &repo.Todo{Title: "确认路径用例", SourceMemoryID: td.SourceMemoryID,
+		Status: "suggested", Confidence: 0.8}
+	if err := tr.InsertExt(ctx, tr.DB, []*repo.Todo{td3}); err != nil {
+		t.Fatal(err)
+	}
+	recC := httptest.NewRecorder()
+	reqC := httptest.NewRequest(http.MethodPatch, "/api/todos/"+td3.ID.String(),
+		strings.NewReader(`{"status":"confirmed"}`))
+	reqC.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(recC, reqC)
+	if recC.Code != http.StatusOK {
+		t.Fatalf("suggested→confirmed: %d", recC.Code)
 	}
 	// 不存在 → 404
 	rec := httptest.NewRecorder()
@@ -239,10 +276,19 @@ func TestTodoPatchTitleStatusBadTransition(t *testing.T) {
 	r, tr, td := setupTodoAPI(t)
 	ctx := context.Background()
 	origTitle := td.Title
-	// td 是 suggested；suggested→done 非法。同 body 发 title+status:done 应 409，title 不变。
+	// td 是 suggested；suggested→done 已合法（批量完成），先流转到 confirmed。
+	// 再发 title+status:suggested（非法回退）应 409，title 不变。
+	rec0 := httptest.NewRecorder()
+	req0 := httptest.NewRequest(http.MethodPatch, "/api/todos/"+td.ID.String(),
+		strings.NewReader(`{"status":"confirmed"}`))
+	req0.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(rec0, req0)
+	if rec0.Code != http.StatusOK {
+		t.Fatalf("confirm: %d", rec0.Code)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPatch, "/api/todos/"+td.ID.String(),
-		strings.NewReader(`{"title":"应被回滚的名字","status":"done"}`))
+		strings.NewReader(`{"title":"应被回滚的名字","status":"suggested"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
