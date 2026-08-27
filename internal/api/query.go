@@ -366,6 +366,10 @@ type segmentView struct {
 	// 一句话可能混多人，段级 top-1 不是归属说话人即该段可能被切错/归错）。
 	// 存量会话（逐段向量落库前处理）无值。json 无 omitempty：前端统一按空数组处理。
 	VoiceMatches []voiceMatch `json:"voice_matches"`
+	// CorrectedFrom 非空 = 该段被 speaker stage 的幽灵历史声纹纠正 pass 自动改判过；
+	// 值为被顶掉的原历史说话人 id，CorrectedFromName 为其显示名（前端"已修改"徽章 + tooltip）。
+	CorrectedFrom     string `json:"corrected_from,omitempty"`
+	CorrectedFromName string `json:"corrected_from_name,omitempty"`
 }
 
 func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
@@ -418,6 +422,17 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 				}
 			} else {
 				views[i].Speaker = speakerLabelName(sg.SpeakerLabel) // 未解析→"说话人 N"
+			}
+			// 幽灵历史声纹纠正标记：原历史人可能已不在本会话 speaker 列表（spMap），从 Speakers 兜底解析名字。
+			if sg.CorrectedFromSpeakerID != nil {
+				views[i].CorrectedFrom = sg.CorrectedFromSpeakerID.String()
+				if name, ok := spMap[*sg.CorrectedFromSpeakerID]; ok {
+					views[i].CorrectedFromName = name
+				} else if h.Speakers != nil {
+					if sp, err := h.Speakers.Get(r.Context(), *sg.CorrectedFromSpeakerID); err == nil {
+						views[i].CorrectedFromName = sp.Name
+					}
+				}
 			}
 			// 段级声纹 top-3（含归属者）：speaker stage 落库的逐段向量 vs 全库余弦
 			if len(lib) > 0 && len(sg.Embedding) > 0 {

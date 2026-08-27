@@ -974,6 +974,83 @@ func TestReextractReidentifyBlockedWhileProcessing(t *testing.T) {
 	}
 }
 
+// TestGetSessionCorrectedMarker 详情返回被纠正段的 corrected_from + corrected_from_name（原历史人名，
+// 即便它已不在本会话说话人列表里，也从 Speakers 兜底解析）。
+func TestGetSessionCorrectedMarker(t *testing.T) {
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+
+	ghost := &repo.Speaker{Name: "铉晔", Source: "auto"}
+	real := &repo.Speaker{Name: "说话人real", Source: "auto"}
+	if err := speakers.Create(ctx, ghost); err != nil {
+		t.Fatal(err)
+	}
+	if err := speakers.Create(ctx, real); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), ghost.ID); _ = speakers.Delete(context.Background(), real.ID) })
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tc); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "2", Text: "幽灵段", StartMS: 0, EndMS: 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 先归到 ghost，再纠正给 real（写 corrected_from=ghost）
+	if err := transcripts.SetSegmentSpeaker(ctx, tc.ID, "2", ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.CorrectSegmentSpeaker(ctx, tc.ID, "2", ghost.ID, real.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(w, req.WithContext(auth.WithUserID(req.Context(), 1)))
+		})
+	})
+	RegisterQuery(r, &QueryHandler{Sessions: sessions, Transcripts: transcripts, Speakers: speakers})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Segments []struct {
+			CorrectedFrom     string `json:"corrected_from"`
+			CorrectedFromName string `json:"corrected_from_name"`
+		} `json:"segments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Segments) != 1 {
+		t.Fatalf("应有 1 段，实际 %d", len(resp.Segments))
+	}
+	if resp.Segments[0].CorrectedFrom != ghost.ID.String() {
+		t.Fatalf("corrected_from 应为铉晔 id，实际 %q", resp.Segments[0].CorrectedFrom)
+	}
+	if resp.Segments[0].CorrectedFromName != "铉晔" {
+		t.Fatalf("corrected_from_name 应为铉晔，实际 %q", resp.Segments[0].CorrectedFromName)
+	}
+}
+
 // mustJobID 取 session 当前指向的 job id（测试 helper）。
 func mustJobID(t *testing.T, sessions *repo.SessionRepo, sid ids.ID) ids.ID {
 	t.Helper()
