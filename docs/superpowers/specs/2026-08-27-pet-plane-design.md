@@ -45,7 +45,7 @@
 
 ## 2. LLM 抽取契约
 
-- `internal/profile/fact.go`：`Fact` 加 pet 平面字段 `PetName / PetNickname / Species / Breed / Gender / AgeText / Birthday / Likes`；`rawFact` 对应 json 键（`pet_name / pet_nickname / species / breed / gender / age_text / birthday / likes`）；`validPlanes` 加 `"pet"`；校验：`PetName` 非空才保留（宁少勿错），species 非法值收敛到「其他」。
+- `internal/profile/fact.go`：`Fact` 加 pet 平面字段 `PetName / PetNickname / Species / Breed / Gender / AgeText / Birthday / Likes`；`rawFact` 对应 json 键（`pet_name / pet_nickname / species / breed / gender / age_text / birthday / likes`）；`validPlanes` 加 `"pet"`；校验：`PetName` 非空才保留（宁少勿错）；species 缺省或非法值均收敛到「其他」（库列 NOT NULL 的兜底）。
 - prompt 升版 `prompts/profile_extraction_v3.md` → **`profile_extraction_v4.md`**（契约变更按惯例升版，main.go 读取文件名派生版本号）：
   - 新增「宠物平面」段：对话提到宠物时输出 `plane:"pet"`；`subject` 指代宠物主人；name 必填；年龄同时给 `age_text` 原文与 `birthday` 估算（YYYY-MM-DD，未知可空）；只填听到的字段。
   - few-shot：「我家猫小花最近不吃鱼了」→ `{plane:"pet", subject:{kind:"self"}, pet_name:"小花", species:"猫", likes:"不吃鱼", age_text:…, birthday:…}`。
