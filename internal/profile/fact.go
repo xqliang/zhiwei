@@ -264,7 +264,7 @@ func ParseFacts(raw string) ([]Fact, error) {
 			DurationMin:      rf.DurationMin, // int，不 trim
 			PetName:          strings.TrimSpace(rf.PetName),
 			PetNickname:      strings.TrimSpace(rf.PetNickname),
-			Species:          NormalizeSpecies(rf.Species),
+			Species:          strings.TrimSpace(rf.Species), // 归一推迟到写入期（petRow/mergePetRow 的 NormalizeSpecies）：解析期保留空串=「未提到」，避免合并层把「未提 species」误当「其他」而静默降级现值、并使 reaffirm 同值短路失效
 			Breed:            strings.TrimSpace(rf.Breed),
 			Gender:           strings.TrimSpace(rf.Gender),
 			AgeText:          strings.TrimSpace(rf.AgeText),
@@ -329,7 +329,8 @@ func ParseFacts(raw string) ([]Fact, error) {
 			}
 		case "pet":
 			// 宠物：pet_name 必填（自然键成分，无名无法匹配/落库，宁少勿错直接丢）。
-			// species 已在构造时经 NormalizeSpecies 收敛「其他」（列 NOT NULL 的兜底）。
+			// species 不在此归一：保留原始/空串，缺省=「未提到」的语义交由写入期（petRow/
+			// mergePetRow 的 NormalizeSpecies）收敛「其他」（列 NOT NULL 的兜底）。
 			if f.PetName == "" {
 				continue
 			}

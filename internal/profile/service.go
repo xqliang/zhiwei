@@ -795,6 +795,8 @@ func petFieldsEqual(e *repo.PersonPet, f Fact) bool {
 		if e.Birthday == nil {
 			return false
 		}
+		// 依赖 DSN 未配 loc（DATE 按 UTC 读回），parseEventAt 也归一到 UTC 零点，两侧同 loc
+		//可直接 Equal——与既有平面（event/cycle 的日期比较）一致。
 		if t, ok := parseEventAt(v); !ok || !t.Equal(*e.Birthday) {
 			return false
 		}

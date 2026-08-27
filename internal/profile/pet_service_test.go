@@ -141,3 +141,91 @@ func TestApplyPetFacts(t *testing.T) {
 		t.Fatalf("⑤ reaffirm 不应加行: %d", len(list5))
 	}
 }
+
+// TestApplyPetFactsViaParse 走 ParseFacts → ApplyFacts 全链路回归（守护 species 写入期归一）：
+// 直接构造 Fact{} 字面量会让 Species 取零值 ""，绕过解析层；本用例用 raw JSON 经 ParseFacts
+// 复现真实数据流，锁死「后续 session 只补品种不提 species 时，合并不得把现值 species 静默降级、
+// 且裸重提能走 reaffirm 短路」的语义（对应曾经的 Critical bug：解析期归一致 species 恒非空）。
+func TestApplyPetFactsViaParse(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_pet WHERE person_id = ?`, oid.Int64())
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'pet'`, oid.Int64())
+	})
+
+	// session1：「小花是猫」（高置信）→ active
+	sess1 := ids.New()
+	f1, err := ParseFacts(`{"facts":[
+	  {"plane":"pet","subject":{"kind":"self"},"pet_name":"小花","species":"猫",
+	   "confidence":0.9,"epistemic_type":"observed"}
+	]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ApplyFacts(ctx, sess1, 1, f1); err != nil {
+		t.Fatal(err)
+	}
+
+	// 场景 A：session2 只补品种、不提 species（raw JSON 无 species 字段）→ 高置信合并整只替换。
+	// 关键断言：新 active 行 species 仍为「猫」（不得被降级为「其他」），breed 已合并为「布偶」。
+	sess2 := ids.New()
+	f2, err := ParseFacts(`{"facts":[
+	  {"plane":"pet","subject":{"kind":"self"},"pet_name":"小花","breed":"布偶",
+	   "confidence":0.9,"epistemic_type":"observed"}
+	]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f2[0].Species != "" {
+		t.Fatalf("A 前置：未提 species 应解析为空串: %q", f2[0].Species)
+	}
+	stA, err := svc.ApplyFacts(ctx, sess2, 1, f2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stA.Active != 1 {
+		t.Fatalf("A 高置信合并应 active: %+v", stA)
+	}
+	act, err := svc.Pets.FindActiveByNameExt(ctx, svc.DB, oid, "小花")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if act == nil || act.Species != "猫" {
+		t.Fatalf("A 合并不得降级 species（应仍为猫）: %+v", act)
+	}
+	if act.Breed == nil || *act.Breed != "布偶" {
+		t.Fatalf("A 合并后 breed 应为布偶: %+v", act)
+	}
+
+	// 场景 B：session3 裸重提「小花」（species 缺省、无新信息）→ reaffirm 短路，不加行。
+	sess3 := ids.New()
+	f3, err := ParseFacts(`{"facts":[
+	  {"plane":"pet","subject":{"kind":"self"},"pet_name":"小花",
+	   "confidence":0.9,"epistemic_type":"observed"}
+	]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := svc.Pets.ListByPerson(ctx, oid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stB, err := svc.ApplyFacts(ctx, sess3, 1, f3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stB.Reaffirmed != 1 || stB.Active != 0 || stB.Pending != 0 {
+		t.Fatalf("B 裸重提应 reaffirm 短路: %+v", stB)
+	}
+	after, err := svc.Pets.ListByPerson(ctx, oid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("B reaffirm 不应加行: before=%d after=%d", len(before), len(after))
+	}
+}
