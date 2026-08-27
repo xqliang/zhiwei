@@ -255,7 +255,10 @@ func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.
 	}
 	for _, f := range fixes {
 		if err := d.Transcripts.CorrectSegmentSpeaker(ctx, tr.ID, f.label, f.from, f.to); err != nil {
-			return fmt.Errorf("幽灵历史声纹纠正: %w", err)
+			// best-effort：纠正失败仅 log 不致命。此时段已回填到（幽灵）说话人、并非无归属；
+			// 若返回错误让 job 重试，重试时段已 assigned → reps 为空 → 纠正永不重跑，反而是「既失败又丢纠正」
+			// 的最坏情况。与本 stage 样本行落库失败(SpeakerEmbeddings.Create)的 best-effort+log 处理一致。
+			log.Printf("[speaker] 幽灵历史声纹纠正失败 label=%s from=%s to=%s: %v", f.label, f.from, f.to, err)
 		}
 	}
 	return nil
@@ -293,7 +296,7 @@ func loadSpeakerSampleVecs(ctx context.Context, d StageDeps, spID ids.ID) [][]fl
 	if d.SpeakerEmbeddings != nil {
 		if es, err := d.SpeakerEmbeddings.ListBySpeaker(ctx, spID); err == nil {
 			for _, e := range es {
-				if v, ok := decodeEmbeddingPipe(e.Embedding); ok && len(v) == 256 {
+				if v, ok := decodeEmbedding(e.Embedding); ok && len(v) == 256 {
 					vecs = append(vecs, v)
 				}
 			}
@@ -301,7 +304,7 @@ func loadSpeakerSampleVecs(ctx context.Context, d StageDeps, spID ids.ID) [][]fl
 	}
 	if len(vecs) == 0 && d.Speakers != nil {
 		if sp, err := d.Speakers.Get(ctx, spID); err == nil {
-			if v, ok := decodeEmbeddingPipe(sp.Embedding); ok && len(v) == 256 {
+			if v, ok := decodeEmbedding(sp.Embedding); ok && len(v) == 256 {
 				vecs = append(vecs, v)
 			}
 		}
@@ -309,8 +312,8 @@ func loadSpeakerSampleVecs(ctx context.Context, d StageDeps, spID ids.ID) [][]fl
 	return vecs
 }
 
-// decodeEmbeddingPipe []byte(256×float32 LE) → []float32（与 float32Blob 互逆）。
-func decodeEmbeddingPipe(blob []byte) ([]float32, bool) {
+// decodeEmbedding []byte(256×float32 LE) → []float32（与 float32Blob 互逆）。
+func decodeEmbedding(blob []byte) ([]float32, bool) {
 	if len(blob) == 0 || len(blob)%4 != 0 {
 		return nil, false
 	}
