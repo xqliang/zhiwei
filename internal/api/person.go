@@ -28,6 +28,7 @@ type PersonHandler struct {
 	Metrics       *repo.PersonMetricRepo
 	Cycles        *repo.PersonCycleRepo
 	Activities    *repo.PersonActivityRepo
+	Pets          *repo.PersonPetRepo
 	ChangeLogs    *repo.PersonChangeLogRepo
 	Service       *profile.Service
 }
@@ -56,6 +57,10 @@ func RegisterPerson(r chi.Router, h *PersonHandler) {
 	r.Get("/api/persons/{id}/activities", h.ListActivities)
 	r.Post("/api/persons/{id}/activities", h.AddActivity)
 	r.Delete("/api/persons/{id}/activities/{aid}", h.DeleteActivity)
+	r.Get("/api/persons/{id}/pets", h.ListPets)
+	r.Post("/api/persons/{id}/pets", h.AddPet)
+	r.Patch("/api/persons/{id}/pets/{petid}", h.PatchPet)
+	r.Delete("/api/persons/{id}/pets/{petid}", h.DeletePet)
 	r.Get("/api/persons/{id}/history", h.History)
 
 	r.Get("/api/profile/catalog", h.Catalog)
@@ -103,7 +108,7 @@ var validPersonStatuses = map[string]bool{
 // validPendingKinds 是确认队列 kind 的合法取值（confirm/dismiss 端点白名单）。
 var validPendingKinds = map[string]bool{
 	"person": true, "attribute": true, "relationship": true, "event": true,
-	"metric": true, "cycle": true, "activity": true,
+	"metric": true, "cycle": true, "activity": true, "pet": true,
 }
 
 // ---- 名册 ----
@@ -212,6 +217,7 @@ type personDetailResp struct {
 	Relationships    []repo.PersonRelationship `json:"relationships"`
 	Events           []repo.PersonEvent        `json:"events"`
 	Metrics          []metricGroup             `json:"metrics"`
+	Pets             []repo.PersonPet          `json:"pets"`
 	RecentSessionIDs []ids.ID                  `json:"recent_session_ids"`
 	PendingCount     int                       `json:"pending_count"`
 }
@@ -306,6 +312,23 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	metricGroups, metricPending := buildMetricGroups(metrics)
 	pending += metricPending
+	// 宠物（pet 平面）：只展示 active+pending（单值语义的历史版本不混入）；
+	// 宠物每人通常几只、量小，详情直接内嵌列表（对齐 relationships 的做法）。
+	petRows, err := h.Pets.ListByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	petShown := make([]repo.PersonPet, 0, len(petRows))
+	for _, pt := range petRows {
+		if pt.Status != "active" && pt.Status != "pending" {
+			continue
+		}
+		petShown = append(petShown, pt)
+		if pt.Status == "pending" {
+			pending++
+		}
+	}
 	// cycle/activity 平面的 pending 计入详情页角标（确认队列已含这两类，名册/详情角标须一致）；
 	// 详情不展示 cycle/activity 列表（时序/轨迹数据量大、有独立 GET 端点按需查询），故用轻量 COUNT。
 	cp, err := h.Cycles.CountPendingByPerson(r.Context(), id)
@@ -329,7 +352,7 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, personDetailResp{
 		Person: p, SpeakerName: speakerName, Groups: groups, Relationships: relShown, Events: evShown,
-		Metrics: metricGroups, RecentSessionIDs: sids, PendingCount: pending,
+		Metrics: metricGroups, Pets: petShown, RecentSessionIDs: sids, PendingCount: pending,
 	})
 }
 
@@ -1273,6 +1296,21 @@ type pendingItem struct {
 	SupersedesID  *ids.ID    `json:"supersedes_id,omitempty"`
 }
 
+// petPendingLabel 宠物 pending 项的摘要标签（类别·品种·性别·年龄），供确认队列一行直读。
+func petPendingLabel(p *repo.PersonPet) string {
+	parts := []string{p.Species}
+	if p.Breed != nil {
+		parts = append(parts, *p.Breed)
+	}
+	if p.Gender != nil {
+		parts = append(parts, *p.Gender)
+	}
+	if p.AgeText != nil {
+		parts = append(parts, *p.AgeText)
+	}
+	return strings.Join(parts, "·")
+}
+
 func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 	uid, ok := auth.UserID(r.Context())
 	if !ok {
@@ -1392,6 +1430,26 @@ func (h *PersonHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	petRows, err := h.Pets.ListPending(ctx, uid.Int64())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, pt := range petRows {
+		it := pendingItem{
+			Kind: "pet", ID: pt.ID, PersonID: pt.PersonID, PersonName: nameOf[pt.PersonID],
+			Value: pt.Name, Label: petPendingLabel(&pt),
+			Confidence: pt.Confidence, EpistemicType: pt.EpistemicType,
+			SessionID: pt.SessionID, SupersedesID: pt.SupersedesID,
+		}
+		if pt.SupersedesID != nil {
+			if cur, err := h.Pets.Get(ctx, *pt.SupersedesID); err == nil && cur != nil {
+				it.CurrentValue = cur.Name
+			}
+		}
+		items = append(items, it)
+	}
+
 	for _, p := range persons {
 		if p.Status == "pending" {
 			items = append(items, pendingItem{
@@ -1411,7 +1469,7 @@ func (h *PersonHandler) ConfirmPending(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := chi.URLParam(r, "kind")
 	if !validPendingKinds[kind] {
-		http.Error(w, "kind 非法（person|attribute|relationship|event|metric|cycle|activity）", http.StatusBadRequest)
+		http.Error(w, "kind 非法（person|attribute|relationship|event|metric|cycle|activity|pet）", http.StatusBadRequest)
 		return
 	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
@@ -1434,7 +1492,7 @@ func (h *PersonHandler) DismissPending(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := chi.URLParam(r, "kind")
 	if !validPendingKinds[kind] {
-		http.Error(w, "kind 非法（person|attribute|relationship|event|metric|cycle|activity）", http.StatusBadRequest)
+		http.Error(w, "kind 非法（person|attribute|relationship|event|metric|cycle|activity|pet）", http.StatusBadRequest)
 		return
 	}
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
@@ -1455,6 +1513,181 @@ func writePendingErr(w http.ResponseWriter, err error) {
 		return
 	}
 	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+// ---- 宠物（pet 平面）----
+
+// petReq 是 POST/PATCH 共用的请求体（整只提交；PATCH 即整只替换，未提到的字段被清空——
+// 前端编辑表单始终回填现值，天然全量）。
+type petReq struct {
+	Name     string `json:"name"`
+	Nickname string `json:"nickname"`
+	Species  string `json:"species"`
+	Breed    string `json:"breed"`
+	Gender   string `json:"gender"`
+	AgeText  string `json:"age_text"`
+	Birthday string `json:"birthday"`
+	Likes    string `json:"likes"`
+}
+
+// ListPets 宠物列表：默认只展示 active+pending（单值语义的历史版本 superseded/dismissed
+// 混入会干扰）；?status= 显式过滤（对齐 ListCycles）。
+func (h *PersonHandler) ListPets(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	// 子表按 person_id 查询无 user 过滤，先确认 person 归属登录用户（越权 → 404）。
+	if p, err := h.Persons.Get(r.Context(), uid.Int64(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if p == nil {
+		http.Error(w, "人物不存在", http.StatusNotFound)
+		return
+	}
+	list, err := h.Pets.ListByPerson(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if st := r.URL.Query().Get("status"); st != "" {
+		filtered := make([]repo.PersonPet, 0, len(list))
+		for _, pt := range list {
+			if pt.Status == st {
+				filtered = append(filtered, pt)
+			}
+		}
+		list = filtered
+	} else {
+		filtered := make([]repo.PersonPet, 0, len(list))
+		for _, pt := range list {
+			if pt.Status == "active" || pt.Status == "pending" {
+				filtered = append(filtered, pt)
+			}
+		}
+		list = filtered
+	}
+	writeJSON(w, map[string]any{"pets": list})
+}
+
+// AddPet 手动加宠物（走 Service：active/manual/conf=1.0 + 审计）。
+// name 与 birthday 必填（手动录入生日须为准确 YYYY-MM-DD，设计决策）；species 缺省收敛「其他」。
+func (h *PersonHandler) AddPet(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	pid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	var req petReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		http.Error(w, "name 必填", http.StatusBadRequest)
+		return
+	}
+	if _, err := time.Parse("2006-01-02", strings.TrimSpace(req.Birthday)); err != nil {
+		http.Error(w, "birthday 必填且须为 YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+	pt, err := h.Service.ManualAddPet(r.Context(), uid.Int64(), pid, req.Name, req.Nickname,
+		req.Species, req.Breed, req.Gender, req.AgeText, req.Birthday, req.Likes)
+	if err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "人物不存在", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, profile.ErrPetNameExists) {
+			http.Error(w, "同名宠物已存在，请用编辑修改", http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, pt)
+}
+
+// PatchPet 手动编辑宠物 = 整只替换（旧行 superseded、新行全量）。改新名撞其他 active
+// 同名宠物 → 409；编辑历史版本行 → 404（Service 状态闸门）。
+func (h *PersonHandler) PatchPet(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if _, err := ids.ParseID(chi.URLParam(r, "id")); err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	petID, err := ids.ParseID(chi.URLParam(r, "petid"))
+	if err != nil {
+		http.Error(w, "petid 非法", http.StatusBadRequest)
+		return
+	}
+	var req petReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		http.Error(w, "name 必填", http.StatusBadRequest)
+		return
+	}
+	if _, err := time.Parse("2006-01-02", strings.TrimSpace(req.Birthday)); err != nil {
+		http.Error(w, "birthday 必填且须为 YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+	// 资源归属以 petID 反查为准（对齐 DeleteCycle 不二次校验路径 id 的模式）。
+	pt, err := h.Service.ManualUpdatePet(r.Context(), uid.Int64(), petID, req.Name, req.Nickname,
+		req.Species, req.Breed, req.Gender, req.AgeText, req.Birthday, req.Likes)
+	if err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "宠物不存在", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, profile.ErrPetNameExists) {
+			http.Error(w, "同名宠物已存在", http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, pt)
+}
+
+// DeletePet 手动删宠物 → dismissed + delete 审计。
+func (h *PersonHandler) DeletePet(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	petID, err := ids.ParseID(chi.URLParam(r, "petid"))
+	if err != nil {
+		http.Error(w, "petid 非法", http.StatusBadRequest)
+		return
+	}
+	if err := h.Service.ManualDeletePet(r.Context(), uid.Int64(), petID); err != nil {
+		if errors.Is(err, profile.ErrNotFound) {
+			http.Error(w, "宠物不存在", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 // ---- 按需回填抽取 ----

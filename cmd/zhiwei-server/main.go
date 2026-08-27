@@ -285,7 +285,7 @@ func main() {
 	api.RegisterPerson(r, &api.PersonHandler{
 		Persons: persons, Speakers: speakers, Attributes: personAttrs, Relationships: personRels,
 		Events: personEvents, Metrics: personMetrics, Cycles: personCycles,
-		Activities: personActivities, ChangeLogs: personLogs, Service: profileSvc,
+		Activities: personActivities, Pets: personPets, ChangeLogs: personLogs, Service: profileSvc,
 	})
 
 	// MCP 工具端点（仅供本机 dsh 边车经 streamable-http 连回；不对外）。
