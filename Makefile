@@ -1,4 +1,4 @@
-.PHONY: build dev dev-start dev-stop dev-restart dev-status dev-logs test test-integration migrate-up migrate-down compose-up compose-down init-testdb spike-llm spike-embed spike-asr spike-voiceprint e2e sidecar-start sidecar-stop sidecar-restart sidecar-status sidecar-logs
+.PHONY: build dev dev-start dev-stop dev-restart dev-status dev-logs agent-sidecar-deps test test-integration migrate-up migrate-down compose-up compose-down init-testdb spike-llm spike-embed spike-asr spike-voiceprint e2e sidecar-start sidecar-stop sidecar-restart sidecar-status sidecar-logs
 
 # 给 web/app.js 生成内容 hash 文件名（缓存破除，无构建方案）。
 # build / dev-start / dev-restart 自动依赖：改完 app.js 后任一入口都会重算指纹，
@@ -10,15 +10,27 @@ hash-web:
 build: hash-web
 	go build -o bin/zhiwei-server ./cmd/zhiwei-server
 
-dev: build
+# 问知微 agent 的 dsh 边车（services/agent-sidecar，node/pnpm）依赖：node_modules 缺失时才装。
+# 服务端在首个对话轮次会 spawn `node .../dsh-sdk-jsonrpc-demo/lib/bin.js`——缺依赖时 node 立即
+# MODULE_NOT_FOUND 退出，前端报「dsh 进程已退出」。node_modules 是 gitignore 的本地产物，故
+# 每个 worktree / 新克隆都需各装一次；pnpm 内容寻址 store 已缓存时离线秒装。与声纹 venv 同属一次性设置。
+agent-sidecar-deps:
+	@if [ ! -f services/agent-sidecar/node_modules/@deepseek-ai/dsh-sdk-jsonrpc-demo/lib/bin.js ]; then \
+		echo "安装 agent 边车依赖 (cd services/agent-sidecar && pnpm install) ..."; \
+		cd services/agent-sidecar && pnpm install; \
+	else \
+		echo "agent 边车依赖已就绪，跳过。"; \
+	fi
+
+dev: build agent-sidecar-deps
 	./bin/zhiwei-server
 
-# 调试进程后台管理（scripts/dev.sh 封装）；start/restart 先重算 web 指纹再起服务
-dev-start: hash-web
+# 调试进程后台管理（scripts/dev.sh 封装）；start/restart 先重算 web 指纹 + 确保 agent 边车依赖就绪再起服务
+dev-start: hash-web agent-sidecar-deps
 	bash scripts/dev.sh start
 dev-stop:
 	bash scripts/dev.sh stop
-dev-restart: hash-web
+dev-restart: hash-web agent-sidecar-deps
 	bash scripts/dev.sh restart
 dev-status:
 	bash scripts/dev.sh status
