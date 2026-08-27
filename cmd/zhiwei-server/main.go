@@ -218,12 +218,13 @@ func main() {
 		ExtractWindow: cfg.ExtractWindow,
 		Gate:          memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
 		Voiceprint:    voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
-		SpeakerEmbeddings:     speakerEmbeddings,
-		NameInferPrompt:       string(nameInferBytes),
-		SpeakerNameCandidates: nameCandidates,
-		NameInferWindowMin:    cfg.NameInferWindowMin,
-		NameInferMaxSegments:  cfg.NameInferMaxSegments,
-		Profile:               profileSvc,
+		VoiceprintCorrectMargin: cfg.VoiceprintCorrectMargin,
+		SpeakerEmbeddings:       speakerEmbeddings,
+		NameInferPrompt:         string(nameInferBytes),
+		SpeakerNameCandidates:   nameCandidates,
+		NameInferWindowMin:      cfg.NameInferWindowMin,
+		NameInferMaxSegments:    cfg.NameInferMaxSegments,
+		Profile:                 profileSvc,
 	})
 	// profile stage 按开关追加（ZW_PROFILE_EXTRACT_ENABLED=false 时仅手动+回填端点）
 	stagesList := []string{"asr", "segment", "speaker", "speakername", "extract"}

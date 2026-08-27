@@ -56,14 +56,6 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 	}
 
 	// 1) 逐组切片+提向，跳过已全部解析的组（幂等：reextract 不重复调 sidecar、不覆盖手动纠正）。
-	type groupRep struct {
-		label string
-		rep   []float32 // 组代表声纹（全部段向量均值）——1:N 检索用
-		vecN  int       // 该组有效向量数（用于 sample_count）
-		// clean 登记优先向量：组内「时长最长、与其他说话人段无时间交集且 ≥3s」的单段向量。
-		// nil=无干净段（登记时退回 rep）。只影响**新声纹登记**，不影响上面 rep 的检索。
-		clean []float32
-	}
 	var reps []groupRep
 	// 逐段声纹向量 BLOB（segID→blob）：speaker stage 提取向量后落库，
 	// 供详情页按「每个 ASR 段」展示与声纹库的相似度 top-N——一句话可能混多个人，
@@ -103,7 +95,8 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		}
 		reps = append(reps, groupRep{
 			label: label, rep: aggregateEmbeddings(vecs), vecN: len(vecs),
-			clean: pickCleanSegVec(svs, segs, label),
+			clean:   pickCleanSegVec(svs, segs, label),
+			segVecs: svs,
 		})
 	}
 	if len(reps) == 0 {
@@ -140,6 +133,7 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		}
 	}
 	// 第二趟：未命中的登记新声纹（此时才 Add，故上面的检索全部只见历史库），命中的复用，回填。
+	resolvedID := make([]ids.ID, len(reps)) // 每组最终解析到的 speaker（纠正 pass 用）
 	for i, g := range reps {
 		var speakerID ids.ID
 		if matched[i] {
@@ -169,9 +163,19 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 			}
 			speakerID = sp.ID
 		}
+		resolvedID[i] = speakerID
 		if err := d.Transcripts.SetSegmentSpeaker(ctx, tr.ID, g.label, speakerID); err != nil {
 			return fmt.Errorf("回填 speaker_id: %w", err)
 		}
+	}
+
+	// 3) 幽灵历史声纹纠正 pass（2026-08-27 需求）：见 correctPhantomHistoricalMatches。
+	margin := d.VoiceprintCorrectMargin
+	if margin == 0 {
+		margin = defaultCorrectMargin
+	}
+	if err := correctPhantomHistoricalMatches(ctx, d, tr, reps, matched, resolvedID, margin); err != nil {
+		return err
 	}
 	return nil
 }
@@ -179,10 +183,160 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 // minCleanSegMS 干净段（登记声纹优先来源）的最短时长：3s——太短的段声纹特征不稳。
 const minCleanSegMS = 3000
 
+// defaultCorrectMargin 幽灵历史声纹纠正的默认领先幅度门槛（沿用 voiceprint.GapMin 经验值）。
+// max 相似度口径下，真人在幽灵段上需比历史人自身 max 领先该幅度才改判，挡住接近平局的噪声翻转。
+const defaultCorrectMargin = 0.06
+
+// correctScoreEps 判定容差：声纹向量是 float32（相对精度 ~1e-7），逐维内积在「恰好等于
+// self+margin」的边界上会被 float32 表示误差顶过阈值（如 float32(0.79)=0.790000021）。
+// 加此容差保证「严格大于才纠正」的语义对边界稳健——领先幅度需真正超过 margin，float32
+// 噪声级别的微弱超出不触发翻转。远大于噪声的正常改判（领先 ≥0.09）不受影响。
+const correctScoreEps = 1e-6
+
+// correctPhantomHistoricalMatches 幽灵历史声纹纠正（2026-08-27 需求）：
+// ASR 过度切分出的幽灵组常命中历史库某真人；若该组名下的段被同录音另一在场说话人
+// 匹配得更好（max 相似度口径，与详情页 topVoiceMatchesVec 同口径），判为幽灵、整组改判
+// 给那个人，段写 corrected_from。仅**历史命中组**（matched[i]）参与——新登记组的声纹是
+// 从自己段建出来的、天生在自己段上最高，不可能被判幽灵。先算全部判定（基于本趟归属快照）、
+// 再统一应用，避免链式/互换改判抖动。
+func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.Transcript,
+	reps []groupRep, matched []bool, resolvedID []ids.ID, margin float64) error {
+	if len(reps) < 2 {
+		return nil // 少于两个在场说话人无可比对象
+	}
+	// 每个在场说话人的样本向量集合：历史命中 → 库内多条样本(回退聚合代表)；新登记 → 本趟登记向量。
+	samples := make([][][]float32, len(reps))
+	for i, g := range reps {
+		if matched[i] {
+			samples[i] = loadSpeakerSampleVecs(ctx, d, resolvedID[i])
+		} else {
+			embVec := g.rep
+			if g.clean != nil {
+				embVec = g.clean
+			}
+			samples[i] = [][]float32{embVec}
+		}
+	}
+	type fix struct {
+		label    string
+		from, to ids.ID
+	}
+	var fixes []fix
+	for i, g := range reps {
+		if !matched[i] || len(g.segVecs) == 0 || len(samples[i]) == 0 {
+			continue // 仅历史命中组是候选
+		}
+		// self = 该组段对「历史人自己」的最高相似度（对样本取 max，再对段取 max）
+		self := 0.0
+		for _, sv := range g.segVecs {
+			if s := segMaxScore(sv.vec, samples[i]); s > self {
+				self = s
+			}
+		}
+		// 找在场其他说话人里，在本组段上得分最高者
+		bestScore, bestJ := -1.0, -1
+		for j := range reps {
+			if j == i || resolvedID[j] == resolvedID[i] {
+				continue // 跳过自己、跳过解析到同一 speaker 的组
+			}
+			sc := 0.0
+			for _, sv := range g.segVecs {
+				if s := segMaxScore(sv.vec, samples[j]); s > sc {
+					sc = s
+				}
+			}
+			if sc > bestScore {
+				bestScore, bestJ = sc, j
+			}
+		}
+		if bestJ >= 0 && bestScore > self+margin+correctScoreEps {
+			fixes = append(fixes, fix{label: g.label, from: resolvedID[i], to: resolvedID[bestJ]})
+		}
+	}
+	for _, f := range fixes {
+		if err := d.Transcripts.CorrectSegmentSpeaker(ctx, tr.ID, f.label, f.from, f.to); err != nil {
+			return fmt.Errorf("幽灵历史声纹纠正: %w", err)
+		}
+	}
+	return nil
+}
+
+// segMaxScore 段向量对某说话人「多条样本取最大余弦」——与详情页 topVoiceMatchesVec 同口径，
+// 保证纠正判定与用户在详情页看到的段级相似度数字一致。样本为空返回 0。
+func segMaxScore(seg []float32, sampleVecs [][]float32) float64 {
+	best := 0.0
+	for _, sv := range sampleVecs {
+		if s := dotSim(seg, sv); s > best {
+			best = s
+		}
+	}
+	return best
+}
+
+// dotSim 两个 L2 归一向量的内积（= 余弦）。声纹向量由 sidecar 归一化，与 api.cosine 同实现。
+func dotSim(a, b []float32) float64 {
+	var s float64
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		s += float64(a[i]) * float64(b[i])
+	}
+	return s
+}
+
+// loadSpeakerSampleVecs 取说话人的多条样本向量（详情页同口径）；无样本行 / 未装配 repo
+// 回退聚合代表（speaker.embedding）。
+func loadSpeakerSampleVecs(ctx context.Context, d StageDeps, spID ids.ID) [][]float32 {
+	var vecs [][]float32
+	if d.SpeakerEmbeddings != nil {
+		if es, err := d.SpeakerEmbeddings.ListBySpeaker(ctx, spID); err == nil {
+			for _, e := range es {
+				if v, ok := decodeEmbeddingPipe(e.Embedding); ok && len(v) == 256 {
+					vecs = append(vecs, v)
+				}
+			}
+		}
+	}
+	if len(vecs) == 0 && d.Speakers != nil {
+		if sp, err := d.Speakers.Get(ctx, spID); err == nil {
+			if v, ok := decodeEmbeddingPipe(sp.Embedding); ok && len(v) == 256 {
+				vecs = append(vecs, v)
+			}
+		}
+	}
+	return vecs
+}
+
+// decodeEmbeddingPipe []byte(256×float32 LE) → []float32（与 float32Blob 互逆）。
+func decodeEmbeddingPipe(blob []byte) ([]float32, bool) {
+	if len(blob) == 0 || len(blob)%4 != 0 {
+		return nil, false
+	}
+	v := make([]float32, len(blob)/4)
+	for i := range v {
+		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
+	}
+	return v, true
+}
+
 // segVec 一个 ASR 段与其声纹向量（干净段挑选的输入单元）。
 type segVec struct {
 	seg repo.TranscriptSegment
 	vec []float32
+}
+
+// groupRep 一个 ASR 说话人标签组的检索/登记/纠正所需信息（runSpeakerStage 内构建）。
+type groupRep struct {
+	label string
+	rep   []float32 // 组代表声纹（全部段向量均值）——1:N 检索用
+	vecN  int       // 该组有效向量数（用于 sample_count）
+	// clean 登记优先向量：组内「时长最长、与其他说话人段无时间交集且 ≥3s」的单段向量。
+	// nil=无干净段（登记时退回 rep）。只影响**新声纹登记**，不影响上面 rep 的检索。
+	clean []float32
+	// segVecs 组内各段与其向量（纠正 pass 用：逐段对各在场说话人打分）。
+	segVecs []segVec
 }
 
 // pickCleanSegVec 从组内段向量中挑「干净段」向量：时长 ≥3s 且与本 session **其他标签**的
@@ -208,7 +362,7 @@ func pickCleanSegVec(svs []segVec, all []repo.TranscriptSegment, label string) [
 }
 
 // overlapsOtherLabel 判断段是否与「其他 speaker_label」的任何段在时间上相交
-//（半开区间 [start,end) 判交：s1.start < s2.end && s2.start < s1.end）。
+// （半开区间 [start,end) 判交：s1.start < s2.end && s2.start < s1.end）。
 // 空 label 的段也算「其他」——单人录音通常全空标签，此时组内即全体段、天然无交集判定对象。
 func overlapsOtherLabel(seg repo.TranscriptSegment, all []repo.TranscriptSegment, label string) bool {
 	for _, o := range all {

@@ -45,6 +45,9 @@ type StageDeps struct {
 	Voiceprint          voiceprint.Client
 	Speakers            *repo.SpeakerRepo
 	VoiceprintThreshold float64 // ZW_VOICEPRINT_THRESHOLD，0 表示用默认 0.8
+	// VoiceprintCorrectMargin 幽灵历史声纹纠正的领先幅度门槛（ZW_VOICEPRINT_CORRECT_MARGIN）。
+	// 0 表示用默认 0.06。仅 speaker stage 的纠正 pass 使用。
+	VoiceprintCorrectMargin float64
 	// SpeakerEmbeddings 多条声纹样本 repo（自动登记时落样本行；nil = 兼容旧装配/测试，跳过）
 	SpeakerEmbeddings *repo.SpeakerEmbeddingRepo
 
