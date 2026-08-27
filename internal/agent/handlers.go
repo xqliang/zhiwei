@@ -16,10 +16,14 @@ type AgentHandler struct {
 	Orch          *Orchestrator
 	Conversations *repo.AgentConversationRepo
 	Messages      *repo.AgentMessageRepo
+	Hub           *turnHub // 每会话轮次广播器（nil 时由 RegisterAgent 惰性初始化）
 }
 
 // RegisterAgent 挂载 /api/agent 路由。
 func RegisterAgent(r chi.Router, h *AgentHandler) {
+	if h.Hub == nil {
+		h.Hub = newTurnHub() // 生产/测试都经此入口，main.go 用结构体字面量构造无需感知内部 hub 类型
+	}
 	r.Post("/api/agent/conversations", h.createConversation)
 	r.Get("/api/agent/conversations", h.listConversations)
 	r.Get("/api/agent/conversations/{cid}", h.getConversation)

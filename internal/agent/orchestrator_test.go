@@ -188,6 +188,82 @@ func TestOrchestratorInterleavedOrder(t *testing.T) {
 	}
 }
 
+// TestOrchestratorEmitsReasoning 锁定 Phase 2：assistant/message 带 reasoning 块时，应在答复文本
+// 之前先推一帧 type=reasoning 并落库 kind=reasoning；最终答复仍取 text（reasoning 不当最终答复）。
+func TestOrchestratorEmitsReasoning(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convRepo := &repo.AgentConversationRepo{DB: db}
+	msgRepo := &repo.AgentMessageRepo{DB: db}
+	ctx := t.Context()
+	conv := &repo.AgentConversation{Title: "思考内容"}
+	if err := convRepo.Create(ctx, conv); err != nil {
+		t.Fatal(err)
+	}
+
+	// 一条 assistant/message 同时含 reasoning + text 两种块。
+	msgData, _ := json.Marshal(map[string]any{"message": map[string]any{"content": []map[string]any{
+		{"type": "reasoning", "text": "用户问待办，我该查一下。"},
+		{"type": "text", "text": "你有 1 条待办。"},
+	}}})
+	fake := &FakeRuntime{Script: [][]Event{{{Type: EvAssistantMessage, Data: msgData}}}}
+	orch := NewOrchestrator(rtFor(fake), convRepo, msgRepo)
+
+	var frames []StreamFrame
+	final, err := orch.RunTurnStream(ctx, conv, "我有哪些待办？", func(f StreamFrame) { frames = append(frames, f) })
+	if err != nil {
+		t.Fatalf("RunTurnStream: %v", err)
+	}
+	if final == nil || final.Content != "你有 1 条待办。" || final.Kind != "text" {
+		t.Fatalf("最终答复应为 text 块内容, got %+v", final)
+	}
+	// 帧顺序：user → reasoning → assistant → turn_end；reasoning 必须在 assistant 之前。
+	var ri, ai = -1, -1
+	for i, f := range frames {
+		if f.Type == "reasoning" && ri < 0 {
+			ri = i
+			if f.Content != "用户问待办，我该查一下。" {
+				t.Errorf("reasoning 帧内容异常: %q", f.Content)
+			}
+		}
+		if f.Type == "assistant" && ai < 0 {
+			ai = i
+		}
+	}
+	if ri < 0 {
+		t.Fatalf("应有一帧 type=reasoning, got %+v", frames)
+	}
+	if ai < 0 || ri > ai {
+		t.Errorf("reasoning 帧应在 assistant 帧之前: ri=%d ai=%d", ri, ai)
+	}
+
+	// 落库：user / reasoning / text 三条，且 reasoning 在 text 之前。
+	msgs, err := msgRepo.ListByConversation(ctx, 1, conv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reasonIdx, textIdx = -1, -1
+	for i, m := range msgs {
+		if m.Kind == "reasoning" && reasonIdx < 0 {
+			reasonIdx = i
+			if m.Content != "用户问待办，我该查一下。" || m.Role != "assistant" {
+				t.Errorf("reasoning 落库行异常: %+v", m)
+			}
+		}
+		if m.Kind == "text" && m.Role == "assistant" && textIdx < 0 {
+			textIdx = i
+		}
+	}
+	if reasonIdx < 0 {
+		t.Fatalf("应落一条 kind=reasoning 消息, got %+v", msgs)
+	}
+	if textIdx < 0 || reasonIdx > textIdx {
+		t.Errorf("reasoning 行应在 assistant text 行之前: reasonIdx=%d textIdx=%d", reasonIdx, textIdx)
+	}
+}
+
 // TestProfileContextHead 锁定上下文头组装（D2）：有 owner + 关键属性时，头含当天日期 + owner
 // 前缀 + 关键属性值；无 Persons / nil 接收者返回 ""（调用方据此不注入）。
 // TestOrchestratorCancel 锁定 Orchestrator.Cancel：透传到所选运行时的 Cancel，且 sessionID =

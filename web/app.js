@@ -1,6 +1,6 @@
 // 知微 Web 前端（Vue 3 CDN，无构建）。
 // 标签页：问知微 / 时间线 / 录音 / 声纹 / 主题 / 记忆 / 待办。
-const { createApp, ref, reactive, computed, onUnmounted, nextTick } = Vue;
+const { createApp, ref, reactive, computed, watch, onUnmounted, nextTick } = Vue;
 
 // memory 类型 → 中文标签与颜色（卡片徽标用）
 const TYPE_META = {
@@ -93,6 +93,14 @@ const app = createApp({
       loadSessions();
       loadTopics();       // 首屏 timeline 的「+ 关联」topic 下拉依赖 topics.value（评审 M1）
       loadAllSpeakers();  // 换人下拉（转写段 <select>）数据源，首屏 timeline 即可用
+      // 恢复上次所在 tab 与问知微会话（刷新后回到现场）：先置 agentConvId 再 switchTab，
+      // 让 switchTab('agent') 分支能重拉历史 + 重连 WS。
+      try {
+        const savedConv = localStorage.getItem(LS_AGENT_CONV);
+        if (savedConv) agentConvId.value = savedConv;
+        const savedTab = localStorage.getItem(LS_TAB);
+        if (savedTab && savedTab !== tab.value) switchTab(savedTab);
+      } catch (e) {}
     }
     // 启动/登录成功后调用：GET /api/auth/me 判断登录态。
     // 200 → 记住当前用户、authed=true、加载主界面首屏数据；401 → api() 已置 authed=false（登录页）。
@@ -2181,6 +2189,60 @@ const app = createApp({
     let agentWS = null, agentReconnectTimer = null;
     let agentWantConnect = false;         // 是否「希望保持连接」（切走/切换会话时置 false，抑制重连）
 
+    // ---- 刷新恢复：把「当前 tab」与「当前会话 id」持久化到 localStorage，刷新后回到现场 ----
+    const LS_TAB = 'zw_tab';              // 上次所在 tab
+    const LS_AGENT_CONV = 'zw_agent_conv'; // 上次选中的问知微会话 id
+    function persistAgentConv(id) { try { id ? localStorage.setItem(LS_AGENT_CONV, id) : localStorage.removeItem(LS_AGENT_CONV); } catch (e) {} }
+    // 已渲染消息 id 集合（非响应式）：刷新/重连时历史(loadAgentHistory)与广播器重放(replay)会重叠，
+    // 按 msg_id 去重，避免同一条消息渲染两次。每次载入历史时重建。
+    let agentSeen = new Set();
+
+    // ---- 思考计时：nowTick 每秒推进（仅在有轮次进行中时走），用于「思考中 mm:ss」实时刷新 ----
+    const nowTick = ref(Date.now());
+    let agentTimer = null;
+    watch(agentTyping, (running) => {
+      if (running) { nowTick.value = Date.now(); if (!agentTimer) agentTimer = setInterval(() => { nowTick.value = Date.now(); }, 1000); }
+      else if (agentTimer) { clearInterval(agentTimer); agentTimer = null; }
+    });
+
+    // ---- 轮次分组（视图层）：把平铺 agentMessages 折成一轮轮 ----
+    // 轮次边界：user 文本项开始，直到下一个 user（或结尾）。每轮：
+    //   userText  该轮用户输入；thinking[] 过程项（tool / reasoning）；answers[] 助手答复文本；
+    //   startAt/answerAt/lastAt 计时用（首个 user / 首条答复 / 最后一项 的时间戳，毫秒）。
+    // 分组只在视图层做，handleAgentFrame / mapAgentHistory 仍维护平铺 agentMessages（live 与历史复用同一分组）。
+    const agentTurns = computed(() => {
+      const turns = [];
+      let cur = null;
+      const open = (userText, ts) => { cur = { userText: userText || '', thinking: [], answers: [], startAt: ts || null, answerAt: null, lastAt: ts || null, hasPending: false }; turns.push(cur); };
+      for (const m of agentMessages.value) {
+        if (m.kind === 'text' && m.role === 'user') { open(m.content, m.ts); continue; }
+        if (!cur) open('', m.ts); // 无前导 user（历史开头/异常）：起一个匿名轮兜底
+        if (m.kind === 'text' && m.role === 'assistant') { cur.answers.push(m); if (cur.answerAt == null) cur.answerAt = m.ts || null; }
+        else cur.thinking.push(m); // tool / reasoning
+        if (m.kind === 'tool' && m.proposal && m.proposal.status === 'pending') cur.hasPending = true; // 有待确认提议 → 默认展开，别藏起操作
+        if (m.ts) cur.lastAt = m.ts;
+      }
+      return turns;
+    });
+    // 该轮是否「进行中」：最后一轮 + agentTyping + 尚无答复。
+    function turnRunning(ti) { const t = agentTurns.value; return ti === t.length - 1 && agentTyping.value && !!t[ti] && t[ti].answers.length === 0; }
+    // agentTyping 为真但当前没有可展示的「进行中思考块」（用户帧尚未回显 / 上一轮已答完的空档）→ 显示兜底「正在思考」。
+    const agentThinkingGap = computed(() => { if (!agentTyping.value) return false; const t = agentTurns.value; const last = t.length - 1; return !(last >= 0 && t[last].answers.length === 0); });
+    // 思考耗时（秒）：进行中用 nowTick 实时；已结束用「首条答复 / 最后一项」时间减 startAt。
+    function turnDuration(ti) {
+      const t = agentTurns.value[ti];
+      if (!t || !t.startAt) return 0;
+      const end = turnRunning(ti) ? nowTick.value : (t.answerAt || t.lastAt || t.startAt);
+      return Math.max(0, Math.round((end - t.startAt) / 1000));
+    }
+    function fmtDur(sec) { return sec < 60 ? sec + ' 秒' : Math.floor(sec / 60) + ' 分 ' + (sec % 60) + ' 秒'; }
+    // 折叠状态：按轮次序号存显式布尔；未设置时默认「进行中展开、已结束折叠」。
+    const agentTurnExpanded = reactive({});
+    function isTurnOpen(ti) { if (ti in agentTurnExpanded) return agentTurnExpanded[ti]; const t = agentTurns.value[ti]; return turnRunning(ti) || !!(t && t.hasPending); }
+    function toggleTurn(ti) { agentTurnExpanded[ti] = !isTurnOpen(ti); }
+    function resetAgentView() { for (const k of Object.keys(agentTurnExpanded)) delete agentTurnExpanded[k]; }
+
+
     // ---- XSS 安全的极简 Markdown（先转义所有 HTML，再只注入自己生成的白名单标签）----
     // 助手文本、工具结果、记忆/转写内容均为【不可信】（可能含注入的 HTML）。任何要作为
     // HTML 插入的文本必须先转义；仅助手气泡用 v-html（渲染 Markdown），工具卡一律走
@@ -2377,10 +2439,10 @@ const app = createApp({
 
     // 工具展示项工厂：tool_call → 骨架卡（result=null）；tool_result → 填充。
     // proposal/pview/proposalBusy/proposalError 为写-提议确认卡预留（读工具恒为 null/false，无害）。
-    function makeToolItem(callId, name, args) {
+    function makeToolItem(callId, name, args, ts) {
       return { kind: 'tool', call_id: callId, name, base: toolBase(name), label: toolLabel(name),
         args, argsSummary: toolArgsSummary(args), result: null, parsed: null, report: null,
-        proposal: null, pview: null, proposalBusy: false, proposalError: '' };
+        proposal: null, pview: null, proposalBusy: false, proposalError: '', ts: ts || Date.now() };
     }
     function fillTool(it, text, isErr) {
       it.result = { text: text || '', is_error: !!isErr };
@@ -2411,17 +2473,21 @@ const app = createApp({
     function mapAgentHistory(messages) {
       const items = [];
       for (const m of (messages || [])) {
+        const ts = m.created_at ? new Date(m.created_at).getTime() : Date.now();
         if (m.kind === 'tool_call') {
           const tp = m.tool_payload || {};
-          items.push(makeToolItem(tp.call_id, tp.name, tp.arguments));
+          items.push(makeToolItem(tp.call_id, tp.name, tp.arguments, ts));
         } else if (m.kind === 'tool_result') {
           const tp = m.tool_payload || {};
           if (!fillToolResult(items, tp.call_id, tp.text, tp.is_error)) {
             // 落单的结果（历史异常）：作独立错误/结果卡兜底显示
-            const it = makeToolItem('', '', ''); fillTool(it, tp.text, tp.is_error); items.push(it);
+            const it = makeToolItem('', '', '', ts); fillTool(it, tp.text, tp.is_error); items.push(it);
           }
+        } else if (m.kind === 'reasoning') {
+          // 思考内容（reasoning 落库为独立 kind）：进折叠块显示
+          if (m.content) items.push({ kind: 'reasoning', role: 'assistant', content: m.content, msg_id: m.id, ts });
         } else if (m.content) {
-          items.push({ kind: 'text', role: m.role, content: m.content });
+          items.push({ kind: 'text', role: m.role, content: m.content, msg_id: m.id, ts });
         }
       }
       return items;
@@ -2438,7 +2504,11 @@ const app = createApp({
       agentLoading.value = true;
       try {
         const d = await api('GET', '/api/agent/conversations/' + cid);
-        agentMessages.value = mapAgentHistory(d.messages);
+        const msgs = d.messages || [];
+        // 重建去重集合：历史里每条消息 id 都算「已渲染」，广播器重放同 id 的帧会被跳过。
+        agentSeen = new Set();
+        for (const m of msgs) if (m.id) agentSeen.add(m.id);
+        agentMessages.value = mapAgentHistory(msgs);
         scrollAgentBottom();
       } catch (e) { showError(e); }
       finally { agentLoading.value = false; }
@@ -2449,10 +2519,16 @@ const app = createApp({
     }
     function handleAgentFrame(ev) {
       let f; try { f = JSON.parse(ev.data); } catch (e) { return; }
+      // 去重：带 msg_id 的帧若已渲染过（历史与广播器重放重叠）则跳过；turn_active/turn_end 无 id、幂等。
+      if (f.msg_id && agentSeen.has(f.msg_id)) return;
+      if (f.msg_id) agentSeen.add(f.msg_id);
+      const now = Date.now();
       switch (f.type) {
-        case 'user': agentMessages.value.push({ kind: 'text', role: 'user', content: f.content }); break;
-        case 'assistant': agentMessages.value.push({ kind: 'text', role: 'assistant', content: f.content }); break;
-        case 'tool_call': agentMessages.value.push(makeToolItem(f.call_id, f.name, f.args)); break;
+        case 'turn_active': agentTyping.value = true; break; // 重连到进行中的一轮：恢复「思考中」态
+        case 'user': agentMessages.value.push({ kind: 'text', role: 'user', content: f.content, msg_id: f.msg_id, ts: now }); break;
+        case 'assistant': agentMessages.value.push({ kind: 'text', role: 'assistant', content: f.content, msg_id: f.msg_id, ts: now }); break;
+        case 'reasoning': agentMessages.value.push({ kind: 'reasoning', role: 'assistant', content: f.content, msg_id: f.msg_id, ts: now }); break;
+        case 'tool_call': agentMessages.value.push(makeToolItem(f.call_id, f.name, f.args, now)); break;
         case 'tool_result': fillToolResult(agentMessages.value, f.call_id, f.content, f.is_error); break;
         case 'turn_end': agentTyping.value = false; if (f.error) agentTurnError.value = f.error; break;
       }
@@ -2496,9 +2572,11 @@ const app = createApp({
       if (agentConvId.value === c.id) return;
       closeAgentWS();
       agentConvId.value = c.id;
+      persistAgentConv(c.id);
       agentMessages.value = [];
       agentTurnError.value = '';
       agentTyping.value = false;
+      resetAgentView();
       await loadAgentHistory(c.id);
       openAgentWS(c.id);
     }
@@ -2509,9 +2587,12 @@ const app = createApp({
         await loadAgentConversations();
         closeAgentWS();
         agentConvId.value = c.id;
+        persistAgentConv(c.id);
         agentMessages.value = [];
+        agentSeen = new Set();
         agentTurnError.value = '';
         agentTyping.value = false;
+        resetAgentView();
         openAgentWS(c.id);
       } catch (e) { showError(e); }
     }
@@ -2692,6 +2773,7 @@ const app = createApp({
     function switchTab(name) {
       const prev = tab.value;
       tab.value = name;
+      try { localStorage.setItem(LS_TAB, name); } catch (e) {} // 记住所在 tab，刷新后回到现场
       // 离开问知微：断开 WS（含抑制重连），避免后台常驻连接
       if (prev === 'agent' && name !== 'agent') closeAgentWS();
       if (name === 'timeline') { deletingSessionId.value = null; reextractConfirmId.value = null; segDraft.value = {}; loadSessions(); loadAllSpeakers(); }
@@ -2711,7 +2793,7 @@ const app = createApp({
     // 401 → api() 已置 authed=false，显示登录页。未登录时不再盲发 sessions/topics/speakers 等请求。
     checkAuth();
 
-    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); clearTimeout(reextractPollTimer); closeAgentWS(); });
+    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); clearTimeout(reextractPollTimer); if (agentTimer) clearInterval(agentTimer); closeAgentWS(); });
 
     return {
       tab, toast, switchTab,
@@ -2751,6 +2833,7 @@ const app = createApp({
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       // 问知微（流式对话）
       agentConversations, agentConvId, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
+      agentTurns, turnRunning, agentThinkingGap, turnDuration, fmtDur, isTurnOpen, toggleTurn,
       loadAgentConversations, newAgentConversation, selectAgentConversation, sendAgentMessage, stopAgentMessage,
       confirmProposal, dismissProposal,
       renderMarkdown, reportSections, prettyJSON,

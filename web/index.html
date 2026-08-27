@@ -298,6 +298,26 @@
   /* 「正在思考」指示 */
   .agent-typing { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--fs-sm); padding: 2px 2px; }
 
+  /* 思考过程折叠块：把一轮的思考(reasoning)+工具调用收进可折叠块，默认进行中展开、结束折叠 */
+  .agent-turn { display: flex; flex-direction: column; gap: 10px; }
+  .think-block { align-self: stretch; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-sunken); overflow: hidden; }
+  .think-block.running { border-color: var(--accent-2); }
+  .think-head { display: flex; align-items: center; gap: 7px; padding: 7px 12px; cursor: pointer; font-size: var(--fs-sm); color: var(--text-2); user-select: none; }
+  .think-head:hover { background: var(--surface-2); }
+  .think-caret { font-size: 10px; width: 10px; color: var(--muted); flex-shrink: 0; }
+  .think-label { font-weight: 600; }
+  .think-time { color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+  .think-block.running .think-time { color: var(--accent-2); font-weight: 600; }
+  .think-count { color: var(--muted); font-size: var(--fs-xs); margin-left: auto; }
+  .think-body { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--border); }
+  /* 折叠块内的工具卡/确认卡占满块宽，去掉左对齐留白 */
+  .think-body .chat-msg.assistant { justify-content: stretch; }
+  .think-body .tool-card, .think-body .confirm-card { max-width: 100%; }
+  /* 思考文本（reasoning）：区别于答复气泡——弱化底色 + 左边线标注 */
+  .think-reasoning { font-size: var(--fs-sm); color: var(--text-2); background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent-2); border-radius: 6px; padding: 8px 11px; line-height: 1.6; word-break: break-word; }
+  .think-reasoning p { margin: 0 0 6px; }
+  .think-reasoning p:last-child { margin-bottom: 0; }
+
   /* 输入区：贴底，多行自适应 */
   .agent-input { display: flex; gap: 8px; align-items: flex-end; margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
   .agent-input textarea { flex: 1; resize: none; min-height: 44px; max-height: 160px; }
@@ -740,17 +760,27 @@
             <div v-if="agentLoading" class="muted" style="text-align:center; padding:20px"><span class="spinner"></span> 加载历史…</div>
             <div v-if="!agentLoading && !agentMessages.length" class="empty">发条消息开始对话吧。试试：「我这周有哪些待办？」</div>
 
-            <template v-for="(m, mi) in agentMessages" :key="mi">
-              <!-- 文本气泡：user 右侧纯文本；assistant 左侧 Markdown（已转义再渲染） -->
-              <div v-if="m.kind==='text'" class="chat-msg" :class="m.role">
-                <div class="bubble" :class="m.role">
-                  <span v-if="m.role==='user'" style="white-space:pre-wrap">{{ m.content }}</span>
-                  <span v-else v-html="renderMarkdown(m.content)"></span>
-                </div>
+            <div v-for="(turn, ti) in agentTurns" :key="ti" class="agent-turn">
+              <!-- 用户气泡 -->
+              <div v-if="turn.userText" class="chat-msg user">
+                <div class="bubble user"><span style="white-space:pre-wrap">{{ turn.userText }}</span></div>
               </div>
-              <!-- 工具卡：未出结果=骨架「进行中」；出结果按工具类型渲染；is_error 走错误样式。
-                   若结果是写-提议（propose_*）则改渲染「确认卡」（见下 m.proposal 分支）。 -->
-              <div v-else-if="m.kind==='tool'" class="chat-msg assistant">
+              <!-- 思考过程折叠块：有过程项(思考/工具) 或 该轮进行中时显示；默认进行中/有待确认提议时展开，否则折叠 -->
+              <div v-if="turn.thinking.length || turnRunning(ti)" class="think-block" :class="{running: turnRunning(ti), open: isTurnOpen(ti)}">
+                <div class="think-head" @click="toggleTurn(ti)">
+                  <span class="think-caret">{{ isTurnOpen(ti) ? '▾' : '▸' }}</span>
+                  <span v-if="turnRunning(ti)" class="spinner"></span>
+                  <span class="think-label">💭 思考过程</span>
+                  <span class="think-time">{{ turnRunning(ti) ? ('思考中 · ' + fmtDur(turnDuration(ti))) : ('用时 ' + fmtDur(turnDuration(ti))) }}</span>
+                  <span v-if="turn.thinking.length" class="think-count">· {{ turn.thinking.length }} 步</span>
+                </div>
+                <div v-show="isTurnOpen(ti)" class="think-body">
+                  <template v-for="(m, mi) in turn.thinking" :key="mi">
+                    <!-- 模型思考内容（reasoning）：折叠块内左对齐文本 -->
+                    <div v-if="m.kind==='reasoning'" class="think-reasoning" v-html="renderMarkdown(m.content)"></div>
+                    <!-- 工具卡：未出结果=骨架「进行中」；出结果按工具类型渲染；is_error 走错误样式。
+                         若结果是写-提议（propose_*）则改渲染「确认卡」（见下 m.proposal 分支）。 -->
+                    <div v-else-if="m.kind==='tool'" class="chat-msg assistant">
                 <!-- 写操作提议 → 确认卡：old→new diff + 理由 + [确认]/[放弃]（值全走 {{ }} 自动转义） -->
                 <div v-if="m.proposal" class="confirm-card" :class="{applied: m.proposal.status==='applied', dismissed: m.proposal.status==='dismissed' || m.proposal.status==='expired'}">
                   <div class="confirm-head">
@@ -857,9 +887,16 @@
                   </div>
                 </div>
               </div>
-            </template>
+                  </template>
+                </div>
+              </div>
+              <!-- 助手答复气泡（在思考块之外，突出最终答复） -->
+              <div v-for="(m, ai) in turn.answers" :key="'a'+ai" class="chat-msg assistant">
+                <div class="bubble assistant"><span v-html="renderMarkdown(m.content)"></span></div>
+              </div>
+            </div>
 
-            <div v-if="agentTyping" class="agent-typing"><span class="spinner"></span> 知微正在思考…</div>
+            <div v-if="agentThinkingGap" class="agent-typing"><span class="spinner"></span> 知微正在思考…</div>
             <div v-if="agentTurnError" class="card" style="margin:0; border-color:var(--danger); background:var(--danger-soft); color:var(--danger)">出错了：{{ agentTurnError }}</div>
           </div>
 
@@ -2224,6 +2261,6 @@
   </template>
 </div>
 
-<script src="/app/app.2451a68a.js"></script>
+<script src="/app/app.dbf7be0d.js"></script>
 </body>
 </html>

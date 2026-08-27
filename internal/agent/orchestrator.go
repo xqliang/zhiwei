@@ -113,9 +113,17 @@ func (o *Orchestrator) runTurn(ctx context.Context, conv *repo.AgentConversation
 	for ev := range events {
 		switch ev.Type {
 		case EvAssistantMessage:
+			// 思考内容（reasoning）：先于答复文本推出并落库（kind=reasoning），供前端「思考过程」块
+			// 展示与刷新后恢复。lastText 只认 kind=="text"（见 appendMsg），故 reasoning 不会被当作最终答复。
+			if reasoning := ev.Reasoning(); reasoning != "" {
+				appendMsg(
+					&repo.AgentMessage{ConversationID: &conv.ID, Role: "assistant", Kind: "reasoning", Content: reasoning},
+					StreamFrame{Type: "reasoning", Content: reasoning},
+				)
+			}
 			text := ev.AssistantText()
 			if text == "" {
-				continue // M2：空文本不落库（错误轮次/空消息），避免污染历史
+				continue // M2：空文本不落库（错误轮次/空消息），避免污染历史（reasoning 已单独处理）
 			}
 			appendMsg(
 				&repo.AgentMessage{ConversationID: &conv.ID, Role: "assistant", Kind: "text", Content: text},

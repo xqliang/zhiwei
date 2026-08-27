@@ -40,6 +40,30 @@ func (e Event) AssistantText() string {
 	return s
 }
 
+// Reasoning 从 assistant/message 事件提取模型思考文本（拼接 content 里 type=="reasoning" 的块）。
+// doubao thinking 模型在 cordis thinking:enabled + reasoningEffort 下会随答复一并返回 reasoning 块；
+// 与 AssistantText 分开抽取，二者互不污染（前者只取 text、本方法只取 reasoning）。空则返回空串。
+func (e Event) Reasoning() string {
+	var d struct {
+		Message struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(e.Data, &d) != nil {
+		return ""
+	}
+	var s string
+	for _, b := range d.Message.Content {
+		if b.Type == "reasoning" {
+			s += b.Text
+		}
+	}
+	return s
+}
+
 // ToolCall 从 tool/call 事件提取 {callId, name, arguments(JSON 字符串)}。
 func (e Event) ToolCall() (callID, name, arguments string) {
 	var d struct {
