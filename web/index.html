@@ -116,6 +116,8 @@
   .badge.pending, .badge.running, .badge.suggested { background: var(--warn-soft); color: var(--warn); }
   .badge.completed, .badge.done, .badge.active, .badge.confirmed { background: var(--ok-soft); color: var(--ok); }
   .badge.failed { background: var(--danger-soft); color: var(--danger); }
+  /* 转写段「已修改」徽章：幽灵历史声纹自动纠正的标记（琥珀色，悬停显示原判定说话人） */
+  .corrected-badge{display:inline-block;align-self:center;flex-shrink:0;margin-left:2px;padding:0 6px;font-size:var(--fs-xs);line-height:18px;color:#8a6d00;background:#fff4d6;border:1px solid #f0d98a;border-radius:9px;cursor:help}
   .badge.dismissed { background: var(--surface-sunken); color: var(--muted); }
 
   /* 转写分段 */
@@ -594,6 +596,8 @@
               <option v-for="sp in allSpeakers.filter(x => x.id !== sg.speaker_id)" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
               <option value="__new">+ 新加…</option>
             </select>
+            <span v-if="sg.corrected_from" class="corrected-badge"
+                  :title="sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'">已修改</span>
             <button class="btn mini seg-play" @click="toggleTimelineSegPlay(sg)" style="padding:2px 8px; flex-shrink:0" :title="tlPlayingSegId===sg.id?'播放中，点暂停':'播放此段音频'">{{ tlPlayingSegId===sg.id ? '⏸' : '▶' }}</button>
             <button v-if="!mergeMode && segEnrollId!==sg.id" class="btn mini" :disabled="!canEnrollSeg(sg)" @click="startSegEnroll(sg)" style="padding:2px 8px; flex-shrink:0" :title="canEnrollSeg(sg) ? '用此段音频录入声纹' : ('时长 ' + (segDurMs(sg)/1000).toFixed(1) + 's 不足，至少需 ' + (MIN_ENROLL_MS/1000) + 's')">录入</button>
             <div class="seg-text">
