@@ -16,7 +16,8 @@ type AgentHandler struct {
 	Orch          *Orchestrator
 	Conversations *repo.AgentConversationRepo
 	Messages      *repo.AgentMessageRepo
-	Hub           *turnHub // 每会话轮次广播器（nil 时由 RegisterAgent 惰性初始化）
+	Configs       *repo.AgentConfigRepo // 人设配置（identity/soul，全局单份）；nil 时人设端点返回空/不可写
+	Hub           *turnHub              // 每会话轮次广播器（nil 时由 RegisterAgent 惰性初始化）
 }
 
 // RegisterAgent 挂载 /api/agent 路由。
@@ -24,6 +25,8 @@ func RegisterAgent(r chi.Router, h *AgentHandler) {
 	if h.Hub == nil {
 		h.Hub = newTurnHub() // 生产/测试都经此入口，main.go 用结构体字面量构造无需感知内部 hub 类型
 	}
+	r.Get("/api/agent/config", h.getConfig)   // 查看人设（identity/soul + 组装预览）
+	r.Put("/api/agent/config", h.putConfig)   // 保存人设（每轮注入，下一条消息即时生效，不重启 dsh）
 	r.Post("/api/agent/conversations", h.createConversation)
 	r.Get("/api/agent/conversations", h.listConversations)
 	r.Get("/api/agent/conversations/{cid}", h.getConversation)
@@ -43,6 +46,55 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func reqUserID(r *http.Request) (int64, bool) {
 	id, ok := auth.UserID(r.Context())
 	return id.Int64(), ok
+}
+
+// getConfig 返回全局人设（identity/soul）+ 组装预览（每轮实际注入到 prompt 前的文本）。
+func (h *AgentHandler) getConfig(w http.ResponseWriter, r *http.Request) {
+	if _, ok := reqUserID(r); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if h.Configs == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"identity": "", "soul": "", "preview": ""})
+		return
+	}
+	c, err := h.Configs.Get(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"identity": c.Identity, "soul": c.Soul,
+		"preview": AssemblePersona(c.Identity, c.Soul), "updated_at": c.UpdatedAt,
+	})
+}
+
+// putConfig 保存全局人设。每轮注入，下一条消息即时生效（不重启 dsh）。
+func (h *AgentHandler) putConfig(w http.ResponseWriter, r *http.Request) {
+	if _, ok := reqUserID(r); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if h.Configs == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "人设配置不可用"})
+		return
+	}
+	var body struct {
+		Identity string `json:"identity"`
+		Soul     string `json:"soul"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := h.Configs.Upsert(r.Context(), body.Identity, body.Soul); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"identity": body.Identity, "soul": body.Soul,
+		"preview": AssemblePersona(body.Identity, body.Soul),
+	})
 }
 
 func (h *AgentHandler) createConversation(w http.ResponseWriter, r *http.Request) {

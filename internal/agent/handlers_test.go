@@ -24,6 +24,47 @@ func injectUser(uid int64) func(http.Handler) http.Handler {
 	}
 }
 
+// TestAgentConfigAPI 锁定人设配置端点：PUT 保存 identity/soul → GET 读回一致，且返回注入预览。
+func TestAgentConfigAPI(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgRepo := &repo.AgentConfigRepo{DB: db}
+	t.Cleanup(func() { _, _ = db.Exec("DELETE FROM agent_config WHERE id = 1") })
+	h := &AgentHandler{Configs: cfgRepo}
+	r := chi.NewRouter()
+	r.Use(injectUser(1))
+	RegisterAgent(r, h)
+
+	// PUT 保存
+	putReq := httptest.NewRequest("PUT", "/api/agent/config",
+		strings.NewReader(`{"identity":"我是知微API","soul":"简洁API"}`))
+	putRec := httptest.NewRecorder()
+	r.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT code=%d body=%s", putRec.Code, putRec.Body.String())
+	}
+
+	// GET 读回
+	getReq := httptest.NewRequest("GET", "/api/agent/config", nil)
+	getRec := httptest.NewRecorder()
+	r.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET code=%d", getRec.Code)
+	}
+	var out struct{ Identity, Soul, Preview string }
+	if err := json.Unmarshal(getRec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("resp 解析: %v", err)
+	}
+	if out.Identity != "我是知微API" || out.Soul != "简洁API" {
+		t.Errorf("读回不符: %+v", out)
+	}
+	if !strings.Contains(out.Preview, "我是知微API") || !strings.Contains(out.Preview, "简洁API") {
+		t.Errorf("预览应含 identity+soul: %q", out.Preview)
+	}
+}
+
 func TestPostMessageEndToEndFake(t *testing.T) {
 	db, err := repo.NewDB(orchDSN(t))
 	if err != nil {

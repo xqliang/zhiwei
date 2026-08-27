@@ -71,6 +71,25 @@ func (pc *ProfileContext) Head(ctx context.Context, userID int64, now time.Time)
 		now.Format("2006-01-02"), strings.Join(parts, "；"))
 }
 
+// AssemblePersona 把可配置的 identity + soul 拼成「每轮注入的人设前言」：
+// 二者都为空则返回 ""（不注入，退化为进程级 persona/DSH_SYSTEM_PROMPT）。作为注入头的第一段前置，
+// 让 agent 每轮都据此人设扮演（不重启 dsh、编辑即时生效——因为随 session/prompt 的文本一起发过去）。
+func AssemblePersona(identity, soul string) string {
+	identity = strings.TrimSpace(identity)
+	soul = strings.TrimSpace(soul)
+	var b []string
+	if identity != "" {
+		b = append(b, "你的身份设定：\n"+identity)
+	}
+	if soul != "" {
+		b = append(b, "你的性格与说话风格：\n"+soul)
+	}
+	if len(b) == 0 {
+		return ""
+	}
+	return strings.Join(b, "\n\n")
+}
+
 // Seeds 按本轮 query 召回 top-k 相关记忆，拼成上下文头的「相关记忆」块；
 // 无 Retrieve / query 空 / 无命中 → ""。每轮一次 query 向量化（未配 embedder 时 Retrieve=nil 不触发）。
 // userID 指定「谁」的记忆（2B-B：由 runTurn 传 conv.UserID，多用户隔离，绝不召回别人的记忆）。

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -330,6 +331,61 @@ func TestOrchestratorStreamsChunks(t *testing.T) {
 	}
 	if len(msgs) != 3 {
 		t.Fatalf("应落 3 条(user/reasoning/text)，delta 不落库，got %d: %+v", len(msgs), msgs)
+	}
+}
+
+// TestAssemblePersona 纯函数：identity/soul 拼人设前言；空段跳过；全空返回 ""。
+func TestAssemblePersona(t *testing.T) {
+	if got := AssemblePersona("  ", "\n"); got != "" {
+		t.Errorf("全空应返回空串, got %q", got)
+	}
+	got := AssemblePersona("我是知微", "温柔简洁")
+	if !strings.Contains(got, "我是知微") || !strings.Contains(got, "温柔简洁") {
+		t.Errorf("应含 identity+soul: %q", got)
+	}
+	// 只有 soul：不含身份段标题
+	if g := AssemblePersona("", "毒舌"); !strings.Contains(g, "毒舌") || strings.Contains(g, "身份设定") {
+		t.Errorf("只配 soul 时不应出现身份段: %q", g)
+	}
+}
+
+// TestOrchestratorInjectsPersona 锁定人设注入：装配 o.Persona 后，发给 dsh 的文本前置人设前言 +
+// 原始问题；落库的 user 消息仍是原始输入（不含人设，历史干净）。
+func TestOrchestratorInjectsPersona(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convRepo := &repo.AgentConversationRepo{DB: db}
+	msgRepo := &repo.AgentMessageRepo{DB: db}
+	ctx := t.Context()
+	conv := &repo.AgentConversation{Title: "人设注入"}
+	if err := convRepo.Create(ctx, conv); err != nil {
+		t.Fatal(err)
+	}
+	msgData, _ := json.Marshal(map[string]any{"message": map[string]any{"content": []map[string]any{
+		{"type": "text", "text": "好的"},
+	}}})
+	fake := &FakeRuntime{Script: [][]Event{{{Type: EvAssistantMessage, Data: msgData}}}}
+	orch := NewOrchestrator(rtFor(fake), convRepo, msgRepo)
+	orch.Persona = func(context.Context) string { return AssemblePersona("我是知微XP", "简洁XP") }
+
+	const raw = "帮我看看今天安排"
+	if _, err := orch.RunTurn(ctx, conv, raw); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if !strings.Contains(fake.LastText, "我是知微XP") || !strings.Contains(fake.LastText, "简洁XP") {
+		t.Errorf("发给 dsh 的文本应含人设前言: %q", fake.LastText)
+	}
+	if !strings.Contains(fake.LastText, raw) || fake.LastText == raw {
+		t.Errorf("发给 dsh 应为「人设前言+原始问题」: %q", fake.LastText)
+	}
+	msgs, err := msgRepo.ListByConversation(ctx, 1, conv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) == 0 || msgs[0].Role != "user" || msgs[0].Content != raw {
+		t.Errorf("落库 user 消息应为原始文本(不含人设), got %+v", msgs[0])
 	}
 }
 

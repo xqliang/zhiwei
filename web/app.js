@@ -2710,6 +2710,39 @@ const app = createApp({
       try { agentWS.send(JSON.stringify({ stop: true })); } catch (e) { /* 发送失败无害：轮次仍会靠 idle/超时收尾 */ }
     }
 
+    // ---------- 设置：知微人设（identity/soul，全局单份；每轮注入，保存后下条消息即时生效，不重启 dsh） ----------
+    // 后端契约：GET /api/agent/config → {identity, soul, preview}；PUT /api/agent/config {identity, soul}。
+    const agentCfgIdentity = ref('');
+    const agentCfgSoul = ref('');
+    const agentCfgSaving = ref(false);
+    const agentCfgSaved = ref(false);
+    // 注入预览：与后端 AssemblePersona 同格式，随输入实时更新（保存后即后端每轮注入的内容）。
+    const agentCfgPreview = computed(() => {
+      const id = (agentCfgIdentity.value || '').trim();
+      const soul = (agentCfgSoul.value || '').trim();
+      const b = [];
+      if (id) b.push('你的身份设定：\n' + id);
+      if (soul) b.push('你的性格与说话风格：\n' + soul);
+      return b.join('\n\n');
+    });
+    async function loadAgentConfig() {
+      try {
+        const d = await api('GET', '/api/agent/config');
+        agentCfgIdentity.value = (d && d.identity) || '';
+        agentCfgSoul.value = (d && d.soul) || '';
+        agentCfgSaved.value = false;
+      } catch (e) { showError(e); }
+    }
+    async function saveAgentConfig() {
+      if (agentCfgSaving.value) return;
+      agentCfgSaving.value = true; agentCfgSaved.value = false;
+      try {
+        await api('PUT', '/api/agent/config', { identity: agentCfgIdentity.value, soul: agentCfgSoul.value });
+        agentCfgSaved.value = true;
+      } catch (e) { showError(e); }
+      finally { agentCfgSaving.value = false; }
+    }
+
     // ---------- 报告（日报/周报 + 话题状态；后端 internal/api/review.go + internal/review/types.go） ----------
     // 契约（读源确认）：
     //   日报  GET  /api/reviews/daily?date=YYYY-MM-DD       → DailyReview 行 {content, status, review_date, created_at}
@@ -2876,6 +2909,8 @@ const app = createApp({
       if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; speakerSearch.value = ''; loadAllSpeakers(); }
       // 问知微 tab：拉会话列表；若已有选中会话，重拉历史 + 重连 WS（切回时恢复现场）。
       if (name === 'agent') { loadAgentConversations(); if (agentConvId.value) { const cid = agentConvId.value; loadAgentHistory(cid); openAgentWS(cid); } }
+      // 设置 tab：拉当前人设（identity/soul）到表单。
+      if (name === 'settings') { loadAgentConfig(); }
       // 报告 tab：拉主题列表（话题状态选择器数据源）+ 按当前日报/周报类型加载报告。
       if (name === 'reports') { loadTopics(); loadReport(); }
       // 人物 tab：进入时复位详情/删除确认态，拉名册 + 已删除列表 + 确认队列（跨平面 pending 并集，独立刷新）+ 属性目录（受控输入元数据，懒加载缓存）。
@@ -2927,6 +2962,7 @@ const app = createApp({
       agentConversations, agentConvId, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
       agentTurns, turnRunning, agentThinkingGap, turnDuration, fmtDur, isTurnOpen, toggleTurn, streamDraft,
       loadAgentConversations, newAgentConversation, selectAgentConversation, sendAgentMessage, stopAgentMessage,
+      agentCfgIdentity, agentCfgSoul, agentCfgSaving, agentCfgSaved, agentCfgPreview, loadAgentConfig, saveAgentConfig,
       confirmProposal, dismissProposal,
       renderMarkdown, reportSections, prettyJSON,
       // 报告（日报/周报 + 话题状态）

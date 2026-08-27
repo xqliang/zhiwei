@@ -411,6 +411,7 @@
     <button :class="{active: tab==='topics'}" @click="switchTab('topics')">主题</button>
     <button :class="{active: tab==='memories'}" @click="switchTab('memories')">记忆</button>
     <button :class="{active: tab==='todos'}" @click="switchTab('todos')">待办</button>
+    <button :class="{active: tab==='settings'}" @click="switchTab('settings')">设置</button>
     <!-- 右侧：当前用户 + 登出（spacer 撑开） -->
     <span style="flex:1"></span>
     <span v-if="currentUser" class="muted" style="padding:0 8px; white-space:nowrap">{{ currentUser.display_name || currentUser.username }}</span>
@@ -914,6 +915,39 @@
             <button v-else class="btn primary" :disabled="!agentInput.trim() || !agentConnected" @click="sendAgentMessage">发送</button>
           </div>
         </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 设置（知微人设：identity + soul） ============ -->
+  <!-- 每轮随对话注入到发给 dsh 的文本前（见 orchestrator.Persona / AssemblePersona）：保存后
+       下一条消息即时生效，不重启 dsh。留空则退化为进程级默认 persona。 -->
+  <div class="wrap" v-if="tab==='settings'">
+    <div class="card">
+      <h2 style="margin:0 0 4px">知微人设</h2>
+      <div class="muted" style="font-size:var(--fs-sm); margin-bottom:16px">
+        配置知微的「身份」与「性格」。保存后 <b>下一条消息即时生效</b>（每轮随对话注入，无需重启）。留空则使用默认人设。
+      </div>
+      <label style="font-size:var(--fs-sm); font-weight:600">身份设定（identity）</label>
+      <div class="muted" style="font-size:var(--fs-xs); margin:2px 0 6px">你是谁、扮演什么角色、职责边界。</div>
+      <textarea class="txt" v-model="agentCfgIdentity" rows="4" style="width:100%" placeholder="例：你是「知微」，用户的私人记忆与日程助理，只依据用户的记忆/时间线/待办作答，不编造。"></textarea>
+
+      <label style="font-size:var(--fs-sm); font-weight:600; margin-top:14px; display:block">性格与说话风格（soul）</label>
+      <div class="muted" style="font-size:var(--fs-xs); margin:2px 0 6px">语气、个性、价值观、表达习惯。</div>
+      <textarea class="txt" v-model="agentCfgSoul" rows="4" style="width:100%" placeholder="例：温柔、简洁、直接，不说客套话，偶尔一点幽默。"></textarea>
+
+      <div class="edit-actions" style="margin-top:14px; display:flex; gap:10px; align-items:center">
+        <button class="btn primary" :disabled="agentCfgSaving" @click="saveAgentConfig">
+          <span v-if="agentCfgSaving" class="spinner"></span>保存人设
+        </button>
+        <span v-if="agentCfgSaved" class="muted" style="font-size:var(--fs-sm); color:var(--ok)">✓ 已保存，下条消息生效</span>
+      </div>
+
+      <!-- 组装预览：每轮实际注入到 prompt 前的文本 -->
+      <div style="margin-top:20px">
+        <div class="muted" style="font-size:var(--fs-xs); font-weight:700; text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px">每轮注入预览</div>
+        <pre class="chat-code" v-if="agentCfgPreview">{{ agentCfgPreview }}</pre>
+        <div v-else class="muted" style="font-size:var(--fs-sm)">（未配置：使用默认进程级人设，不额外注入）</div>
       </div>
     </div>
   </div>
@@ -2303,6 +2337,6 @@
   </template>
 </div>
 
-<script src="/app/app.dbc3e7bb.js"></script>
+<script src="/app/app.c5071bcf.js"></script>
 </body>
 </html>

@@ -370,15 +370,26 @@ func main() {
 	if cfg.AgentEnabled {
 		agentConvs := &repo.AgentConversationRepo{DB: db}
 		agentMsgs := &repo.AgentMessageRepo{DB: db}
+		agentConfigs := &repo.AgentConfigRepo{DB: db}
 		// Orchestrator 按 conv.UserID 经 pool.Get 选运行时（2B-B：每用户独立 dsh + MCP token）。
 		// 装配可选的画像上下文头（每轮把 owner 概要 + 关键属性 + 当天日期前置到「发给 dsh 的文本」，
 		// 让 agent 天然「认识我」；Head/Seeds 现按 conv.UserID 取，不改落库，见 agent/context.go）。
 		orch := agent.NewOrchestrator(agentPool.Get, agentConvs, agentMsgs)
 		orch.Ctx = &agent.ProfileContext{Persons: persons, Attributes: personAttrs, Retrieve: retriever}
+		// 人设注入：每轮把可配置的 identity/soul 前置到发给 dsh 的文本（读全局 agent_config；空则不注入）。
+		// 动态生效、不重启 dsh——配置改了下一条消息即用新人设。读失败/为空退化为进程级 persona。
+		orch.Persona = func(ctx context.Context) string {
+			c, err := agentConfigs.Get(ctx)
+			if err != nil || c == nil {
+				return ""
+			}
+			return agent.AssemblePersona(c.Identity, c.Soul)
+		}
 		agent.RegisterAgent(r, &agent.AgentHandler{
 			Orch:          orch,
 			Conversations: agentConvs,
 			Messages:      agentMsgs,
+			Configs:       agentConfigs,
 		})
 		// 预热 owner(id=1) 的 dsh 边车：启动后后台 spawn + initialize 握手，把 node 启动的一次性
 		// 延迟从「首条消息」挪到启动阶段（best-effort：失败仅记日志，首条消息会自行懒启动）。

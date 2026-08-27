@@ -22,6 +22,10 @@ type Orchestrator struct {
 	// 「认识我」，见 context.go）。绝不改落库——持久化的 user 消息与流式回显仍是原始输入（D2）。
 	// nil → 不注入（既有行为/测试不变）。
 	Ctx *ProfileContext
+	// Persona 可选：非 nil 时，每轮先取一段「人设前言」(identity/soul)前置到发给 dsh 的文本最前
+	//（在 Ctx 的 owner 画像头之前）。用于「不重启 dsh 动态改人设」——随 session/prompt 一起发过去，
+	// 编辑即时生效。返回 "" 表示本轮不注入（未配置/为空）。同样绝不改落库。
+	Persona func(ctx context.Context) string
 }
 
 // NewOrchestrator 第一参收「按 userID 选运行时」的函数（生产 = pool.Get，单测 = 返回 fake 的闭包）。
@@ -74,17 +78,23 @@ func (o *Orchestrator) runTurn(ctx context.Context, conv *repo.AgentConversation
 	// 隔离，绝不串用别人的画像/记忆）。now 传 time.Now()（服务端可用系统时间；单测经 Head 的 now
 	// 参数注入固定日期）。
 	sent := userText
+	var blocks []string
+	// 人设前言（identity/soul）最前置：动态、随本轮 prompt 发给 dsh，不重启即生效。
+	if o.Persona != nil {
+		if p := o.Persona(ctx); p != "" {
+			blocks = append(blocks, p)
+		}
+	}
 	if o.Ctx != nil {
-		var blocks []string
 		if h := o.Ctx.Head(ctx, conv.UserID, time.Now()); h != "" {
 			blocks = append(blocks, h)
 		}
 		if s := o.Ctx.Seeds(ctx, conv.UserID, userText); s != "" {
 			blocks = append(blocks, s)
 		}
-		if len(blocks) > 0 {
-			sent = strings.Join(blocks, "\n\n") + "\n\n" + userText
-		}
+	}
+	if len(blocks) > 0 {
+		sent = strings.Join(blocks, "\n\n") + "\n\n" + userText
 	}
 
 	// 按会话所属用户选运行时（2B-B：不同用户 → 不同 dsh 进程 + 不同 MCP token，天然隔离）。
