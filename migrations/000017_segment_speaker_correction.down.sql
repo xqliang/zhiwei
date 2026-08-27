@@ -1,0 +1,1 @@
+ALTER TABLE transcript_segment DROP COLUMN corrected_from_speaker_id;
