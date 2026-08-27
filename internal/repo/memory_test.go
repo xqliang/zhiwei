@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 func newTestMemory(sessionID ids.ID) *Memory {
@@ -20,7 +21,7 @@ func newTestMemory(sessionID ids.ID) *Memory {
 }
 
 func TestMemoryInsertAndQuery(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +106,7 @@ func TestMemoryInsertAndQuery(t *testing.T) {
 }
 
 func TestMemoryDeleteBySession(t *testing.T) {
-	db, _ := NewDB(TestDSN(t))
+	db, _ := NewDB(repotest.DSN(t))
 	mr := &MemoryRepo{DB: db}
 	ctx := context.Background()
 
@@ -121,7 +122,7 @@ func TestMemoryDeleteBySession(t *testing.T) {
 }
 
 func TestMemoryListSince(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +198,7 @@ func titles(rows []MemoryRow) []string {
 // TestMemoryListWithTopics 验证 List 返回的行内联 topics[]（关联表多对多）。
 // 建 1 条 memory 关联 2 个 topic → List 后 rows[0].Topics 长度=2。
 func TestMemoryListWithTopics(t *testing.T) {
-	db, _ := NewDB(TestDSN(t))
+	db, _ := NewDB(repotest.DSN(t))
 	ctx := context.Background()
 	mr := &MemoryRepo{DB: db}
 	mtr := &MemoryTopicRepo{DB: db}
@@ -247,7 +248,7 @@ func TestMemoryListWithTopics(t *testing.T) {
 }
 
 func TestMemoryListActiveTitlesExt(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +278,7 @@ func TestMemoryListActiveTitlesExt(t *testing.T) {
 }
 
 func TestMemoryBumpConfidence(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +309,7 @@ func TestMemoryBumpConfidence(t *testing.T) {
 }
 
 func TestMemoryListActive(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +335,7 @@ func TestMemoryListActive(t *testing.T) {
 }
 
 func TestMemoryApplyConsolidation(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +393,7 @@ func TestMemoryApplyConsolidation(t *testing.T) {
 // 更新 title/content/version 落库、Get 读回一致。确认闸门 memory_update 落库依赖此方法
 // （与 Proposals.Resolve 同事务）。
 func TestMemorySaveExt(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

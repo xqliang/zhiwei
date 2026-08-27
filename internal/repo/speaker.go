@@ -73,6 +73,15 @@ func (r *SpeakerRepo) UpdateEmbedding(ctx context.Context, id ids.ID, emb []byte
 	return err
 }
 
+// UpdateVoiceprint 聚合重算回写：embedding（全部样本均值+L2 归一的代表向量；样本删光传 nil）
+// + sample_count（全部样本 sample_count 之和）。多条声纹模型下「代表」永远由样本聚合得出，
+// 不再单独维护。单行按 ID 原子写，并发重算为最后写者胜（样本行本身不变，可再重算修复）。
+func (r *SpeakerRepo) UpdateVoiceprint(ctx context.Context, id ids.ID, emb []byte, sampleCount int) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE speaker SET embedding = ?, sample_count = ? WHERE id = ?`, emb, sampleCount, id.Int64())
+	return err
+}
+
 // Delete 硬删除说话人。不存在也不报错（幂等）。
 func (r *SpeakerRepo) Delete(ctx context.Context, id ids.ID) error {
 	_, err := r.DB.ExecContext(ctx, `DELETE FROM speaker WHERE id = ?`, id.Int64())

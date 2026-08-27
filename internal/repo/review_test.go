@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+	"zhiwei/internal/repotest"
 )
 
 func TestReviewUpsertDailyIdempotent(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +40,7 @@ func TestReviewUpsertDailyIdempotent(t *testing.T) {
 }
 
 func TestReviewUpsertWeekly(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func TestReviewUpsertWeekly(t *testing.T) {
 
 // TestReviewGetDailyMissing 验证不存在时返回 (nil, nil)。
 func TestReviewGetDailyMissing(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +80,7 @@ func TestReviewGetDailyMissing(t *testing.T) {
 
 // TestReviewGetDailyNonMidnight：带时分秒的时间也应命中当天日报（DATE(?) 截断）。
 func TestReviewGetDailyNonMidnight(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

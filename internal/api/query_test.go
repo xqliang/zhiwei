@@ -17,6 +17,7 @@ import (
 	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // newAuthedRouter 返回预装「登录态注入」中间件的测试路由（api 包测试共用）。
@@ -48,7 +49,7 @@ func setupQueryAPI(t *testing.T, s *repo.SessionRepo, j *repo.JobRepo,
 
 func TestSessionsAndDetail(t *testing.T) {
 	_ = ids.InitForTest() // 幂等初始化，避免依赖其它测试先跑
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestSessionsAndDetail(t *testing.T) {
 // 顶层 speakers 列表含该说话人。
 func TestGetSessionSpeakerEnrichment(t *testing.T) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +222,7 @@ func TestGetSessionSpeakerEnrichment(t *testing.T) {
 // 不受脏库其它说话人干扰，因此无需清表。
 func TestGetSessionNameCandidates(t *testing.T) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +347,7 @@ func TestGetSessionNameCandidates(t *testing.T) {
 
 // ServeAudio 流式返回原始音频文件，支持点击播放
 func TestServeAudio(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +402,7 @@ func TestServeAudio(t *testing.T) {
 // （含 DB 句柄供断言）。
 func buildEnrichedSession(t *testing.T) (http.Handler, ids.ID, *repo.SessionRepo) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,10 +626,11 @@ func TestReextract(t *testing.T) {
 //   - 单人会话（1 个 ASR 标签）→ basis=whole，top3 由全部段向量均值算出；
 //   - 多人会话 → basis=longest，用时长最长一段的向量；
 //   - 判定走两级规则（voiceprint.Matched）：top1≥0.8 强命中 / ≥0.72 且领先 0.06 弱命中。
+//
 // 场景构造：库中甲=e1、乙=0.6e1+0.8e2（与 e1 余弦 0.6）、丙=e3（正交）。
 func TestListSessionsVoiceTop(t *testing.T) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +811,7 @@ func TestListSessionsVoiceTop(t *testing.T) {
 // 用途：一句话可能混多个人——段级 top-1 不是归属说话人即该段可能被切错/归错。
 func TestGetSessionVoiceMatches(t *testing.T) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -913,4 +915,71 @@ func TestGetSessionVoiceMatches(t *testing.T) {
 	if ms[2].Name != "丙" || ms[2].Similarity != 0 {
 		t.Fatalf("top3 应为 丙/0，实际 %s/%.4f", ms[2].Name, ms[2].Similarity)
 	}
+}
+
+// TestReextractReidentifyBlockedWhileProcessing 验证防重入闸（2026-08-26 需求）：
+// 会话当前 job 处于 pending/running 时，重新提取/重新识别一律 409——避免重复排队、
+// 以及新旧 job 竞写同一 session 数据（如 reidentify 清空 speaker_id 时旧 speaker
+// stage 正在回填）。job done/failed 时不拦截（正常重跑路径）。
+func TestReextractReidentifyBlockedWhileProcessing(t *testing.T) {
+	r, sid, sessions := buildEnrichedSession(t)
+	ctx := context.Background()
+	// 收尾清 job：本测试建的 pending job 若残留共享库，pipeline 包 pool 测试的
+	// ClaimNext（全局领最老 pending）会抢跑它并拖超时（-p 1 保留的已知根因之一）。
+	t.Cleanup(func() {
+		_, _ = sessions.DB.ExecContext(context.Background(),
+			`DELETE FROM pipeline_job WHERE session_id = ?`, sid.Int64())
+	})
+
+	mkJob := func(status string) {
+		jr := &repo.JobRepo{DB: sessions.DB}
+		j := &repo.Job{SessionID: sid, Stage: "speaker", Status: status}
+		if err := jr.Create(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+		_ = sessions.SetJobID(ctx, sid, j.ID)
+	}
+	jr := &repo.JobRepo{DB: sessions.DB}
+
+	// pending → 两个端点都 409
+	mkJob("pending")
+	for _, path := range []string{"/reextract", "/reidentify"} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/sessions/"+sid.String()+path, nil))
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s: pending 应 409, got %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	// running → 409
+	if j, _ := jr.Get(ctx, mustJobID(t, sessions, sid)); j != nil {
+		j.Status = "running"
+		_ = jr.Save(ctx, j)
+	} else {
+		t.Fatal("job 未建立")
+	}
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/api/sessions/"+sid.String()+"/reidentify", nil))
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("running 应 409, got %d %s", rec2.Code, rec2.Body.String())
+	}
+	// done → 放行（200，建新 job）
+	if j, _ := jr.Get(ctx, mustJobID(t, sessions, sid)); j != nil {
+		j.Status = "done"
+		_ = jr.Save(ctx, j)
+	}
+	rec3 := httptest.NewRecorder()
+	r.ServeHTTP(rec3, httptest.NewRequest(http.MethodPost, "/api/sessions/"+sid.String()+"/reextract", nil))
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("done 应放行, got %d %s", rec3.Code, rec3.Body.String())
+	}
+}
+
+// mustJobID 取 session 当前指向的 job id（测试 helper）。
+func mustJobID(t *testing.T, sessions *repo.SessionRepo, sid ids.ID) ids.ID {
+	t.Helper()
+	s, err := sessions.Get(context.Background(), 1, sid) // 多用户签名：fixture 默认 owner=1
+	if err != nil || s == nil || s.JobID == nil {
+		t.Fatalf("session/job 缺失: %v", err)
+	}
+	return *s.JobID
 }

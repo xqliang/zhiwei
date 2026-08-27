@@ -45,6 +45,8 @@ type StageDeps struct {
 	Voiceprint          voiceprint.Client
 	Speakers            *repo.SpeakerRepo
 	VoiceprintThreshold float64 // ZW_VOICEPRINT_THRESHOLD，0 表示用默认 0.8
+	// SpeakerEmbeddings 多条声纹样本 repo（自动登记时落样本行；nil = 兼容旧装配/测试，跳过）
+	SpeakerEmbeddings *repo.SpeakerEmbeddingRepo
 
 	// ---- speakername stage（名字推断）----
 	NameInferPrompt       string                         // prompts/speaker_naming_v1.md 内容（system prompt）

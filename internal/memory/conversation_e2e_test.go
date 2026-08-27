@@ -14,6 +14,7 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // TestMain 初始化雪花 ID 节点（repo 方法与 ids.New() 生成主键需要）。
@@ -25,7 +26,7 @@ func TestMain(m *testing.M) {
 
 // TestExtractConversationE2E 覆盖「对话 → 候选 → 闸门 → dedup → 落库 + 幂等」全链路（§12 验收级）。
 func TestExtractConversationE2E(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

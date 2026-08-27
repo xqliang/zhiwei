@@ -8,6 +8,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 // 纯逻辑：状态机（验证非法流转被拒绝）
@@ -39,7 +40,7 @@ func TestTodoCanTransition(t *testing.T) {
 }
 
 func TestTodoInsertAndList(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +141,7 @@ func TestTodoInsertAndList(t *testing.T) {
 // 三条 todo 共享同一 memory fixture 作为 source_memory_id；
 // created_at 由显式 UPDATE 设定确定性顺序，保证「保留最旧」结果稳定。
 func TestTodoDedupSuggested(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +228,7 @@ func repoMemoryFixture(t *testing.T, db *sqlx.DB, sessionID ids.ID) *Memory {
 // 合法状态落库、非法状态被拒（不落库）。确认闸门 todo_status 落库依赖此方法
 // （与 Proposals.Resolve 同事务）。
 func TestTodoUpdateStatusExt(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

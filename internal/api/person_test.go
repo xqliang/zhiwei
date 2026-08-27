@@ -13,6 +13,7 @@ import (
 	"zhiwei/internal/profile"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // profileTestLLM 是 api 包测试用的 fake LLM（回填端点测试时注入预置响应）。
@@ -31,7 +32,7 @@ var _ provider.LLMProvider = (*profileTestLLM)(nil)
 
 func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 	t.Helper()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

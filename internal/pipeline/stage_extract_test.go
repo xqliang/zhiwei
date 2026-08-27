@@ -13,6 +13,7 @@ import (
 	"zhiwei/internal/memory"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // fakeExtractLLM 固定响应（1 条 todo 候选建议新主题 + 1 条同名已有主题的候选）
@@ -34,7 +35,7 @@ func (f *fakeExtractLLM) Chat(_ context.Context, _ provider.ChatRequest) (provid
 // 以便复用同一套 fixture（fakeExtractLLM / driftExtractLLM 等）。
 func newExtractDeps(t *testing.T, llm provider.LLMProvider) StageDeps {
 	t.Helper()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

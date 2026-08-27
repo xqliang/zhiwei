@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 func TestValidProposalStatus(t *testing.T) {
@@ -21,7 +22,7 @@ func TestValidProposalStatus(t *testing.T) {
 }
 
 func TestAgentProposalCRUDAndResolve(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +100,7 @@ func TestAgentProposalCRUDAndResolve(t *testing.T) {
 // 绝不再静默落 user 1（静默默认 1 正是「agent 提议未设 UserID → 全部误挂 user 1」跨租户
 // 泄漏 bug 被长期掩盖的根因）。设了非 0 UserID 才放行。
 func TestAgentProposalCreateRequiresUserID(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

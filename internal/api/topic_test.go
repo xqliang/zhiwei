@@ -13,6 +13,7 @@ import (
 	"zhiwei/internal/ids"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // setupTopicAPI 准备 topic 路由 + 一条 suggested 主题，
@@ -21,7 +22,7 @@ import (
 func setupTopicAPI(t *testing.T) (http.Handler, *repo.TopicRepo, *repo.MemoryRepo, *repo.TodoRepo, *repo.Topic) {
 	t.Helper()
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,6 +69,22 @@ func setupTopicAPI(t *testing.T) (http.Handler, *repo.TopicRepo, *repo.MemoryRep
 	return r, tr, mr, tdr, tp
 }
 
+// cleanupTopicsByName 删除某用户（固定 user_id=1）名下所有指定名称的 topic 及其
+// memory_topic/todo_topic 关联，供脏库连跑用例开头清理历史遗留行。逐个走
+// TopicRepo.Delete 复用既有单事务级联删除语义（不另写一套级联 SQL）。
+func cleanupTopicsByName(ctx context.Context, t *testing.T, tr *repo.TopicRepo, name string) {
+	t.Helper()
+	var raw []int64
+	if err := tr.DB.SelectContext(ctx, &raw, `SELECT id FROM topic WHERE user_id = 1 AND name = ?`, name); err != nil {
+		t.Fatalf("查同名 topic: %v", err)
+	}
+	for _, id := range raw {
+		if err := tr.Delete(ctx, ids.ID(id)); err != nil {
+			t.Fatalf("清理同名 topic %d: %v", id, err)
+		}
+	}
+}
+
 func TestTopicListWithCounts(t *testing.T) {
 	r, _, _, _, tp := setupTopicAPI(t)
 	rec := httptest.NewRecorder()
@@ -106,7 +123,13 @@ func TestTopicListWithCounts(t *testing.T) {
 }
 
 func TestTopicCreateAndDuplicate(t *testing.T) {
-	r, _, _, _, tp := setupTopicAPI(t)
+	r, tr, _, _, tp := setupTopicAPI(t)
+	ctx := context.Background()
+	// 脏库连跑清理：本用例经 POST 建 "API用例主题健身"（默认 active），上次运行残留的同名
+	// active 行会被 Create 的 FindActiveByName 命中，令本次 create 误判 409。开头按名把历史
+	// 同名 topic 连带 memory_topic/todo_topic 关联一并删净（复用 TopicRepo.Delete 的单事务级联，
+	// 对齐既有删除语义；也兼顾上次异常退出残留的关联行）。
+	cleanupTopicsByName(ctx, t, tr, "API用例主题健身")
 	// 创建
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/topics",
@@ -226,7 +249,7 @@ func (f *fakeConsolidateLLM) Chat(_ context.Context, _ provider.ChatRequest) (pr
 func setupMergeFixtures(t *testing.T) (*repo.TopicRepo, *repo.MemoryRepo, *repo.TodoRepo, *repo.Topic, *repo.Topic) {
 	t.Helper()
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,10 +6,11 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 func TestAgentConversationCRUD(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,7 @@ func TestAgentConversationCRUD(t *testing.T) {
 
 // TestAgentConversationListOrdering 验证 List 按 last_active_at 倒序；用唯一 user_id 隔离本用例数据。
 func TestAgentConversationListOrdering(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +100,7 @@ func TestAgentConversationListOrdering(t *testing.T) {
 
 // TestAgentConversationMissing 验证缺失 id 的语义：Get 冒泡 ErrNoRows，Touch/SetDSHSession 返回 nil。
 func TestAgentConversationMissing(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

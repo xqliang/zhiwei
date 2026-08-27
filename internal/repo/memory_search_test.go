@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 func TestMemorySearch(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +56,7 @@ func TestMemorySearch(t *testing.T) {
 }
 
 func TestMemorySearchEscapesWildcards(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

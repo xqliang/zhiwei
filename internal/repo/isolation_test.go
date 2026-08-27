@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 // 本文件是多租户越权读隔离的回归用例（安全修复）。
@@ -26,7 +27,7 @@ func twoUsers() (int64, int64) {
 }
 
 func TestIsolationSessionGetList(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +79,7 @@ func TestIsolationSessionGetList(t *testing.T) {
 }
 
 func TestIsolationMemoryGetList(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +134,7 @@ func TestIsolationMemoryGetList(t *testing.T) {
 }
 
 func TestIsolationTodoGetListDismissed(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +192,7 @@ func TestIsolationTodoGetListDismissed(t *testing.T) {
 }
 
 func TestIsolationTopicGet(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +221,7 @@ func TestIsolationTopicGet(t *testing.T) {
 }
 
 func TestIsolationAgentConversationGet(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +250,7 @@ func TestIsolationAgentConversationGet(t *testing.T) {
 }
 
 func TestIsolationAgentMessageListByConversation(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +289,7 @@ func TestIsolationAgentMessageListByConversation(t *testing.T) {
 }
 
 func TestIsolationPersonGet(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

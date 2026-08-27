@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 func TestPersonLifecycle(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +90,7 @@ func TestPersonLifecycle(t *testing.T) {
 // TestEnsureOwnerForUser 验证为指定 user 幂等引导 owner「我」：
 // 首次创建（is_owner=1、DisplayName="我"、UserID 落在该域），二次为 no-op（仍是同一 owner）。
 func TestEnsureOwnerForUser(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestEnsureOwnerForUser(t *testing.T) {
 }
 
 func TestPersonListWithPendingAndRecentSessions(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

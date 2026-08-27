@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 func TestTodoTopicRepo(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ func TestTodoTopicRepo(t *testing.T) {
 // （segment_ids+title 取自 source memory）；再加一条 ai 关联（不同 topic），断言快照只返 user。
 // 守护 commitExtract 删旧前抓 todo 的 user 行这条路径（spec §6）。
 func TestTodoTopicSnapshotUser(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

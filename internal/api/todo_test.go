@@ -10,6 +10,7 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // setupTodoAPI 准备 todo 路由 + 一条 suggested 待办（来源 memory）。
@@ -17,7 +18,7 @@ import (
 func setupTodoAPI(t *testing.T) (http.Handler, *repo.TodoRepo, *repo.Todo) {
 	t.Helper()
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +111,7 @@ func TestTodoPatchTransitions(t *testing.T) {
 // POST 幂等（重复 200）、GET 列表反映增删、DELETE 204、不存在 topic_id → 404。
 func TestTodoAddRemoveTopic(t *testing.T) {
 	_ = ids.InitForTest()
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

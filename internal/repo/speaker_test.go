@@ -8,13 +8,14 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 // TestSpeakerCRUD 覆盖 SpeakerRepo 的增删改查全链路（真实 MySQL）：
 // 创建回填雪花 ID、Get 读回、UpdateName / UpdateEmbedding 改字段、
-// List 只返回 active、Delete 后查不到。未设 TEST_MYSQL_DSN 时经 TestDSN 跳过。
+// List 只返回 active、Delete 后查不到。未设 TEST_MYSQL_DSN 时经 repotest.DSN 跳过。
 func TestSpeakerCRUD(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func TestSpeakerCRUD(t *testing.T) {
 // 把 3 段挂到 source，MergeInto 后：段 speaker_id 改指 target、source 行删除、target 保留。
 // 对应后端 POST /api/speakers/merge（声纹 tab 手动合并）。未设 TEST_MYSQL_DSN 时跳过。
 func TestSpeakerMergeInto(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

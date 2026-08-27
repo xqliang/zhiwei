@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -142,6 +143,14 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 			}
 			if err := d.Voiceprint.Add(ctx, embVec, sp.ID); err != nil {
 				return fmt.Errorf("voiceprint add: %w", err)
+			}
+			// 样本行落库（多条声纹模型；nil = 旧装配跳过。失败仅 log 不致命——speaker/FAISS
+			// 已就绪，样本行缺失只影响后续聚合重算来源，可用启动 bootstrap 兜底补齐）
+			if d.SpeakerEmbeddings != nil {
+				e := &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: float32Blob(embVec), SampleCount: sampleN, Source: "auto"}
+				if err := d.SpeakerEmbeddings.Create(ctx, e); err != nil {
+					log.Printf("[speaker] 自动登记后样本行落库失败 speaker=%s: %v", sp.ID, err)
+				}
 			}
 			speakerID = sp.ID
 		}

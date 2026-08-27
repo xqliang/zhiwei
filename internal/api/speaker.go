@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -29,6 +32,8 @@ type SpeakerHandler struct {
 	DataDir             string
 	EnrollMinDurationMS int64   // 从转写段音频录入声纹的最小时长（ms，0→兜底 3000）
 	VoiceprintThreshold float64 // 1:N 余弦匹配阈值（match 预览判定+展示用，0→兜底 0.8）
+
+	SpeakerEmbeddings *repo.SpeakerEmbeddingRepo // 多条声纹样本（nil = 未装配，条目功能降级，兼容旧装配/测试）
 
 	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // 名字候选 repo（nil = 不富化/不清理，兼容旧装配）
 }
@@ -83,24 +88,154 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Patch("/api/speakers/{id}", h.Rename)
 	r.Delete("/api/speakers/{id}", h.Delete)
 	r.Delete("/api/speakers/{id}/name-candidates", h.DeleteNameCandidate) // 忽略单个候选名（建议区 ✕）
-	r.Post("/api/speakers/merge", h.Merge)                                // 声纹页「手动合并」：多说话人并入一个目标
+	r.Post("/api/speakers/merge", h.Merge)                                // 声纹页「手动合并」：多说话人并入一个目标（声纹样本累加）
 	r.Get("/api/speakers/{id}/segments", h.Segments)                      // 该说话人跨 session 出现的片段（声纹 tab 点开看关联录音）
+	r.Get("/api/speakers/{id}/embeddings", h.ListEmbeddings)              // 多条声纹样本列表（备注/创建时间/来源）
+	r.Post("/api/speakers/{id}/embeddings", h.AddEmbedding)               // 追加一条声纹样本（multipart file+note）
+	r.Patch("/api/speakers/{id}/embeddings/{eid}", h.UpdateEmbeddingNote) // 改样本备注
+	r.Delete("/api/speakers/{id}/embeddings/{eid}", h.DeleteEmbedding)    // 删单条样本（聚合代表重算）
 	r.Get("/api/sessions/{sid}/speakers", h.SessionSpeakers)
 	r.Patch("/api/sessions/{sid}/segments/{seg}/speaker", h.ReassignSegment) // 单段换人
 	r.Post("/api/sessions/{sid}/speakers/reassign", h.ReassignSpeakerAll)   // 「切换声纹」：本会话某说话人全部段一键改判
 	r.Post("/api/sessions/{sid}/segments/{seg}/enroll", h.EnrollFromSegment) // timeline「用此段录音纹」：从转写段音频录入新说话人
 	r.Post("/api/sessions/{sid}/segments/merge", h.MergeSegments)            // timeline「合并连续同人段成一条」
 	r.Post("/api/voiceprint/match", h.MatchPreview)                          // 录音页「试匹配」预览：上传音频→提向→1:N→返回相似度+阈值（只读不登记）
+	r.Post("/api/voiceprint/resync", h.Resync)                               // 重建索引：逐说话人 Remove+逐条样本 Add（多向量迁移/运维修复）
 }
 
-// List 全部 active 说话人（管理页/换人下拉用）。随机名说话人附 LLM 推断的候选名（倒排）。
+// embeddingView 前端展示的声纹样本元数据（向量 BLOB 不外泄）。
+type embeddingView struct {
+	ID          string  `json:"id"`
+	Note        string  `json:"note"`                 // 备注（可空串）
+	Source      string  `json:"source"`               // manual|auto|merge
+	SampleCount int     `json:"sample_count"`         // 该条聚合的段向量数
+	CreatedAt   string  `json:"created_at"`           // RFC3339（前端 fmtTime 格式化）
+}
+
+// recomputeVoiceprint 重算某说话人的声纹：speaker.embedding 写「全部样本均值+L2 归一」
+// 的聚合代表（展示/审计/无样本回退用）；FAISS 索引按**多向量**语义重建——该人的每条
+// 样本向量各自 Add（sidecar /add 纯追加），1:N 匹配时与任意一条最高即命中（变体不稀释）。
+// 样本删光时 embedding 置 NULL、Remove 索引（名字/段归属保留，不再被声纹命中）。
+// 多条声纹模型的核心不变式：索引里的向量集合 ≡ 样本行集合；聚合代表只用于展示。
+func (h *SpeakerHandler) recomputeVoiceprint(ctx context.Context, speakerID ids.ID) error {
+	if h.SpeakerEmbeddings == nil {
+		return nil // 未装配条目 repo（旧装配）：不动既有代表向量，调用方语义退化为覆盖式
+	}
+	entries, err := h.SpeakerEmbeddings.ListBySpeaker(ctx, speakerID)
+	if err != nil {
+		return err
+	}
+	// 索引先移除旧向量（无论还剩几条样本；后面逐条 Add 重建。Add 失败由调用方报错——
+	// DB 样本行是完整真值，索引可由重算或 /api/voiceprint/resync 恢复）
+	_ = h.Voiceprint.Remove(ctx, speakerID)
+	if len(entries) == 0 {
+		return h.Speakers.UpdateVoiceprint(ctx, speakerID, nil, 0)
+	}
+	vecs := make([][]float32, 0, len(entries))
+	total := 0
+	for _, e := range entries {
+		if v, ok := decodeEmbedding(e.Embedding); ok && len(v) == 256 {
+			vecs = append(vecs, v)
+		}
+		total += e.SampleCount
+	}
+	if len(vecs) == 0 {
+		// 全是脏 BLOB：清空代表与索引，避免残留旧向量与样本不一致
+		return h.Speakers.UpdateVoiceprint(ctx, speakerID, nil, 0)
+	}
+	// 聚合代表（展示/审计）= 均值 + L2 归一
+	rep := aggregateVecsAPI(vecs)
+	if err := h.Speakers.UpdateVoiceprint(ctx, speakerID, float32BlobAPI(rep), total); err != nil {
+		return err
+	}
+	// 索引（匹配用）= 逐条样本向量（多向量：变体各自可命中）
+	for _, v := range vecs {
+		if err := h.Voiceprint.Add(ctx, v, speakerID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Resync 重建整个 FAISS 索引：对每个 active 说话人 Remove 后逐条 Add 其样本向量。
+// 用途：①多向量语义上线后把存量索引（旧的单聚合向量）迁移为逐样本向量；
+// ②索引与 DB 样本行失一致时（sidecar 数据丢失/中途失败）的运维修复。幂等。
+func (h *SpeakerHandler) Resync(w http.ResponseWriter, r *http.Request) {
+	if h.SpeakerEmbeddings == nil {
+		http.Error(w, "多条声纹功能未装配", http.StatusNotImplemented)
+		return
+	}
+	list, err := h.Speakers.List(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	spN, vecN := 0, 0
+	for _, sp := range list {
+		entries, err := h.SpeakerEmbeddings.ListBySpeaker(r.Context(), sp.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(entries) == 0 {
+			continue // 无样本（无向量）的说话人不动索引
+		}
+		_ = h.Voiceprint.Remove(r.Context(), sp.ID)
+		for _, e := range entries {
+			if v, ok := decodeEmbedding(e.Embedding); ok && len(v) == 256 {
+				if err := h.Voiceprint.Add(r.Context(), v, sp.ID); err != nil {
+					http.Error(w, fmt.Sprintf("speaker %s 入索引失败: %v", sp.ID, err), http.StatusInternalServerError)
+					return
+				}
+				vecN++
+			}
+		}
+		spN++
+	}
+	writeJSON(w, map[string]any{"ok": true, "speakers": spN, "vectors": vecN})
+}
+
+// List 全部 active 说话人（管理页/换人下拉用）。随机名说话人附 LLM 推断的候选名（倒排）；
+// 多条声纹装配时附每人的样本元数据（备注/创建时间，向量不外泄）。
 func (h *SpeakerHandler) List(w http.ResponseWriter, r *http.Request) {
 	list, err := h.Speakers.List(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"speakers": h.attachCandidates(r.Context(), list)})
+	withCands := h.attachCandidates(r.Context(), list)
+	if h.SpeakerEmbeddings != nil {
+		writeJSON(w, map[string]any{"speakers": h.attachEmbeddings(r.Context(), withCands)})
+		return
+	}
+	writeJSON(w, map[string]any{"speakers": withCands})
+}
+
+// speakerWithEmbeddings speaker + 候选名 + 声纹样本列表（名册富化视图）。
+type speakerWithEmbeddings struct {
+	speakerWithCandidates
+	Embeddings []embeddingView `json:"embeddings"` // 无 omitempty：前端统一按空数组处理
+}
+
+// attachEmbeddings 为名册批量附声纹样本元数据（一次查询避免 N+1；失败降级空列表不阻断）。
+func (h *SpeakerHandler) attachEmbeddings(ctx context.Context, list []speakerWithCandidates) []speakerWithEmbeddings {
+	out := make([]speakerWithEmbeddings, len(list))
+	spIDs := make([]ids.ID, len(list))
+	for i, sp := range list {
+		out[i] = speakerWithEmbeddings{speakerWithCandidates: sp, Embeddings: []embeddingView{}}
+		spIDs[i] = sp.ID
+	}
+	entries, err := h.SpeakerEmbeddings.ListBySpeakers(ctx, spIDs)
+	if err != nil {
+		log.Printf("[speaker] 样本元数据富化失败: %v", err)
+		return out
+	}
+	for i := range out {
+		if es := entries[out[i].ID]; len(es) > 0 {
+			out[i].Embeddings = toEmbeddingViews(es)
+		}
+	}
+	return out
 }
 
 // Segments 该说话人出现的所有片段（跨 session，声纹 tab「点开看关联录音」用）。
@@ -172,6 +307,7 @@ func (h *SpeakerHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, msg, http.StatusInternalServerError)
 		return
 	}
+	note := strings.TrimSpace(r.FormValue("note"))
 	sp := &repo.Speaker{Name: name, Source: "enrolled", Embedding: float32BlobAPI(vec), SampleCount: 1}
 	if err := h.Speakers.Create(r.Context(), sp); err != nil {
 		http.Error(w, "登记失败: "+err.Error(), http.StatusInternalServerError)
@@ -183,6 +319,17 @@ func (h *SpeakerHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 		_ = h.Speakers.Delete(r.Context(), sp.ID)
 		http.Error(w, "声纹索引写入失败，请重试", http.StatusInternalServerError)
 		return
+	}
+	// 首条声纹样本落库（多条声纹模型；失败不回滚——speaker/FAISS 已就绪，样本行缺了
+	// 只影响后续聚合重算的来源，可用重启 bootstrap 兜底补齐，非致命）
+	if h.SpeakerEmbeddings != nil {
+		e := &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: float32BlobAPI(vec), SampleCount: 1, Source: "manual"}
+		if note != "" {
+			e.Note = &note
+		}
+		if err := h.SpeakerEmbeddings.Create(r.Context(), e); err != nil {
+			log.Printf("[speaker] 录入后样本行落库失败 speaker=%s: %v", sp.ID, err)
+		}
 	}
 	writeJSON(w, sp)
 }
@@ -237,6 +384,12 @@ func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// 声纹样本行一并清（说话人没了，样本是孤儿；幂等 best-effort）
+	if h.SpeakerEmbeddings != nil {
+		if err := h.SpeakerEmbeddings.DeleteBySpeaker(r.Context(), id); err != nil {
+			log.Printf("[speaker] 删说话人后清样本行失败 speaker=%s: %v", id, err)
+		}
+	}
 	_, _ = h.Speakers.DB.ExecContext(r.Context(),
 		`UPDATE transcript_segment SET speaker_id = NULL WHERE speaker_id = ?`, id.Int64())
 	// 删说话人后清其候选：孤儿候选永不外显（说话人已没了）但会在表里累积，顺手清掉。
@@ -251,7 +404,9 @@ func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // Merge 把多个说话人并入一个目标（声纹页「手动合并」：纠正 ASR 把同人拆成多个说话人）。
 // 源说话人的全部转写段（跨所有 session）改指目标 → 删源行 + sidecar 移除源向量。
-// 目标向量不动（MVP 不重算，沿用其既有声纹；与 stage「已命中不增量更新」一致）。
+// 声纹样本**累加不覆盖**（2026-08-26 需求）：源的样本行全部迁挂到目标（source=merge），
+// 目标代表向量按「目标样本 + 迁入样本」聚合重算（均值+L2）后更新 FAISS——
+// 合并前的两份声纹都保留，代表的区分度只增不减。
 func (h *SpeakerHandler) Merge(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SourceIDs []string `json:"source_ids"`
@@ -282,7 +437,15 @@ func (h *SpeakerHandler) Merge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无可合并的源（source_ids 不能为空或只含 target）", http.StatusBadRequest)
 		return
 	}
-	// 先 sidecar 移除源向量（段此时还没改指，移除不影响读名）；DB 段改指 + 删源事务。
+	// 样本行先迁挂到目标（在删源说话人**之前**——源行删了就找不到归属了）。失败即中止，
+	// 不留「源删了但样本没迁」的半合并。
+	if h.SpeakerEmbeddings != nil {
+		if _, err := h.SpeakerEmbeddings.MigrateToSpeakerExt(r.Context(), h.Speakers.DB, targetID, srcIDs); err != nil {
+			http.Error(w, "声纹样本迁移失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	// sidecar 移除源向量（段此时还没改指，移除不影响读名）；DB 段改指 + 删源事务。
 	for _, sid := range srcIDs {
 		_ = h.Voiceprint.Remove(r.Context(), sid)
 	}
@@ -290,6 +453,14 @@ func (h *SpeakerHandler) Merge(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// 目标代表向量按迁入后的全部样本聚合重算 + 更新 FAISS（Remove 在 recompute 里做）。
+	// 失败仅报错不回滚合并（段已改指；代表向量可用再追加/重算修复，DB 样本行是完整真值）。
+	if h.SpeakerEmbeddings != nil {
+		if err := h.recomputeVoiceprint(r.Context(), targetID); err != nil {
+			http.Error(w, "合并后聚合重算失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, map[string]any{"ok": true, "merged_segments": merged, "removed_speakers": len(srcIDs)})
 }
@@ -487,6 +658,14 @@ func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "声纹索引写入失败，请重试", http.StatusInternalServerError)
 		return
 	}
+	// 首条样本落库（备注标注来源段，便于在声纹页辨认这条是怎么来的；失败仅 log 非致命，同 Enroll）
+	if h.SpeakerEmbeddings != nil {
+		note := "来自转写段：" + fmt.Sprintf("%.1fs", float64(seg.EndMS-seg.StartMS)/1000)
+		e := &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: float32BlobAPI(vec), SampleCount: 1, Source: "manual", Note: &note}
+		if err := h.SpeakerEmbeddings.Create(r.Context(), e); err != nil {
+			log.Printf("[speaker] 段录入后样本行落库失败 speaker=%s: %v", sp.ID, err)
+		}
+	}
 	// 把该段所属说话人在本会话的全部段一并改判到新录入的说话人（口径见函数注释）。
 	// 走到这里 speaker 已成功登记+入索引：改判失败只返回错误、不回滚新说话人（它是有效声纹，
 	// 用户可用换人下拉补救；不留孤儿）。
@@ -601,6 +780,188 @@ func (h *SpeakerHandler) MergeSegments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "merged_count": len(picked), "keeper_id": keeper.ID.String()})
 }
 
+// ---- 多条声纹样本（2026-08-26 需求：一个人可录多条，各带备注/创建时间） ----
+
+// ListEmbeddings 某说话人的声纹样本列表（新录在前）。向量不外泄，仅元数据。
+func (h *SpeakerHandler) ListEmbeddings(w http.ResponseWriter, r *http.Request) {
+	if h.SpeakerEmbeddings == nil {
+		http.Error(w, "多条声纹功能未装配", http.StatusNotImplemented)
+		return
+	}
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	entries, err := h.SpeakerEmbeddings.ListBySpeaker(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"embeddings": toEmbeddingViews(entries)})
+}
+
+func toEmbeddingViews(entries []repo.SpeakerEmbedding) []embeddingView {
+	out := make([]embeddingView, 0, len(entries))
+	for _, e := range entries {
+		note := ""
+		if e.Note != nil {
+			note = *e.Note
+		}
+		out = append(out, embeddingView{
+			ID: e.ID.String(), Note: note, Source: e.Source,
+			SampleCount: e.SampleCount, CreatedAt: e.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	return out
+}
+
+// AddEmbedding 给既有说话人**追加**一条声纹样本（multipart：file 必填、note 可选）。
+// 追加后聚合重算代表向量（均值+L2）并更新 FAISS——多条声纹让代表更稳，而不是覆盖。
+func (h *SpeakerHandler) AddEmbedding(w http.ResponseWriter, r *http.Request) {
+	if h.SpeakerEmbeddings == nil {
+		http.Error(w, "多条声纹功能未装配", http.StatusNotImplemented)
+		return
+	}
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	sp, err := h.Speakers.Get(r.Context(), id)
+	if err != nil {
+		http.Error(w, "说话人不存在", http.StatusNotFound)
+		return
+	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "解析失败: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "缺少 file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	note := strings.TrimSpace(r.FormValue("note"))
+	vec, err := h.embedUploaded(r.Context(), file)
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	e := &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: float32BlobAPI(vec),
+		SampleCount: 1, Source: "manual"}
+	if note != "" {
+		e.Note = &note
+	}
+	if err := h.SpeakerEmbeddings.Create(r.Context(), e); err != nil {
+		http.Error(w, "样本保存失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// 聚合重算（含 FAISS 更新）；失败返回错误——样本行已落库，代表向量可用「再追加/重算」修复
+	if err := h.recomputeVoiceprint(r.Context(), sp.ID); err != nil {
+		http.Error(w, "聚合重算失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "embedding": toEmbeddingViews([]repo.SpeakerEmbedding{*e})[0]})
+}
+
+// embedUploaded 落盘上传流 → 转码 wav16k → 提向量（Enroll/AddEmbedding 共用）。
+func (h *SpeakerHandler) embedUploaded(ctx context.Context, file io.Reader) ([]float32, error) {
+	dir := filepath.Join(h.DataDir, "enroll")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("存储目录创建失败: %w", err)
+	}
+	sid := ids.New()
+	src := filepath.Join(dir, sid.String()+"-add.wav")
+	wav16 := filepath.Join(dir, sid.String()+"-add-16k.wav")
+	defer os.Remove(src)
+	defer os.Remove(wav16)
+	out, err := os.Create(src)
+	if err != nil {
+		return nil, fmt.Errorf("文件创建失败: %w", err)
+	}
+	if _, err := io.Copy(out, file); err != nil {
+		out.Close()
+		return nil, fmt.Errorf("文件写入失败: %w", err)
+	}
+	out.Close()
+	if err := transcodeEnroll(src, wav16); err != nil {
+		return nil, fmt.Errorf("转码失败: %w", err)
+	}
+	vec, err := h.Voiceprint.Embed(ctx, wav16)
+	if err != nil || len(vec) != 256 {
+		msg := "声纹提取失败"
+		if err != nil {
+			msg += ": " + err.Error()
+		}
+		return nil, errors.New(msg)
+	}
+	return vec, nil
+}
+
+// UpdateEmbeddingNote 改某条样本的备注。body {note}；空串 = 清空备注。
+func (h *SpeakerHandler) UpdateEmbeddingNote(w http.ResponseWriter, r *http.Request) {
+	if h.SpeakerEmbeddings == nil {
+		http.Error(w, "多条声纹功能未装配", http.StatusNotImplemented)
+		return
+	}
+	_, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	eid, err := ids.ParseID(chi.URLParam(r, "eid"))
+	if err != nil {
+		http.Error(w, "invalid embedding id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Note string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	var note *string
+	if s := strings.TrimSpace(req.Note); s != "" {
+		note = &s
+	}
+	if err := h.SpeakerEmbeddings.UpdateNote(r.Context(), eid, note); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// DeleteEmbedding 删单条声纹样本 + 聚合重算代表。允许删到最后一条（此时说话人
+// 不再有声纹、FAISS 移除——名字与段归属保留，可再追加新样本恢复）。
+func (h *SpeakerHandler) DeleteEmbedding(w http.ResponseWriter, r *http.Request) {
+	if h.SpeakerEmbeddings == nil {
+		http.Error(w, "多条声纹功能未装配", http.StatusNotImplemented)
+		return
+	}
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	eid, err := ids.ParseID(chi.URLParam(r, "eid"))
+	if err != nil {
+		http.Error(w, "invalid embedding id", http.StatusBadRequest)
+		return
+	}
+	if err := h.SpeakerEmbeddings.Delete(r.Context(), eid); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := h.recomputeVoiceprint(r.Context(), id); err != nil {
+		http.Error(w, "聚合重算失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // MatchPreview 试匹配预览（录音页「这段像谁」）：上传音频 → 转码 wav16k → sidecar /embed →
 // /search → 返回最匹配说话人 + 余弦相似度 + 阈值 + 是否命中。纯只读（不登记、不入库），
 // 便于用户在录入前看「这段音频和已有声纹库的匹配度」。低于阈值也回最接近的候选 + 相似度。
@@ -653,25 +1014,29 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 	if threshold == 0 {
 		threshold = 0.8
 	}
-	// 列全部 active 说话人，用其灾备 BLOB(与 FAISS 同向量) 逐个算余弦匹配度——
-	// 返回全库按相似度降序（不止 top-1），便于看「这段像库里的每一个谁、各多像」。
+	// 列全部 active 说话人，按**多向量**模型算匹配度：每人 = 与其任意一条声纹样本的
+	// 最高余弦（感冒/哑嗓变体命中任一即命中），返回全库按相似度降序（不止 top-1），
+	// 便于看「这段像库里的每一个谁、各多像」。
 	list, err := h.Speakers.List(r.Context())
 	if err != nil {
 		http.Error(w, "声纹库读取失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	lib := libraryWithEntries(list, loadSpeakerEntries(r.Context(), h.SpeakerEmbeddings, list))
 	type matchItem struct {
 		SpeakerID  string  `json:"speaker_id"`
 		Name       string  `json:"name"`
 		Similarity float64 `json:"similarity"`
 	}
-	items := make([]matchItem, 0, len(list))
-	for _, sp := range list {
-		emb, ok := decodeEmbedding(sp.Embedding)
-		if !ok || len(emb) != 256 {
-			continue // 无灾备向量或维度异常的跳过
+	items := make([]matchItem, 0, len(lib))
+	for _, lv := range lib {
+		best := 0.0
+		for _, v := range lv.vecs {
+			if s := cosine(vec, v); s > best {
+				best = s
+			}
 		}
-		items = append(items, matchItem{SpeakerID: sp.ID.String(), Name: sp.Name, Similarity: cosine(vec, emb)})
+		items = append(items, matchItem{SpeakerID: lv.id, Name: lv.name, Similarity: best})
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Similarity > items[j].Similarity })
 	// 命中判定与 speaker stage 同一套两级规则（voiceprint.Matched）：强命中 top1≥阈值；
@@ -737,29 +1102,63 @@ type voiceMatch struct {
 	Similarity float64 `json:"similarity"`
 }
 
-// libVoice 预解码的库内声纹（speaker.Embedding BLOB → []float32，一次解码全库复用，
-// 避免逐段重复 decode）。
+// libVoice 预解码的库内说话人（多向量模型，2026-08-26）：vecs = 该人全部声纹样本向量
+// （感冒/哑嗓/变声等变体各自一条）；无样本行时回退聚合代表（speaker.embedding）单向量。
 type libVoice struct {
 	id   string
 	name string
-	vec  []float32
+	vecs [][]float32
 }
 
-// decodeLibrary 把全量说话人的灾备 BLOB 预解码成向量列表（无有效向量的跳过）。
-func decodeLibrary(all []repo.Speaker) []libVoice {
+// libraryWithEntries 构建多向量检索库：每人展开其全部样本向量（与该人任意一条的最高
+// 余弦即该人的匹配分——变体命中任一即命中）；样本表未装配/读取失败/该人无样本行时
+// 回退聚合代表（旧数据兼容）。与 sidecar 多向量 /search 语义一致。
+func libraryWithEntries(all []repo.Speaker, entries map[ids.ID][]repo.SpeakerEmbedding) []libVoice {
 	lib := make([]libVoice, 0, len(all))
 	for _, sp := range all {
-		if emb, ok := decodeEmbedding(sp.Embedding); ok && len(emb) == 256 {
-			lib = append(lib, libVoice{id: sp.ID.String(), name: sp.Name, vec: emb})
+		lv := libVoice{id: sp.ID.String(), name: sp.Name}
+		if es := entries[sp.ID]; len(es) > 0 {
+			for _, e := range es {
+				if v, ok := decodeEmbedding(e.Embedding); ok && len(v) == 256 {
+					lv.vecs = append(lv.vecs, v)
+				}
+			}
+		}
+		if len(lv.vecs) == 0 {
+			// 回退：无样本行（旧数据/bootstrap 前）用聚合代表——保证库非空说话人不因
+			// 样本缺失而从匹配里消失
+			if v, ok := decodeEmbedding(sp.Embedding); ok && len(v) == 256 {
+				lv.vecs = append(lv.vecs, v)
+			}
+		}
+		if len(lv.vecs) > 0 {
+			lib = append(lib, lv)
 		}
 	}
 	return lib
 }
 
-// topVoiceMatchesVec 计算某声纹向量与库（预解码列表）的 top-N 相似，降序。
-// 用灾备 BLOB 的余弦（与 FAISS 同向量，结果等价，同 MatchPreview）。
-// 用途：timeline 详情按「每个 ASR 段」展示声纹相似度——一句话可能混多个人，
-// 段级 top-1 不是归属说话人即该段可能被 ASR 切错/归错，可据此换人或切换声纹。
+// loadSpeakerEntries 批量取说话人的样本行（nil repo / 出错返回 nil，调用方走聚合回退）。
+func loadSpeakerEntries(ctx context.Context, embs *repo.SpeakerEmbeddingRepo, all []repo.Speaker) map[ids.ID][]repo.SpeakerEmbedding {
+	if embs == nil {
+		return nil
+	}
+	spIDs := make([]ids.ID, len(all))
+	for i := range all {
+		spIDs[i] = all[i].ID
+	}
+	entries, err := embs.ListBySpeakers(ctx, spIDs)
+	if err != nil {
+		log.Printf("[speaker] 样本向量加载失败（回退聚合代表）: %v", err)
+		return nil
+	}
+	return entries
+}
+
+// topVoiceMatchesVec 计算查询向量与库（多向量）的 top-N **说话人**，按
+// 「与该人任意一条样本的最高余弦」降序——多向量模型的核心：感冒期录音撞上感冒期
+// 样本即高分命中，不被其他变体（或聚合均值）稀释。
+// 用途：timeline 详情段级 top-3 + timeline 列表「整段声纹」+ 试匹配预览（同一套语义）。
 // vec 非 256 维返回 nil。
 func topVoiceMatchesVec(lib []libVoice, vec []float32, n int) []voiceMatch {
 	if len(vec) != 256 || len(lib) == 0 {
@@ -767,7 +1166,13 @@ func topVoiceMatchesVec(lib []libVoice, vec []float32, n int) []voiceMatch {
 	}
 	ms := make([]voiceMatch, 0, len(lib))
 	for _, lv := range lib {
-		ms = append(ms, voiceMatch{SpeakerID: lv.id, Name: lv.name, Similarity: cosine(vec, lv.vec)})
+		best := 0.0
+		for _, v := range lv.vecs {
+			if s := cosine(vec, v); s > best {
+				best = s
+			}
+		}
+		ms = append(ms, voiceMatch{SpeakerID: lv.id, Name: lv.name, Similarity: best})
 	}
 	sort.SliceStable(ms, func(i, j int) bool { return ms[i].Similarity > ms[j].Similarity })
 	if len(ms) > n {

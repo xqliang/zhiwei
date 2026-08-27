@@ -7,10 +7,11 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 func TestTopicCRUD(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func TestTopicCRUD(t *testing.T) {
 }
 
 func TestTopicListActiveLimit(t *testing.T) {
-	db, _ := NewDB(TestDSN(t))
+	db, _ := NewDB(repotest.DSN(t))
 	r := &TopicRepo{DB: db}
 	ctx := context.Background()
 
@@ -80,7 +81,7 @@ func TestTopicListActiveLimit(t *testing.T) {
 // TestTopicCreateExtTx 验证 CreateExt 的 *sqlx.Tx 命名插入路径：
 // ROLLBACK 后数据不可见，COMMIT 后可见（Task 4/5 事务写入依赖此行为）。
 func TestTopicCreateExtTx(t *testing.T) {
-	db, _ := NewDB(TestDSN(t))
+	db, _ := NewDB(repotest.DSN(t))
 	r := &TopicRepo{DB: db}
 	ctx := context.Background()
 
@@ -119,7 +120,7 @@ func TestTopicCreateExtTx(t *testing.T) {
 // 事务开启后能看到其他事务已 COMMIT 的同名行（extract commit 查重依赖此行为），
 // 同一事务内插入的行自身可见，无命中返回 nil。
 func TestTopicFindActiveByNameExt(t *testing.T) {
-	db, _ := NewDB(TestDSN(t))
+	db, _ := NewDB(repotest.DSN(t))
 	r := &TopicRepo{DB: db}
 	ctx := context.Background()
 
@@ -166,7 +167,7 @@ WHERE user_id = 1 AND name = ? AND status IN ('active','suggested')`, "事务查
 // TestTopicListWithCounts 验证带计数列表：active memory / confirmed todo 计数正确，
 // dismissed 主题不出现。memory/todo DAO 尚未实现，测试里用原生 SQL 直插。
 func TestTopicListWithCounts(t *testing.T) {
-	db, _ := NewDB(TestDSN(t))
+	db, _ := NewDB(repotest.DSN(t))
 	r := &TopicRepo{DB: db}
 	ctx := context.Background()
 
@@ -219,7 +220,7 @@ func TestTopicListWithCounts(t *testing.T) {
 // 与非事务版等价：改名、改状态落库，Get 读回一致。确认闸门 topic_rename/confirm/dismiss
 // 落库依赖这两个方法（与 Proposals.Resolve 同事务）。
 func TestTopicUpdateNameStatusExt(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

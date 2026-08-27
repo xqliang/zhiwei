@@ -17,6 +17,7 @@ import (
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/repotest"
 )
 
 // TestSessionListIsolation 验证 C2：库里有 user2 的 session，登录 user1 请求
@@ -24,7 +25,7 @@ import (
 // 先造 user2 行再造 user1 行，使 user1 的 id 最大（ORDER BY s.id DESC 稳居首），
 // 正向断言不受默认 LIMIT 50 与脏库影响。
 func TestSessionListIsolation(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func TestSessionListIsolation(t *testing.T) {
 // 造一个 topic 并把 user1/user2 各一条记忆挂上去，用 ?topic_id= 过滤把候选收窄到这两条
 // （规避默认 LIMIT 50 + 脏库），断言 user1 只看到自己那条。
 func TestMemoryListIsolation(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +159,7 @@ func TestMemoryListIsolation(t *testing.T) {
 // TestTopicDeleteIsolation 验证 I2：user1 删 user2 的 topic → 404，且 user2 的 topic 仍在。
 // 不泄漏存在性（返回 404 而非 403），归属校验拦在 repo 越权删除之前。
 func TestTopicDeleteIsolation(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +193,7 @@ func TestTopicDeleteIsolation(t *testing.T) {
 
 // TestTodoDeleteIsolation 验证 I2：user1 删 user2 的 todo → 404，且 user2 的 todo 仍在。
 func TestTodoDeleteIsolation(t *testing.T) {
-	db, err := repo.NewDB(repo.TestDSN(t))
+	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

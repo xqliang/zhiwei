@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/repotest"
 )
 
 // idPtr 把 ids.ID 值转成 *ids.ID 指针（测试构造 Memory{SessionID:...} 用）。
@@ -18,7 +19,7 @@ func idPtr(id ids.ID) *ids.ID { return &id }
 // conversation_id 落库、session_id 为 NULL（可空 session_id 往返关键断言），
 // 且 safe-mode SELECT * 不因 conversation_id 列报 missing destination。
 func TestInsertConversationRoundTrip(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +74,7 @@ func TestInsertConversationRoundTrip(t *testing.T) {
 // TestDeleteByConversationIdempotent 验证按会话幂等删除：
 // 插 2 条对话记忆 + 各挂一个 memory_topic，先删关联再删主表后均空；重复删不报错。
 func TestDeleteByConversationIdempotent(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +137,7 @@ func TestDeleteByConversationIdempotent(t *testing.T) {
 // TestSessionPathRegression 验证录音路径不回归：
 // InsertExt 传 SessionID=&sid 后 Get，session_id 非空且等于 sid、conversation_id 为 NULL。
 func TestSessionPathRegression(t *testing.T) {
-	db, err := NewDB(TestDSN(t))
+	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
