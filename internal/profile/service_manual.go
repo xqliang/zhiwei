@@ -169,19 +169,19 @@ func (s *Service) ManualUpdatePerson(ctx context.Context, userID int64, id ids.I
 
 // ManualSetPersonStatus 人物状态流转（删除=dismissed 等）。
 //
-// F5（spec §13）删除级联：status=="dismissed"（删除人物）时，在**同一事务**内把该人物六个平面
-// （属性/关系/大事记/指标/周期/活动）上所有 active|pending 的行一并置 dismissed——否则名册里人物
+// F5（spec §13）删除级联：status=="dismissed"（删除人物）时，在**同一事务**内把该人物七个平面
+// （属性/关系/大事记/指标/周期/活动/宠物）上所有 active|pending 的行一并置 dismissed——否则名册里人物
 // 虽已隐藏，其平面行仍会进抽取闸门/确认队列，留下孤儿引用。**另加**反向边补充（P6）：他人指向
 // 本人的 pending 关系边也一并级联 dismissed（active 反向边刻意保留，那是对端画像）。级联时行
 // dismiss 前的状态记入 pre_dismiss_status 列（active|pending），供下面的恢复级联回查。
 // 级联行数**汇总**记入 person 的 change_log Note（一行审计），**不逐平面、不逐行**写审计条目，
 // 这是刻意取舍：
 //   - 删除是「显式用户意图」——用户已明确要清掉这个人的全部画像数据，无需逐行留痕来还原意图；
-//   - 六平面可能有成百上千行（metric/activity 是测点流），逐行写审计会让 change_log 爆量、得不偿失。
+//   - 七平面可能有成百上千行（metric/activity 是测点流），逐行写审计会让 change_log 爆量、得不偿失。
 //     故只在 person 行上留一条带级联计数的汇总审计（可审计「删除时清了多少」，够用）。
 //
 // 恢复级联（000015 迁移后支持）：**从 dismissed 流转为其他状态**（即恢复，典型 active）时，
-// 在同一事务内把六平面上 pre_dismiss_status 非空的级联行翻回原状态并清标记，**以及**被
+// 在同一事务内把七平面上 pre_dismiss_status 非空的级联行翻回原状态并清标记，**以及**被
 // DismissPendingReverseExt 清掉的指向本人的反向 pending 边（RestoreReverseArchivedExt）——
 // 手动删除的行 pre_dismiss_status 为 NULL，天然不被误恢复。非 dismissed 之间的流转
 // （如 active→pending）不触发级联。
@@ -202,10 +202,10 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, userID int64, id id
 		return err
 	}
 
-	// 默认审计备注；删除/恢复时改写为带六平面级联计数的汇总备注。
+	// 默认审计备注；删除/恢复时改写为带七平面级联计数的汇总备注。
 	note := "人物状态流转"
 	if status == "dismissed" {
-		// 六平面各自把该人物的 active/pending 行级联置 dismissed（只动活跃态，终态不动——见各 repo
+		// 七平面各自把该人物的 active/pending 行级联置 dismissed（只动活跃态，终态不动——见各 repo
 		// DismissAllByPersonExt 注释）。全部在本事务内执行，任一步失败经 defer Rollback 整体回滚，
 		// 不会留下「人物已删除但平面未级联」的中间态。
 		nAttr, err := s.Attributes.DismissAllByPersonExt(ctx, tx, id)
@@ -232,6 +232,10 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, userID int64, id id
 		if err != nil {
 			return err
 		}
+		nPet, err := s.Pets.DismissAllByPersonExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
 		// 反向边补充（F5，P6）：他人指向本人（related_person_id=id）的 pending 关系边——删除本人后
 		// 这些「待确认关系」成了确认队列里的孤儿噪声，一并级联 dismissed。active 反向边刻意不动
 		// （那是对端人物画像，删除不替对端做主——见 DismissPendingReverseExt 注释）。行数并入汇总审计。
@@ -239,10 +243,10 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, userID int64, id id
 		if err != nil {
 			return err
 		}
-		note = fmt.Sprintf("人物删除：级联 dismissed 属性 %d/关系 %d/大事记 %d/指标 %d/周期 %d/活动 %d 行；反向 pending 关系边 %d 条",
-			nAttr, nRel, nEvt, nMet, nCyc, nAct, nRevRel)
+		note = fmt.Sprintf("人物删除：级联 dismissed 属性 %d/关系 %d/大事记 %d/指标 %d/周期 %d/活动 %d/宠物 %d 行；反向 pending 关系边 %d 条",
+			nAttr, nRel, nEvt, nMet, nCyc, nAct, nPet, nRevRel)
 	} else if p.Status == "dismissed" {
-		// 恢复级联：六平面各自把删除时被级联置 dismissed 的行翻回原状态（pre_dismiss_status）。
+		// 恢复级联：七平面各自把删除时被级联置 dismissed 的行翻回原状态（pre_dismiss_status）。
 		// 手动删的行没有标记、保持 dismissed。同样全在本事务内，任一步失败整体回滚。
 		nAttr, err := s.Attributes.RestoreArchivedExt(ctx, tx, id)
 		if err != nil {
@@ -268,14 +272,18 @@ func (s *Service) ManualSetPersonStatus(ctx context.Context, userID int64, id id
 		if err != nil {
 			return err
 		}
+		nPet, err := s.Pets.RestoreArchivedExt(ctx, tx, id)
+		if err != nil {
+			return err
+		}
 		// 反向边对称恢复（P6 反向级联的逆）：被清掉的反向 pending 边翻回 pending，
 		// 重新回到确认队列。
 		nRevRel, err := s.Relationships.RestoreReverseArchivedExt(ctx, tx, id)
 		if err != nil {
 			return err
 		}
-		note = fmt.Sprintf("人物恢复：级联恢复 属性 %d/关系 %d/大事记 %d/指标 %d/周期 %d/活动 %d 行；反向 pending 关系边 %d 条（手动删过的行不恢复）",
-			nAttr, nRel, nEvt, nMet, nCyc, nAct, nRevRel)
+		note = fmt.Sprintf("人物恢复：级联恢复 属性 %d/关系 %d/大事记 %d/指标 %d/周期 %d/活动 %d/宠物 %d 行；反向 pending 关系边 %d 条（手动删过的行不恢复）",
+			nAttr, nRel, nEvt, nMet, nCyc, nAct, nPet, nRevRel)
 	}
 
 	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
@@ -909,6 +917,171 @@ func (s *Service) ManualDeleteActivity(ctx context.Context, userID int64, id ids
 	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
 		PersonID: a.PersonID, EntityKind: "activity", EntityID: &id,
 		ChangeType: "delete", ChangedBy: "user", OldValue: snap(a.Activity),
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ---- pet 平面手动 CRUD（宠物）----
+
+// validatePetInput 手动录入校验：name 必填；birthday 必填且可解析（YYYY-MM-DD）——
+// 手动路径的生日是用户明确录入的准确日期（设计决策：LLM 可估算，手动必须给对）。
+func validatePetInput(name, birthday string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("宠物名不能为空")
+	}
+	if _, ok := parseEventAt(birthday); !ok {
+		return fmt.Errorf("birthday 必填且须为 YYYY-MM-DD")
+	}
+	return nil
+}
+
+// buildManualPetRow 手动路径行构造：active/manual/conf=1.0；可空串 trim 空→nil；
+// species 归一；birthday 必可解析（validatePetInput 已校验）。
+func buildManualPetRow(userID int64, personID ids.ID, name, nickname, species, breed, gender, ageText, birthday, likes string) *repo.PersonPet {
+	row := &repo.PersonPet{
+		UserID: userID, PersonID: personID,
+		Name:     strings.TrimSpace(name),
+		Nickname: trimToPtr(nickname),
+		Species:  NormalizeSpecies(species),
+		Breed:    trimToPtr(breed),
+		Gender:   trimToPtr(gender),
+		AgeText:  trimToPtr(ageText),
+		Likes:    trimToPtr(likes),
+		Confidence: 1.0, EpistemicType: "observed", Source: "manual", Status: "active",
+	}
+	if t, ok := parseEventAt(birthday); ok {
+		row.Birthday = &t
+	}
+	return row
+}
+
+// ManualAddPet 手动加宠物（active/manual conf=1.0 + create 审计）。同名 active 已存在 →
+// 报错（改信息走编辑）；birthday 必填 YYYY-MM-DD。自持事务：BeginTxx → ManualAddPetExt → Commit。
+func (s *Service) ManualAddPet(ctx context.Context, userID int64, personID ids.ID,
+	name, nickname, species, breed, gender, ageText, birthday, likes string) (*repo.PersonPet, error) {
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	row, err := s.ManualAddPetExt(ctx, tx, userID, personID, name, nickname, species, breed, gender, ageText, birthday, likes)
+	if err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualAddPetExt 是 ManualAddPet 的事务版（对齐其他平面的 Ext 惯例，供 agent 等并入事务）。
+func (s *Service) ManualAddPetExt(ctx context.Context, tx *sqlx.Tx, userID int64, personID ids.ID,
+	name, nickname, species, breed, gender, ageText, birthday, likes string) (*repo.PersonPet, error) {
+	if err := validatePetInput(name, birthday); err != nil {
+		return nil, err
+	}
+	// IDOR 校验：确认 person 归属登录用户。
+	if p, err := s.Persons.Get(ctx, userID, personID); err != nil {
+		return nil, err
+	} else if p == nil {
+		return nil, ErrNotFound
+	}
+	// 同名单值：已有 active 同名宠物 → 拒绝（改信息走编辑；两行同名 active 会破坏单值语义）。
+	if ex, err := s.Pets.FindActiveByNameExt(ctx, tx, personID, strings.TrimSpace(name)); err != nil {
+		return nil, err
+	} else if ex != nil {
+		return nil, ErrPetNameExists
+	}
+	row := buildManualPetRow(userID, personID, name, nickname, species, breed, gender, ageText, birthday, likes)
+	if err := s.Pets.CreateExt(ctx, tx, row); err != nil {
+		return nil, err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: personID, EntityKind: "pet", EntityID: &row.ID,
+		ChangeType: "create", ChangedBy: "user", NewValue: snap(petSummary(row)),
+		Confidence: fp(1.0),
+	}); err != nil {
+		return nil, err
+	}
+	return row, nil
+}
+
+// ManualUpdatePet 手动编辑宠物 = 整只替换：旧行 superseded、新行全量（supersedes_id 指向旧行）。
+// 改名允许，但新名与另一只 active 宠物撞名 → ErrPetNameExists（单值语义）。birthday 必填。
+func (s *Service) ManualUpdatePet(ctx context.Context, userID int64, petID ids.ID,
+	name, nickname, species, breed, gender, ageText, birthday, likes string) (*repo.PersonPet, error) {
+	if err := validatePetInput(name, birthday); err != nil {
+		return nil, err
+	}
+	old, err := s.Pets.Get(ctx, petID)
+	if err != nil {
+		return nil, err
+	}
+	if old == nil {
+		return nil, ErrNotFound
+	}
+	// IDOR 校验：子表行 Get 无 user 过滤，按行的 person_id 确认归属登录用户。
+	if p, err := s.Persons.Get(ctx, userID, old.PersonID); err != nil {
+		return nil, err
+	} else if p == nil {
+		return nil, ErrNotFound
+	}
+	// 改名撞名：新名已有**其他** active 宠物（本行的旧 active 行不算——它即将被替换）。
+	newName := strings.TrimSpace(name)
+	if ex, err := s.Pets.FindActiveByNameExt(ctx, s.DB, old.PersonID, newName); err != nil {
+		return nil, err
+	} else if ex != nil && ex.ID != old.ID {
+		return nil, ErrPetNameExists
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Pets.SetStatusExt(ctx, tx, old.ID, "superseded"); err != nil {
+		return nil, err
+	}
+	row := buildManualPetRow(userID, old.PersonID, name, nickname, species, breed, gender, ageText, birthday, likes)
+	row.SupersedesID = &old.ID
+	if err := s.Pets.CreateExt(ctx, tx, row); err != nil {
+		return nil, err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: old.PersonID, EntityKind: "pet", EntityID: &row.ID,
+		ChangeType: "update", ChangedBy: "user",
+		OldValue: snap(petSummary(old)), NewValue: snap(petSummary(row)),
+		Confidence: fp(1.0),
+	}); err != nil {
+		return nil, err
+	}
+	return row, tx.Commit()
+}
+
+// ManualDeletePet 手动删宠物 → dismissed + delete 审计。
+func (s *Service) ManualDeletePet(ctx context.Context, userID int64, id ids.ID) error {
+	pet, err := s.Pets.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if pet == nil {
+		return ErrNotFound
+	}
+	// IDOR 校验：按行的 person_id 确认归属登录用户。
+	if p, err := s.Persons.Get(ctx, userID, pet.PersonID); err != nil {
+		return err
+	} else if p == nil {
+		return ErrNotFound
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.Pets.SetStatusExt(ctx, tx, id, "dismissed"); err != nil {
+		return err
+	}
+	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+		PersonID: pet.PersonID, EntityKind: "pet", EntityID: &id,
+		ChangeType: "delete", ChangedBy: "user", OldValue: snap(petSummary(pet)),
 	}); err != nil {
 		return err
 	}

@@ -229,3 +229,128 @@ func TestApplyPetFactsViaParse(t *testing.T) {
 		t.Fatalf("B reaffirm 不应加行: before=%d after=%d", len(before), len(after))
 	}
 }
+
+// TestManualPetCRUD 覆盖手动路径：加（birthday 必填）、同名添加报错、
+// 编辑整只替换（旧行 superseded）、改名撞名 ErrPetNameExists、删除 dismissed、
+// 确认流 pending→active（含 supersedes 替换）、放弃流。
+func TestManualPetCRUD(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	oid := ownerID(t, svc)
+
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_pet WHERE person_id = ?`, oid.Int64())
+		_, _ = svc.DB.ExecContext(cctx, `DELETE FROM person_change_log WHERE person_id = ? AND entity_kind = 'pet'`, oid.Int64())
+	})
+
+	// 手动加：birthday 缺失报错。
+	if _, err := svc.ManualAddPet(ctx, 1, oid, "小花", "", "猫", "布偶", "母", "3岁", "", "不吃鱼"); err == nil {
+		t.Fatal("birthday 缺失应报错")
+	}
+	// 手动加：正常。
+	p1, err := svc.ManualAddPet(ctx, 1, oid, "小花", "花花", "猫", "布偶", "母", "3岁", "2023-04-01", "不吃鱼")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1.Status != "active" || p1.Source != "manual" || p1.Confidence != 1.0 {
+		t.Fatalf("手动行应为 active/manual/1.0: %+v", p1)
+	}
+	if p1.Birthday == nil {
+		t.Fatal("手动行 birthday 必填")
+	}
+	// 手动加：同名已存在 → 报错（改信息走编辑）。
+	if _, err := svc.ManualAddPet(ctx, 1, oid, "小花", "", "猫", "", "", "", "2023-04-01", ""); err == nil {
+		t.Fatal("同名手动添加应报错")
+	}
+
+	// 手动加第二只（验证多只并存）。
+	p2, err := svc.ManualAddPet(ctx, 1, oid, "豆豆", "", "狗", "柯基", "公", "2岁", "2024-06-15", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 编辑 p2：改 likes + 改名旺财 → 整只替换（旧行 superseded、新行 supersedes 指向旧行）。
+	p2b, err := svc.ManualUpdatePet(ctx, 1, p2.ID, "旺财", "", "狗", "柯基", "公", "2岁", "2024-06-15", "爱跑圈")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p2b.ID == p2.ID || p2b.SupersedesID == nil || *p2b.SupersedesID != p2.ID {
+		t.Fatalf("编辑应整只替换: %+v", p2b)
+	}
+	if p2b.Likes == nil || *p2b.Likes != "爱跑圈" || p2b.Name != "旺财" {
+		t.Fatalf("编辑后字段异常: %+v", p2b)
+	}
+	old, err := svc.Pets.Get(ctx, p2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Status != "superseded" {
+		t.Fatalf("旧行应 superseded: %+v", old)
+	}
+
+	// 编辑 p1 改名为旺财 → 撞 p2b 的 active 同名 → ErrPetNameExists。
+	_, err = svc.ManualUpdatePet(ctx, 1, p1.ID, "旺财", "", "猫", "", "", "", "2023-04-01", "")
+	if err != ErrPetNameExists {
+		t.Fatalf("改名撞名应 ErrPetNameExists: %v", err)
+	}
+
+	// 确认流：低置信合并 pending（经 ApplyFacts），ConfirmPending 后替换现值。
+	sess := ids.New()
+	_, err = svc.ApplyFacts(ctx, sess, 1, []Fact{
+		{Plane: "pet", Subject: Subject{Kind: "self"}, PetName: "小花", Likes: "爱吃鱼罐头",
+			Confidence: 0.5, EpistemicType: "observed", SegmentIDs: []ids.ID{9}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pend, err := svc.Pets.FindByNaturalKeyExt(ctx, svc.DB, sess, oid, "小花")
+	if err != nil || pend == nil {
+		t.Fatalf("pending 行缺失: %v %+v", err, pend)
+	}
+	if err := svc.ConfirmPending(ctx, 1, "pet", pend.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Pets.Get(ctx, pend.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "active" || got.Likes == nil || *got.Likes != "爱吃鱼罐头" {
+		t.Fatalf("确认后应 active 且含合并字段: %+v", got)
+	}
+	prev, err := svc.Pets.Get(ctx, p1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev.Status != "superseded" {
+		t.Fatalf("被替换的现值应 superseded: %+v", prev)
+	}
+
+	// 放弃流：DismissPending。
+	sess2 := ids.New()
+	_, err = svc.ApplyFacts(ctx, sess2, 1, []Fact{
+		{Plane: "pet", Subject: Subject{Kind: "self"}, PetName: "小花", Likes: "另一个建议",
+			Confidence: 0.4, EpistemicType: "observed", SegmentIDs: []ids.ID{10}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pend2, err := svc.Pets.FindByNaturalKeyExt(ctx, svc.DB, sess2, oid, "小花")
+	if err != nil || pend2 == nil {
+		t.Fatalf("pending2 行缺失: %v %+v", err, pend2)
+	}
+	if err := svc.DismissPending(ctx, 1, "pet", pend2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := svc.Pets.Get(ctx, pend2.ID); g.Status != "dismissed" {
+		t.Fatalf("放弃后应 dismissed: %+v", g)
+	}
+
+	// 删除：ManualDeletePet。
+	if err := svc.ManualDeletePet(ctx, 1, p2b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := svc.Pets.Get(ctx, p2b.ID); g.Status != "dismissed" {
+		t.Fatalf("删除后应 dismissed: %+v", g)
+	}
+}
