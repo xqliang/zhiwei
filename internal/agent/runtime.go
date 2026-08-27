@@ -19,6 +19,8 @@ type AgentRuntime interface {
 	// Prompt 向某会话发一条用户消息，返回该轮的事件流 channel（轮次结束时关闭）。
 	// 同一 sessionID 复用会话记忆；channel 关闭表示该轮 idle。
 	Prompt(ctx context.Context, sessionID, text string) (<-chan Event, error)
+	// Warm 预热运行时：提前 spawn 子进程 + 完成握手，使首个 Prompt 不必现等启动。幂等（已启动则 no-op）。
+	Warm(ctx context.Context) error
 	// Cancel 请求 dsh 优雅中止 sessionID 进行中的一轮（用户点「停止」）。
 	// 语义：发 session/cancel RPC 让 dsh 内部 agent.cancel({kind:'user'}) 优雅 abort
 	// → 产生 turn/end reason.kind=aborted + session.status:idle → readLoop 收到 idle 后
@@ -295,6 +297,10 @@ func (r *dshRuntime) call(ctx context.Context, method string, params any) (json.
 		return resp.result, resp.err
 	}
 }
+
+// Warm 预热：提前 spawn dsh 子进程 + initialize 握手（幂等，已启动则直接返回）。
+// 供服务启动后后台预热 owner 运行时，把 node 启动 + 握手的一次性延迟从「首条消息」挪到启动阶段。
+func (r *dshRuntime) Warm(ctx context.Context) error { return r.ensureStarted(ctx) }
 
 // Prompt 向某会话发一条用户消息，返回该轮的事件流 channel（轮次结束时由 readLoop 关闭）。
 //

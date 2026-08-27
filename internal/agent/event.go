@@ -64,6 +64,22 @@ func (e Event) Reasoning() string {
 	return s
 }
 
+// ChunkDelta 从 assistant/chunk 事件提取流式增量：blockType（reasoning|text 等）+ text 增量。
+// dsh 在最终 assistant/message 之前会先流式发一串 chunk（逐 token 增量），供前端「边想边现」。
+// 块开始/结束等无文本的边界 chunk 返回空 text，调用方据此跳过。
+func (e Event) ChunkDelta() (blockType, text string) {
+	var d struct {
+		Chunk struct {
+			BlockType string `json:"blockType"`
+			Text      string `json:"text"`
+		} `json:"chunk"`
+	}
+	if json.Unmarshal(e.Data, &d) != nil {
+		return "", ""
+	}
+	return d.Chunk.BlockType, d.Chunk.Text
+}
+
 // ToolCall 从 tool/call 事件提取 {callId, name, arguments(JSON 字符串)}。
 func (e Event) ToolCall() (callID, name, arguments string) {
 	var d struct {

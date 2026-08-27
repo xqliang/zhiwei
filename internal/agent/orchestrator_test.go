@@ -264,6 +264,75 @@ func TestOrchestratorEmitsReasoning(t *testing.T) {
 	}
 }
 
+// TestOrchestratorStreamsChunks 锁定流式：assistant/chunk 事件按 blockType 推 reasoning_delta /
+// answer_delta 瞬时帧（不落库），最终 assistant/message 才落权威 reasoning + text 行。
+func TestOrchestratorStreamsChunks(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convRepo := &repo.AgentConversationRepo{DB: db}
+	msgRepo := &repo.AgentMessageRepo{DB: db}
+	ctx := t.Context()
+	conv := &repo.AgentConversation{Title: "流式增量"}
+	if err := convRepo.Create(ctx, conv); err != nil {
+		t.Fatal(err)
+	}
+
+	mk := func(bt, txt string) Event {
+		d, _ := json.Marshal(map[string]any{"chunk": map[string]any{"type": "delta", "blockType": bt, "text": txt}})
+		return Event{Type: EvAssistantChunk, Data: d}
+	}
+	msg, _ := json.Marshal(map[string]any{"message": map[string]any{"content": []map[string]any{
+		{"type": "reasoning", "text": "想想。"},
+		{"type": "text", "text": "答复。"},
+	}}})
+	fake := &FakeRuntime{Script: [][]Event{{
+		mk("reasoning", "想"), mk("reasoning", "想。"),
+		mk("text", "答"), mk("text", "复。"),
+		{Type: EvAssistantMessage, Data: msg},
+	}}}
+	orch := NewOrchestrator(rtFor(fake), convRepo, msgRepo)
+
+	var frames []StreamFrame
+	if _, err := orch.RunTurnStream(ctx, conv, "hi", func(f StreamFrame) { frames = append(frames, f) }); err != nil {
+		t.Fatalf("RunTurnStream: %v", err)
+	}
+	// 应有 reasoning_delta / answer_delta 帧，且都在最终 reasoning/assistant 帧之前。
+	var rd, ad, finalR, finalA int
+	rd, ad, finalR, finalA = 0, 0, -1, -1
+	for i, f := range frames {
+		switch f.Type {
+		case "reasoning_delta":
+			rd++
+		case "answer_delta":
+			ad++
+		case "reasoning":
+			if finalR < 0 {
+				finalR = i
+			}
+		case "assistant":
+			if finalA < 0 {
+				finalA = i
+			}
+		}
+	}
+	if rd != 2 || ad != 2 {
+		t.Errorf("应有 2 reasoning_delta + 2 answer_delta, got rd=%d ad=%d", rd, ad)
+	}
+	if finalR < 0 || finalA < 0 {
+		t.Fatalf("应有最终 reasoning + assistant 帧, got %+v", frames)
+	}
+	// 落库：只有 user + reasoning + text 三条（delta 不落库）。
+	msgs, err := msgRepo.ListByConversation(ctx, 1, conv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("应落 3 条(user/reasoning/text)，delta 不落库，got %d: %+v", len(msgs), msgs)
+	}
+}
+
 // TestProfileContextHead 锁定上下文头组装（D2）：有 owner + 关键属性时，头含当天日期 + owner
 // 前缀 + 关键属性值；无 Persons / nil 接收者返回 ""（调用方据此不注入）。
 // TestOrchestratorCancel 锁定 Orchestrator.Cancel：透传到所选运行时的 Cancel，且 sessionID =

@@ -2298,13 +2298,13 @@ const app = createApp({
     const agentTurns = computed(() => {
       const turns = [];
       let cur = null;
-      const open = (userText, ts) => { cur = { userText: userText || '', thinking: [], answers: [], startAt: ts || null, answerAt: null, lastAt: ts || null, hasPending: false }; turns.push(cur); };
+      const open = (userText, ts) => { cur = { userText: userText || '', thinking: [], answers: [], proposals: [], startAt: ts || null, answerAt: null, lastAt: ts || null }; turns.push(cur); };
       for (const m of agentMessages.value) {
         if (m.kind === 'text' && m.role === 'user') { open(m.content, m.ts); continue; }
         if (!cur) open('', m.ts); // 无前导 user（历史开头/异常）：起一个匿名轮兜底
         if (m.kind === 'text' && m.role === 'assistant') { cur.answers.push(m); if (cur.answerAt == null) cur.answerAt = m.ts || null; }
-        else cur.thinking.push(m); // tool / reasoning
-        if (m.kind === 'tool' && m.proposal && m.proposal.status === 'pending') cur.hasPending = true; // 有待确认提议 → 默认展开，别藏起操作
+        else if (m.kind === 'tool' && m.proposal) cur.proposals.push(m); // 写-提议确认卡：移出思考块，放答复区显眼处（需用户操作）
+        else cur.thinking.push(m); // reasoning + 读工具 + 提议骨架（结果未到、proposal 未定）
         if (m.ts) cur.lastAt = m.ts;
       }
       return turns;
@@ -2323,9 +2323,13 @@ const app = createApp({
     function fmtDur(sec) { return sec < 60 ? sec + ' 秒' : Math.floor(sec / 60) + ' 分 ' + (sec % 60) + ' 秒'; }
     // 折叠状态：按轮次序号存显式布尔；未设置时默认「进行中展开、已结束折叠」。
     const agentTurnExpanded = reactive({});
-    function isTurnOpen(ti) { if (ti in agentTurnExpanded) return agentTurnExpanded[ti]; const t = agentTurns.value[ti]; return turnRunning(ti) || !!(t && t.hasPending); }
+    // 流式草稿：当前进行中一轮的「边想边现」缓冲——reasoning_delta / answer_delta 增量帧实时累积到此，
+    // 最终权威帧(reasoning/assistant)到达时清空并由落库项接管。仅当前活轮有效。
+    const streamDraft = reactive({ reasoning: '', answer: '' });
+    function resetStreamDraft() { streamDraft.reasoning = ''; streamDraft.answer = ''; }
+    function isTurnOpen(ti) { return (ti in agentTurnExpanded) ? agentTurnExpanded[ti] : turnRunning(ti); }
     function toggleTurn(ti) { agentTurnExpanded[ti] = !isTurnOpen(ti); }
-    function resetAgentView() { for (const k of Object.keys(agentTurnExpanded)) delete agentTurnExpanded[k]; }
+    function resetAgentView() { for (const k of Object.keys(agentTurnExpanded)) delete agentTurnExpanded[k]; resetStreamDraft(); }
 
 
     // ---- XSS 安全的极简 Markdown（先转义所有 HTML，再只注入自己生成的白名单标签）----
@@ -2593,6 +2597,7 @@ const app = createApp({
         // 重建去重集合：历史里每条消息 id 都算「已渲染」，广播器重放同 id 的帧会被跳过。
         agentSeen = new Set();
         for (const m of msgs) if (m.id) agentSeen.add(m.id);
+        resetStreamDraft(); // 重连/重载：清空流式草稿，靠重放/历史重建
         agentMessages.value = mapAgentHistory(msgs);
         scrollAgentBottom();
       } catch (e) { showError(e); }
@@ -2610,12 +2615,14 @@ const app = createApp({
       const now = Date.now();
       switch (f.type) {
         case 'turn_active': agentTyping.value = true; break; // 重连到进行中的一轮：恢复「思考中」态
+        case 'reasoning_delta': agentTyping.value = true; streamDraft.reasoning += (f.content || ''); break; // 思考逐字流
+        case 'answer_delta': agentTyping.value = true; streamDraft.answer += (f.content || ''); break;         // 答复逐字流
         case 'user': agentMessages.value.push({ kind: 'text', role: 'user', content: f.content, msg_id: f.msg_id, ts: now }); break;
-        case 'assistant': agentMessages.value.push({ kind: 'text', role: 'assistant', content: f.content, msg_id: f.msg_id, ts: now }); break;
-        case 'reasoning': agentMessages.value.push({ kind: 'reasoning', role: 'assistant', content: f.content, msg_id: f.msg_id, ts: now }); break;
+        case 'assistant': agentMessages.value.push({ kind: 'text', role: 'assistant', content: f.content, msg_id: f.msg_id, ts: now }); streamDraft.answer = ''; break;       // 权威答复到达 → 清答复草稿
+        case 'reasoning': agentMessages.value.push({ kind: 'reasoning', role: 'assistant', content: f.content, msg_id: f.msg_id, ts: now }); streamDraft.reasoning = ''; break; // 权威思考到达 → 清思考草稿
         case 'tool_call': agentMessages.value.push(makeToolItem(f.call_id, f.name, f.args, now)); break;
         case 'tool_result': fillToolResult(agentMessages.value, f.call_id, f.content, f.is_error); break;
-        case 'turn_end': agentTyping.value = false; if (f.error) agentTurnError.value = f.error; break;
+        case 'turn_end': agentTyping.value = false; resetStreamDraft(); if (f.error) agentTurnError.value = f.error; break;
       }
       scrollAgentBottom();
     }
@@ -2918,7 +2925,7 @@ const app = createApp({
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       // 问知微（流式对话）
       agentConversations, agentConvId, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
-      agentTurns, turnRunning, agentThinkingGap, turnDuration, fmtDur, isTurnOpen, toggleTurn,
+      agentTurns, turnRunning, agentThinkingGap, turnDuration, fmtDur, isTurnOpen, toggleTurn, streamDraft,
       loadAgentConversations, newAgentConversation, selectAgentConversation, sendAgentMessage, stopAgentMessage,
       confirmProposal, dismissProposal,
       renderMarkdown, reportSections, prettyJSON,

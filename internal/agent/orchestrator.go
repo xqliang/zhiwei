@@ -112,6 +112,18 @@ func (o *Orchestrator) runTurn(ctx context.Context, conv *repo.AgentConversation
 	}
 	for ev := range events {
 		switch ev.Type {
+		case EvAssistantChunk:
+			// 流式增量：按 blockType 推瞬时 delta 帧（不落库——最终 assistant/message 才落权威版本）。
+			// 供前端「边想边现」：reasoning 逐字进思考块、text 逐字进成形答复气泡。
+			bt, delta := ev.ChunkDelta()
+			if delta == "" {
+				continue // 块开始/结束等无文本的边界 chunk
+			}
+			ftype := "answer_delta"
+			if bt == "reasoning" {
+				ftype = "reasoning_delta"
+			}
+			send(StreamFrame{Type: ftype, Content: delta})
 		case EvAssistantMessage:
 			// 思考内容（reasoning）：先于答复文本推出并落库（kind=reasoning），供前端「思考过程」块
 			// 展示与刷新后恢复。lastText 只认 kind=="text"（见 appendMsg），故 reasoning 不会被当作最终答复。

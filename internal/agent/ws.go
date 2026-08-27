@@ -16,7 +16,7 @@ import (
 // StreamFrame 是 WS 下行的一帧，也是 Orchestrator 流式回调(emit)的载荷。
 // 一轮对话按事件顺序推送：user → (reasoning | assistant | tool_call | tool_result)* → turn_end。
 type StreamFrame struct {
-	Type    string `json:"type"`               // user|reasoning|assistant|tool_call|tool_result|turn_active|turn_end
+	Type    string `json:"type"`               // user|reasoning|assistant|reasoning_delta|answer_delta|tool_call|tool_result|turn_active|turn_end
 	MsgID   string `json:"msg_id,omitempty"`   // 落库后的 agent_message id（前端去重/引用用）
 	Content string `json:"content,omitempty"`  // user 文本 / assistant 文本 / tool_result 文本
 	CallID  string `json:"call_id,omitempty"`  // tool_call / tool_result 关联的调用 id

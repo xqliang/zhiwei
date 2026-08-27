@@ -380,6 +380,17 @@ func main() {
 			Conversations: agentConvs,
 			Messages:      agentMsgs,
 		})
+		// 预热 owner(id=1) 的 dsh 边车：启动后后台 spawn + initialize 握手，把 node 启动的一次性
+		// 延迟从「首条消息」挪到启动阶段（best-effort：失败仅记日志，首条消息会自行懒启动）。
+		go func() {
+			wctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := agentPool.Get(1).Warm(wctx); err != nil {
+				log.Printf("[agent] 预热 dsh 边车失败(首条消息将现启动): %v", err)
+			} else {
+				log.Println("[agent] dsh 边车已预热")
+			}
+		}()
 		// 对话转记忆端点：POST /api/agent/conversations/{cid}/extract（幂等，直连 Ark LLM）。
 		agent.RegisterExtract(r, memory.ConversationExtractDeps{
 			DB: db, AgentMessages: agentMsgs, Topics: topics, Memories: memories, MemoryTopics: memoryTopics,

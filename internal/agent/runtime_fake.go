@@ -34,6 +34,9 @@ type FakeRuntime struct {
 	openTurns     map[string]chan Event // Block 模式下未关闭的 turn channel：sessionID -> ch
 }
 
+// Warm 测试实现：no-op（无子进程可 spawn）。
+func (f *FakeRuntime) Warm(_ context.Context) error { return nil }
+
 func (f *FakeRuntime) Prompt(_ context.Context, sessionID, text string) (<-chan Event, error) {
 	f.LastSessionID, f.LastText = sessionID, text
 	if f.Err != nil {

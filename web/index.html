@@ -317,6 +317,9 @@
   .think-reasoning { font-size: var(--fs-sm); color: var(--text-2); background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent-2); border-radius: 6px; padding: 8px 11px; line-height: 1.6; word-break: break-word; }
   .think-reasoning p { margin: 0 0 6px; }
   .think-reasoning p:last-child { margin-bottom: 0; }
+  /* 流式草稿：末尾闪烁光标，提示正在逐字生成 */
+  .think-reasoning.streaming::after { content: '▍'; margin-left: 1px; animation: zwblink 1s step-end infinite; color: var(--accent-2); }
+  @keyframes zwblink { 50% { opacity: 0; } }
 
   /* 输入区：贴底，多行自适应 */
   .agent-input { display: flex; gap: 8px; align-items: flex-end; margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
@@ -781,44 +784,8 @@
                     <!-- 工具卡：未出结果=骨架「进行中」；出结果按工具类型渲染；is_error 走错误样式。
                          若结果是写-提议（propose_*）则改渲染「确认卡」（见下 m.proposal 分支）。 -->
                     <div v-else-if="m.kind==='tool'" class="chat-msg assistant">
-                <!-- 写操作提议 → 确认卡：old→new diff + 理由 + [确认]/[放弃]（值全走 {{ }} 自动转义） -->
-                <div v-if="m.proposal" class="confirm-card" :class="{applied: m.proposal.status==='applied', dismissed: m.proposal.status==='dismissed' || m.proposal.status==='expired'}">
-                  <div class="confirm-head">
-                    <span class="confirm-title">✍️ {{ m.pview.title }}</span>
-                    <span v-if="m.proposal.status==='applied'" class="badge done">已确认</span>
-                    <span v-else-if="m.proposal.status==='dismissed'" class="badge dismissed">已放弃</span>
-                    <span v-else-if="m.proposal.status==='expired'" class="badge dismissed">已过期</span>
-                    <span v-else class="badge pending">待确认</span>
-                  </div>
-                  <!-- 目标身份（改的是哪条；仅当变更字段本身不含 title/name 时显示，避免与 diff 重复） -->
-                  <div v-if="m.pview.showContext" class="confirm-context">「{{ m.pview.contextLabel }}」</div>
-                  <!-- 忽略/确认类：一句话效果 -->
-                  <div v-if="m.pview.isEffect" class="confirm-effect">{{ m.pview.effect }}</div>
-                  <!-- 逐字段 diff（新建=仅新值；改动=旧 → 新） -->
-                  <div v-else-if="m.pview.rows.length" class="confirm-body">
-                    <div v-for="(row, ri) in m.pview.rows" :key="ri" class="confirm-row">
-                      <span class="confirm-field">{{ row.field }}</span>
-                      <template v-if="row.hasOld">
-                        <span class="confirm-old">{{ row.old || '（空）' }}</span>
-                        <span class="confirm-arrow">→</span>
-                      </template>
-                      <span class="confirm-new">{{ row.new || '（空）' }}</span>
-                    </div>
-                  </div>
-                  <!-- agent 给用户看的理由 -->
-                  <div v-if="m.proposal.rationale" class="confirm-rationale">理由：{{ m.proposal.rationale }}</div>
-                  <!-- 操作出错：行内提示，按钮保留可重试 -->
-                  <div v-if="m.proposalError" class="confirm-error">操作失败：{{ m.proposalError }}</div>
-                  <!-- 确认/放弃（仅 pending 时；终态只留徽标） -->
-                  <div v-if="m.proposal.status==='pending'" class="confirm-actions">
-                    <button class="btn primary" style="padding:7px 18px" :disabled="m.proposalBusy" @click="confirmProposal(m)">
-                      <span v-if="m.proposalBusy" class="spinner"></span>确认
-                    </button>
-                    <button class="btn mini" :disabled="m.proposalBusy" @click="dismissProposal(m)">放弃</button>
-                  </div>
-                </div>
-                <!-- 读工具 → 常规工具卡 -->
-                <div v-else class="tool-card" :class="{error: m.result && m.result.is_error, pending: !m.result}">
+                <!-- 思考块内只放读工具卡；写-提议确认卡已移到答复区 turn.proposals 显眼展示 -->
+                <div class="tool-card" :class="{error: m.result && m.result.is_error, pending: !m.result}">
                   <div class="tool-head">
                     <span v-if="!m.result" class="spinner"></span>
                     <span class="tool-name">🔧 {{ m.label }}</span>
@@ -888,11 +855,49 @@
                 </div>
               </div>
                   </template>
+                  <!-- 流式思考草稿（边想边现）：仅当前活轮；权威 reasoning 帧到达后清空 -->
+                  <div v-if="turnRunning(ti) && streamDraft.reasoning" class="think-reasoning streaming" v-html="renderMarkdown(streamDraft.reasoning)"></div>
                 </div>
+              </div>
+              <!-- 流式答复草稿（边答边现）：权威 assistant 帧到达后清空 -->
+              <div v-if="turnRunning(ti) && streamDraft.answer" class="chat-msg assistant">
+                <div class="bubble assistant"><span v-html="renderMarkdown(streamDraft.answer)"></span></div>
               </div>
               <!-- 助手答复气泡（在思考块之外，突出最终答复） -->
               <div v-for="(m, ai) in turn.answers" :key="'a'+ai" class="chat-msg assistant">
                 <div class="bubble assistant"><span v-html="renderMarkdown(m.content)"></span></div>
+              </div>
+              <!-- 写-提议确认卡：移出思考块，答复区显眼展示（需用户确认/放弃，不该被折叠藏起） -->
+              <div v-for="(m, pi) in turn.proposals" :key="'p'+pi" class="chat-msg assistant">
+                <div class="confirm-card" :class="{applied: m.proposal.status==='applied', dismissed: m.proposal.status==='dismissed' || m.proposal.status==='expired'}">
+                  <div class="confirm-head">
+                    <span class="confirm-title">✍️ {{ m.pview.title }}</span>
+                    <span v-if="m.proposal.status==='applied'" class="badge done">已确认</span>
+                    <span v-else-if="m.proposal.status==='dismissed'" class="badge dismissed">已放弃</span>
+                    <span v-else-if="m.proposal.status==='expired'" class="badge dismissed">已过期</span>
+                    <span v-else class="badge pending">待确认</span>
+                  </div>
+                  <div v-if="m.pview.showContext" class="confirm-context">「{{ m.pview.contextLabel }}」</div>
+                  <div v-if="m.pview.isEffect" class="confirm-effect">{{ m.pview.effect }}</div>
+                  <div v-else-if="m.pview.rows.length" class="confirm-body">
+                    <div v-for="(row, ri) in m.pview.rows" :key="ri" class="confirm-row">
+                      <span class="confirm-field">{{ row.field }}</span>
+                      <template v-if="row.hasOld">
+                        <span class="confirm-old">{{ row.old || '（空）' }}</span>
+                        <span class="confirm-arrow">→</span>
+                      </template>
+                      <span class="confirm-new">{{ row.new || '（空）' }}</span>
+                    </div>
+                  </div>
+                  <div v-if="m.proposal.rationale" class="confirm-rationale">理由：{{ m.proposal.rationale }}</div>
+                  <div v-if="m.proposalError" class="confirm-error">操作失败：{{ m.proposalError }}</div>
+                  <div v-if="m.proposal.status==='pending'" class="confirm-actions">
+                    <button class="btn primary" style="padding:7px 18px" :disabled="m.proposalBusy" @click="confirmProposal(m)">
+                      <span v-if="m.proposalBusy" class="spinner"></span>确认
+                    </button>
+                    <button class="btn mini" :disabled="m.proposalBusy" @click="dismissProposal(m)">放弃</button>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -2298,6 +2303,6 @@
   </template>
 </div>
 
-<script src="/app/app.2203afd3.js"></script>
+<script src="/app/app.dbc3e7bb.js"></script>
 </body>
 </html>

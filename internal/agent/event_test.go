@@ -57,3 +57,23 @@ func TestReasoningEmptyWhenNoReasoningBlock(t *testing.T) {
 		t.Errorf("Reasoning()=%q, want 空串", got)
 	}
 }
+
+// TestChunkDelta 锁定流式增量抽取：assistant/chunk 的 data.chunk.{blockType,text} 被 ChunkDelta()
+// 取出——reasoning 块与 text 块各自路由；无 text 的边界 chunk（如块开始/结束）返回空 text 供调用方跳过。
+func TestChunkDelta(t *testing.T) {
+	// reasoning 增量
+	r, _ := json.Marshal(map[string]any{"chunk": map[string]any{"type": "delta", "blockType": "reasoning", "index": 0, "text": "嗯，"}})
+	if bt, txt := (Event{Type: EvAssistantChunk, Data: r}).ChunkDelta(); bt != "reasoning" || txt != "嗯，" {
+		t.Errorf("reasoning chunk: bt=%q txt=%q, want reasoning/嗯，", bt, txt)
+	}
+	// text（答复）增量
+	x, _ := json.Marshal(map[string]any{"chunk": map[string]any{"type": "delta", "blockType": "text", "index": 1, "text": "你好"}})
+	if bt, txt := (Event{Type: EvAssistantChunk, Data: x}).ChunkDelta(); bt != "text" || txt != "你好" {
+		t.Errorf("text chunk: bt=%q txt=%q, want text/你好", bt, txt)
+	}
+	// 无 text 的边界 chunk → 空 text
+	b, _ := json.Marshal(map[string]any{"chunk": map[string]any{"type": "block-start", "blockType": "reasoning", "index": 0}})
+	if _, txt := (Event{Type: EvAssistantChunk, Data: b}).ChunkDelta(); txt != "" {
+		t.Errorf("边界 chunk 应无 text, got %q", txt)
+	}
+}
