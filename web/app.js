@@ -2716,6 +2716,8 @@ const app = createApp({
     const agentCfgSoul = ref('');
     const agentCfgSaving = ref(false);
     const agentCfgSaved = ref(false);
+    const agentCfgSystemPrompt = ref(''); // 进程级 persona（只读）
+    const agentCfgOwnerHead = ref('');    // 每轮注入的 owner 画像头（只读，动态）
     // 注入预览：与后端 AssemblePersona 同格式，随输入实时更新（保存后即后端每轮注入的内容）。
     const agentCfgPreview = computed(() => {
       const id = (agentCfgIdentity.value || '').trim();
@@ -2725,11 +2727,25 @@ const app = createApp({
       if (soul) b.push('你的性格与说话风格：\n' + soul);
       return b.join('\n\n');
     });
+    // 整体 prompt 组装（只读预览）：system(进程级) + 每轮注入前缀(人设+owner画像) + 动态检索说明 + 你的问题。
+    const agentCfgFullPrompt = computed(() => {
+      const seg = [];
+      seg.push('【System · 进程级人设（不可编辑）】\n' + (agentCfgSystemPrompt.value || '（未设置）'));
+      const inject = [];
+      if (agentCfgPreview.value) inject.push(agentCfgPreview.value);
+      if (agentCfgOwnerHead.value) inject.push(agentCfgOwnerHead.value);
+      seg.push('【每轮注入到你消息之前的背景】\n' + (inject.length ? inject.join('\n\n') : '（无额外注入）'));
+      seg.push('【每轮还会按你的提问动态检索相关记忆/时间线作为背景（此处不预览）】');
+      seg.push('【最后拼上你的实际问题】');
+      return seg.join('\n\n──────────\n\n');
+    });
     async function loadAgentConfig() {
       try {
         const d = await api('GET', '/api/agent/config');
         agentCfgIdentity.value = (d && d.identity) || '';
         agentCfgSoul.value = (d && d.soul) || '';
+        agentCfgSystemPrompt.value = (d && d.system_prompt) || '';
+        agentCfgOwnerHead.value = (d && d.owner_head) || '';
         agentCfgSaved.value = false;
       } catch (e) { showError(e); }
     }
@@ -2962,7 +2978,7 @@ const app = createApp({
       agentConversations, agentConvId, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
       agentTurns, turnRunning, agentThinkingGap, turnDuration, fmtDur, isTurnOpen, toggleTurn, streamDraft,
       loadAgentConversations, newAgentConversation, selectAgentConversation, sendAgentMessage, stopAgentMessage,
-      agentCfgIdentity, agentCfgSoul, agentCfgSaving, agentCfgSaved, agentCfgPreview, loadAgentConfig, saveAgentConfig,
+      agentCfgIdentity, agentCfgSoul, agentCfgSaving, agentCfgSaved, agentCfgPreview, agentCfgSystemPrompt, agentCfgOwnerHead, agentCfgFullPrompt, loadAgentConfig, saveAgentConfig,
       confirmProposal, dismissProposal,
       renderMarkdown, reportSections, prettyJSON,
       // 报告（日报/周报 + 话题状态）

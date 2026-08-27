@@ -943,11 +943,16 @@
         <span v-if="agentCfgSaved" class="muted" style="font-size:var(--fs-sm); color:var(--ok)">✓ 已保存，下条消息生效</span>
       </div>
 
-      <!-- 组装预览：每轮实际注入到 prompt 前的文本 -->
-      <div style="margin-top:20px">
-        <div class="muted" style="font-size:var(--fs-xs); font-weight:700; text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px">每轮注入预览</div>
-        <pre class="chat-code" v-if="agentCfgPreview">{{ agentCfgPreview }}</pre>
-        <div v-else class="muted" style="font-size:var(--fs-sm)">（未配置：使用默认进程级人设，不额外注入）</div>
+      <!-- 进程级 system prompt（只读，不可编辑）：dsh 的 persona 基座 -->
+      <div style="margin-top:22px">
+        <div class="muted" style="font-size:var(--fs-xs); font-weight:700; text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px">进程级 SYSTEM PROMPT（只读）</div>
+        <pre class="chat-code">{{ agentCfgSystemPrompt || '（未设置）' }}</pre>
+      </div>
+
+      <!-- 整体 prompt 组装（只读）：system 基座 + 每轮注入(人设+owner画像) + 动态检索说明 + 你的问题，方便看全貌 -->
+      <div style="margin-top:16px">
+        <div class="muted" style="font-size:var(--fs-xs); font-weight:700; text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px">整体 PROMPT 组装（只读，看全貌）</div>
+        <pre class="chat-code">{{ agentCfgFullPrompt }}</pre>
       </div>
     </div>
   </div>
@@ -2337,6 +2342,6 @@
   </template>
 </div>
 
-<script src="/app/app.c5071bcf.js"></script>
+<script src="/app/app.1e4a53dd.js"></script>
 </body>
 </html>

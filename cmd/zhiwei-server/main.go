@@ -390,6 +390,8 @@ func main() {
 			Conversations: agentConvs,
 			Messages:      agentMsgs,
 			Configs:       agentConfigs,
+			SystemPrompt:  cfg.DSHSystemPrompt, // 只读展示：进程级 persona
+			Ctx:           orch.Ctx,            // 同一份 ProfileContext：算 owner 画像头供整体 prompt 预览
 		})
 		// 预热 owner(id=1) 的 dsh 边车：启动后后台 spawn + initialize 握手，把 node 启动的一次性
 		// 延迟从「首条消息」挪到启动阶段（best-effort：失败仅记日志，首条消息会自行懒启动）。

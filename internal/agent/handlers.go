@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -17,6 +18,8 @@ type AgentHandler struct {
 	Conversations *repo.AgentConversationRepo
 	Messages      *repo.AgentMessageRepo
 	Configs       *repo.AgentConfigRepo // 人设配置（identity/soul，全局单份）；nil 时人设端点返回空/不可写
+	SystemPrompt  string                // 进程级 system prompt（DSH_SYSTEM_PROMPT/persona，只读展示用）
+	Ctx           *ProfileContext       // 与 orchestrator 同一份：getConfig 据此算 owner 画像头（动态注入预览）
 	Hub           *turnHub              // 每会话轮次广播器（nil 时由 RegisterAgent 惰性初始化）
 }
 
@@ -48,25 +51,30 @@ func reqUserID(r *http.Request) (int64, bool) {
 	return id.Int64(), ok
 }
 
-// getConfig 返回全局人设（identity/soul）+ 组装预览（每轮实际注入到 prompt 前的文本）。
+// getConfig 返回全局人设（identity/soul）+ 组装预览，以及只读的整体 prompt 组成：
+// system_prompt（进程级 persona，不可编辑）、owner_head（每轮注入的 owner 画像头，动态）。
 func (h *AgentHandler) getConfig(w http.ResponseWriter, r *http.Request) {
-	if _, ok := reqUserID(r); !ok {
+	uid, ok := reqUserID(r)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	if h.Configs == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"identity": "", "soul": "", "preview": ""})
-		return
+	resp := map[string]any{"identity": "", "soul": "", "preview": "", "system_prompt": h.SystemPrompt}
+	if h.Configs != nil {
+		c, err := h.Configs.Get(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		resp["identity"], resp["soul"] = c.Identity, c.Soul
+		resp["preview"] = AssemblePersona(c.Identity, c.Soul)
+		resp["updated_at"] = c.UpdatedAt
 	}
-	c, err := h.Configs.Get(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+	// owner 画像头（每轮动态注入的背景；无 Ctx/owner/数据时为空串）——供「整体 prompt」只读预览。
+	if h.Ctx != nil {
+		resp["owner_head"] = h.Ctx.Head(r.Context(), uid, time.Now())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"identity": c.Identity, "soul": c.Soul,
-		"preview": AssemblePersona(c.Identity, c.Soul), "updated_at": c.UpdatedAt,
-	})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // putConfig 保存全局人设。每轮注入，下一条消息即时生效（不重启 dsh）。
