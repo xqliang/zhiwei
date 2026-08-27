@@ -21,6 +21,7 @@ import (
 // 读操作直连 repo；一切变更走 profile.Service（保证审计+事务只实现一次）。
 type PersonHandler struct {
 	Persons       *repo.PersonRepo
+	Speakers      *repo.SpeakerRepo // 详情页按 speaker_id 查声纹名（Speakers 为 nil 时降级返回空名）
 	Attributes    *repo.PersonAttributeRepo
 	Relationships *repo.PersonRelationshipRepo
 	Events        *repo.PersonEventRepo
@@ -206,6 +207,7 @@ type metricPoint struct {
 
 type personDetailResp struct {
 	Person           *repo.Person              `json:"person"`
+	SpeakerName      string                    `json:"speaker_name,omitempty"` // 绑定声纹的显示名（详情页徽标直接展示，免前端二次查表）
 	Groups           []attrGroup               `json:"groups"`
 	Relationships    []repo.PersonRelationship `json:"relationships"`
 	Events           []repo.PersonEvent        `json:"events"`
@@ -317,8 +319,16 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pending += cp + ap
+	// 绑定声纹的显示名（详情页徽标用）。声纹行被删时 Get 返回 ErrNoRows，
+	// 降级为空串——悬挂外键只影响徽标展示，不该让整个详情 500。
+	speakerName := ""
+	if p.SpeakerID != nil && h.Speakers != nil {
+		if sp, err := h.Speakers.Get(r.Context(), *p.SpeakerID); err == nil && sp != nil {
+			speakerName = sp.Name
+		}
+	}
 	writeJSON(w, personDetailResp{
-		Person: p, Groups: groups, Relationships: relShown, Events: evShown,
+		Person: p, SpeakerName: speakerName, Groups: groups, Relationships: relShown, Events: evShown,
 		Metrics: metricGroups, RecentSessionIDs: sids, PendingCount: pending,
 	})
 }

@@ -19,6 +19,9 @@ import (
 // ErrNotFound 目标行不存在（API 层映射 404）。
 var ErrNotFound = errors.New("记录不存在")
 
+// ErrPersonHasSpeaker 目标人物已绑定其他声纹（API 层映射 409；一人至多一声纹）。
+var ErrPersonHasSpeaker = errors.New("该人物已绑定其他声纹")
+
 // Service 是画像域的编排服务：pipeline profile stage 与 API（回填/确认/手动 CRUD）
 // 共用同一入口，保证「写必带审计 + 单事务 + 闸门」三件事只实现一次。
 type Service struct {

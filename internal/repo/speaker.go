@@ -62,7 +62,14 @@ func (r *SpeakerRepo) List(ctx context.Context) ([]Speaker, error) {
 
 // UpdateName 改说话人名（用户认领/重命名）。单行按 ID 原子写，天然并发安全。
 func (r *SpeakerRepo) UpdateName(ctx context.Context, id ids.ID, name string) error {
-	_, err := r.DB.ExecContext(ctx, `UPDATE speaker SET name = ? WHERE id = ?`, name, id.Int64())
+	return r.UpdateNameExt(ctx, r.DB, id, name)
+}
+
+// UpdateNameExt 是 UpdateName 的事务版：人物绑定/改名时把声纹名同步成人物名，
+// 与 person 写同事务（ext 传 *sqlx.Tx 即加入调用方事务，失败整体回滚不留中间态）。
+// 单行按 ID 原子写。
+func (r *SpeakerRepo) UpdateNameExt(ctx context.Context, ext ExecerContext, id ids.ID, name string) error {
+	_, err := ext.ExecContext(ctx, `UPDATE speaker SET name = ? WHERE id = ?`, name, id.Int64())
 	return err
 }
 

@@ -47,7 +47,90 @@ func (s *Service) ManualCreatePersonExt(ctx context.Context, tx *sqlx.Tx, userID
 	}); err != nil {
 		return nil, err
 	}
+	// 建档即绑声纹：同步声纹名 = 人物名（绑定不变式，见 syncSpeakerNameExt）
+	if err := s.syncSpeakerNameExt(ctx, tx, speakerID, p.DisplayName); err != nil {
+		return nil, err
+	}
 	return p, nil
+}
+
+// syncSpeakerNameExt 绑定不变式：声纹绑定人物后，speaker.name 跟随 person.display_name。
+// 时间线/转写段/抽取 prompt 各处直接显示 speaker.name，同步后无需逐处改成查 person 表。
+// 仅在「绑定/换绑/人物改名」时调用；解绑（speakerID=nil）不回改——历史名保留，回改反而
+// 会把已叫开的称呼抹掉。与人物写同事务执行，失败整体回滚，不留「人物已改、声纹没跟」的中间态。
+func (s *Service) syncSpeakerNameExt(ctx context.Context, tx *sqlx.Tx, speakerID *ids.ID, name string) error {
+	if speakerID == nil {
+		return nil
+	}
+	return s.Speakers.UpdateNameExt(ctx, tx, *speakerID, name)
+}
+
+// BindSpeakerToPerson 声纹侧关联管理（名册「关联/换绑/解绑」入口）：把声纹的归属设为
+// 目标人物（target=nil 即解绑）。与人物侧 PATCH /api/persons 的差别在语义：人物侧换的是
+// 「人物绑哪条声纹」，声纹已被**别人**占用则 409 拒绝；本方法是「声纹归哪个人物」，
+// **转移**语义——单事务内先清原持有人的绑定（person.speaker_id 有唯一键，不清必撞），
+// 再绑目标人物并同步声纹名=人物名（绑定不变式）。解绑不清声纹名（保留历史名）。
+func (s *Service) BindSpeakerToPerson(ctx context.Context, userID int64, speakerID ids.ID, target *ids.ID) error {
+	// 目标人物校验：归属登录用户（越权 404）+ 未绑其他声纹（一人至多一声纹，409）。
+	var tp *repo.Person
+	if target != nil {
+		var err error
+		tp, err = s.Persons.Get(ctx, userID, *target)
+		if err != nil {
+			return err
+		}
+		if tp == nil {
+			return ErrNotFound
+		}
+		if tp.SpeakerID != nil && *tp.SpeakerID != speakerID {
+			return fmt.Errorf("%w：「%s」", ErrPersonHasSpeaker, tp.DisplayName)
+		}
+	}
+	holder, err := s.Persons.GetBySpeaker(ctx, speakerID)
+	if err != nil {
+		return err
+	}
+	// 幂等：无目标且本就无人持有 / 目标即现持有人 → no-op。
+	if (target == nil && holder == nil) || (target != nil && holder != nil && holder.ID == tp.ID) {
+		return nil
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// ① 清原持有（解绑 or 转移的前半步）：只动 speaker_id，声纹名保留。
+	if holder != nil {
+		if err := s.Persons.UpdateExt(ctx, tx, holder.ID, holder.DisplayName, nil, holder.Summary); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: holder.ID, EntityKind: "person", EntityID: &holder.ID,
+			ChangeType: "update", ChangedBy: "user",
+			OldValue: snap("声纹绑定"), NewValue: snap("已解绑"),
+			Note: strPtr("声纹名册侧解除人物关联"),
+		}); err != nil {
+			return err
+		}
+	}
+	// ② 绑目标 + 声纹名同步为人物名（不变式）。
+	if target != nil {
+		if err := s.Persons.UpdateExt(ctx, tx, tp.ID, tp.DisplayName, &speakerID, tp.Summary); err != nil {
+			return err
+		}
+		if err := s.syncSpeakerNameExt(ctx, tx, &speakerID, tp.DisplayName); err != nil {
+			return err
+		}
+		if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
+			PersonID: tp.ID, EntityKind: "person", EntityID: &tp.ID,
+			ChangeType: "update", ChangedBy: "user",
+			OldValue: snap("未绑声纹"), NewValue: snap(tp.DisplayName),
+			Note: strPtr("声纹名册侧关联人物（声纹名已同步为人物名）"),
+		}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ManualUpdatePerson 手动编辑人物（改名/换绑声纹/改备注）。
@@ -65,6 +148,12 @@ func (s *Service) ManualUpdatePerson(ctx context.Context, userID int64, id ids.I
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := s.Persons.UpdateExt(ctx, tx, id, name, speakerID, summary); err != nil {
+		return err
+	}
+	// 绑定不变式同步：换绑/绑定时把新声纹名改成人物名；人物改名时连带改已绑声纹名
+	// （解绑传 nil → no-op，声纹名保留）。调用方（api/person.go Patch）传的是「终态」
+	// speakerID——不传即保留原绑定，故人物改名场景也会走到这里完成声纹联动。
+	if err := s.syncSpeakerNameExt(ctx, tx, speakerID, name); err != nil {
 		return err
 	}
 	old := snap(p.DisplayName)

@@ -1043,6 +1043,40 @@ const app = createApp({
       } catch (e) { showError(e); }
       finally { enrolling.value = false; }
     }
+    // ---------- 声纹名册的人物关联管理（关联/换绑/解绑/新建并关联） ----------
+    // 编辑态 { speakerId, personId, boundPersonId }：personId ''=解绑（须已有绑定）、
+    // '__new__'=新建人物并关联（人物名取当前声纹名）、其余=换绑到该人物。
+    const spPersonEdit = ref(null);
+    const spPersonSaving = ref(false);  // 防重复提交
+    // 可关联的人物：名册里未绑声纹的（已绑的走解绑后才能换人；后端唯一键兜底）。
+    const unboundPersons = computed(() => persons.value.filter(p => !p.speaker_id));
+    function startSpPersonEdit(sp) {
+      loadPersons(); // 声纹 tab 开着时人物 tab 可能没拉过名册，懒加载（已加载则缓存跳过）
+      spPersonEdit.value = { speakerId: sp.id, personId: sp.person_id || '', boundPersonId: sp.person_id || '' };
+    }
+    async function commitSpPersonEdit() {
+      const d = spPersonEdit.value;
+      if (!d || spPersonSaving.value) return;
+      spPersonSaving.value = true;
+      spPersonEdit.value = null;
+      try {
+        if (d.personId === '__new__') {
+          // 新建人物（暂不绑声纹）→ 经声纹侧转移端点绑上：两步而非一步，是因 POST /api/persons
+          // 对「已被人占用的声纹」回 409（占用保护），转移语义只在 speakers/{id}/person 上有。
+          const sp = allSpeakers.value.find(s => s.id === d.speakerId);
+          const np = await api('POST', '/api/persons', { display_name: sp ? sp.name : '未命名' });
+          await api('PATCH', '/api/speakers/' + d.speakerId + '/person', { person_id: np.id });
+        } else {
+          // ''=解绑 / 其余=转移到该人物：后端单事务清原持有人+绑目标+声纹名同步为人物名
+          await api('PATCH', '/api/speakers/' + d.speakerId + '/person', { person_id: d.personId });
+        }
+        await loadAllSpeakers(); // 名册刷新：sp.name 已同步为人物名、person_id/person_name 更新
+        await loadPersons();     // 人物名册的占用关系同步
+        notify('人物关联已更新', 2000);
+      } catch (e) { showError(e); } // 409（目标人物已被并发绑定其他声纹）等纯文本透传
+      finally { spPersonSaving.value = false; }
+    }
+
     // 改名：点 chip/名字的 ✎ 进入改名行；保存 PATCH /api/speakers/{id}，成功后重拉详情（面板名同步）+ 全量列表。
     // 说话人对象有两种来源：时间线面板的 detail.speakers 用 speaker_id 字段；声纹 tab 的 allSpeakers 用 id 字段。
     // 用 `sp.speaker_id || sp.id` 兼容两者（两者都是同一个 speaker 主键，只是响应结构里的字段名不同）。
@@ -1265,6 +1299,7 @@ const app = createApp({
     function closePersonDetail() {
       personDetail.value = null;
       renamingPerson.value = null;
+      bindingSpeaker.value = null; // 声纹换绑编辑态一并清（对齐 renamingPerson）
       deletingPersonId.value = null; // 切换详情/收起时一并清删除确认态（对齐 toggleSession 折叠清 deletingSessionId）
       // 属性手动管理临时态（Task 3）：加属性表单(含草稿) / 就地改值 / 删除确认 / 历史抽屉一并清空
       editingAttr.value = null; deletingAttrId.value = null; attrHistory.value = null;
@@ -1302,6 +1337,56 @@ const app = createApp({
         showError(e);
       }
     }
+    // 声纹名册「👤 人物」跳转（模式照 jumpToSession）：切到人物 tab 并强制展开目标详情。
+    // switchTab('persons') 已做 closePersonDetail + loadPersons（重拉名册，绑定态最新），
+    // 这里随后直接拉详情——不调 togglePerson，避免「已展开则收起」的切换语义吃掉跳转。
+    async function jumpToPerson(pid) {
+      switchTab('persons');
+      try {
+        personDetail.value = await api('GET', '/api/persons/' + pid);
+        await loadActivities(); // 人物详情的「生活轨迹」活动时间线（对齐 togglePerson）
+      } catch (e) { showError(e); }
+    }
+
+    // ---------- 声纹关联（详情头部就地换绑/解绑，模式对齐 renamingPerson 就地改名） ----------
+    // 编辑态草稿 { speaker_id }：''=解绑；非空=换绑到该声纹。null=非编辑态。
+    const bindingSpeaker = ref(null);
+    const bindingSaving = ref(false);   // 防重复提交
+    // 可绑声纹列表：GET /api/speakers 全量 − 已被「其他人物」占用的（占用关系来自名册缓存
+    // persons[].speaker_id；本人已绑的保留展示）。冲突兜底在后端——并发抢占时 PATCH 回 409
+    // 纯文本「该声纹已绑定人物「XX」」，经 api() 透传 showError 显示原文。
+    const bindableSpeakers = computed(() => {
+      if (!personDetail.value) return [];
+      const mySid = personDetail.value.person.speaker_id || '';
+      const taken = new Set(persons.value
+        .filter(x => x.speaker_id && x.id !== personDetail.value.person.id)
+        .map(x => x.speaker_id));
+      return newPersonSpeakers.value
+        .filter(s => s.status !== 'dismissed')
+        .filter(s => !taken.has(s.id) || s.id === mySid);
+    });
+    function startBindingSpeaker() {
+      // 数据源复用新建弹窗的懒加载缓存（loadNewPersonSpeakers 已加载则直接命中）；
+      // 未加载则现拉，失败仅 showError 不阻塞——下拉空时仍可「解绑」提交。
+      loadNewPersonSpeakers();
+      bindingSpeaker.value = { speaker_id: personDetail.value.person.speaker_id || '' };
+    }
+    async function commitBindingSpeaker() {
+      const draft = bindingSpeaker.value;
+      if (!draft || bindingSaving.value) return;
+      bindingSaving.value = true;
+      bindingSpeaker.value = null; // 先收编辑态：成功即完成；失败 showError（草稿丢弃，
+      // 与 commitRenamePerson 的「失败恢复」不同——select 无自由输入，重选成本低）
+      try {
+        // 后端三态语义：speaker_id 必传——''=解绑，非空=换绑（person.go Patch）。
+        await api('PATCH', '/api/persons/' + personDetail.value.person.id, { speaker_id: draft.speaker_id });
+        await reloadPersonDetail(); // 刷新 speaker_name 徽标
+        await loadPersons();        // 名册占用关系同步（供其他人物详情下拉过滤）
+        notify('声纹关联已更新', 2000);
+      } catch (e) { showError(e); }
+      finally { bindingSaving.value = false; }
+    }
+
     // 人物删除（原「归档」，2 步确认；DELETE = status=dismissed 软删，六平面级联 dismiss——
     // 行 dismiss 前状态记 pre_dismiss_status，恢复时可级联回滚，手动删过的行不受影响）
     const deletingPersonId = ref(null);
@@ -2844,6 +2929,8 @@ const app = createApp({
       loadTopicStatus, onPickStatusTopic,
       // 人物 / 画像
       persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, deletingPersonId, askDeletePerson, cancelDeletePerson, confirmDeletePerson, deletedPersons, deletedCollapsed, loadDeletedPersons, restorePerson,
+      bindingSpeaker, bindingSaving, bindableSpeakers, startBindingSpeaker, commitBindingSpeaker,
+      jumpToPerson, spPersonEdit, spPersonSaving, unboundPersons, startSpPersonEdit, commitSpPersonEdit,
       epiText, personNameOf,
       attrCatalog, attrDefOf, addAttrDef, editAttrDef, onAddAttrKeyChange, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,

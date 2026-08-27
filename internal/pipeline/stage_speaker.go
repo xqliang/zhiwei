@@ -22,7 +22,8 @@ import (
 // runSpeakerStage 是 speaker stage 的可测核心（避开 pool），由 stageSpeaker 包装成 Handler。
 //
 // 流程：按 ASR speaker_label 分组 → 逐段切片提向 → 组代表声纹 →
-// 每组（= 一个 ASR 说话人）做跨 session 1:N 检索/登记 → 回填组内段 speaker_id（仅填 NULL，保留手动纠正）。
+// 每组（= 一个 ASR 说话人）做跨 session 1:N（先对全部组检索、再统一登记未命中的，见步骤 2 注释）
+// → 回填组内段 speaker_id（仅填 NULL，保留手动纠正）。
 //
 // ASR 原生 diarization 已足够准，此处直接信任其说话人标签：不再用声纹在本地把不同 ASR 标签
 // 合并成同一人。是否同一人只由跨 session 1:N 判定——相似度 ≥ 阈值（默认 0.8）视为命中、复用该
@@ -115,9 +116,18 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		}
 	}
 
-	// 2) 每组（= 一个 ASR 说话人）独立做跨 session 1:N 检索/登记 → 回填该组未解析段。
-	// 信任 ASR diarization：不同 ASR 标签一律视为不同说话人，不在本地按声纹相似度合并。
-	for _, g := range reps {
+	// 2) 每组（= 一个 ASR 说话人）做跨 session 1:N 检索/登记 → 回填该组未解析段。
+	// 分两趟：**先对全部组做检索、再统一登记未命中的**——保证「本 run 内新登记的声纹对
+	// 后续组的 Search 不可见」。否则先登记的说话人会出现在后续组的检索结果里：当声纹库
+	// 原本为空、这次又是多人录音时，库里唯一那条恰是本次的另一个人，弱命中的 top2=0（库中
+	// 无第二名 → gap 规则恒真）会把门槛从 threshold 降到 SoftMin，把第二个真人并进第一个人
+	// → 首次多人只建 1 个声纹（且自我强化：一直并入使库始终只有 1 条，陷阱关不上）。
+	// 只对「本 run 开始前的历史库」检索，与既有设计一致：信任 ASR diarization，本 session
+	// 内不同标签一律视为不同人（本录音内误拆靠手动「合并」），跨 session 才靠 1:N 归并；
+	// 历史库的弱命中重认（同一人换环境相似度掉到 0.72~0.8）不受影响。
+	matched := make([]bool, len(reps))     // 该组是否命中既有声纹
+	matchedID := make([]ids.ID, len(reps)) // 命中的既有 speaker id
+	for i, g := range reps {
 		res, err := d.Voiceprint.Search(ctx, g.rep)
 		if err != nil {
 			return fmt.Errorf("voiceprint search: %w", err)
@@ -125,10 +135,15 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		// 同一人判定（两级规则，见 voiceprint.Matched）：强命中 sim≥阈值；
 		// 或区分性弱命中 sim≥0.72 且明显领先第二名（top1−top2≥0.06）——
 		// 分数略低于阈值但明显是同一个人的也复用，减少真匹配被误登记成新声纹。
-		matched := res.Matched && voiceprint.Matched(res.Distance, res.SecondDistance, threshold)
+		if res.Matched && voiceprint.Matched(res.Distance, res.SecondDistance, threshold) {
+			matched[i], matchedID[i] = true, res.SpeakerID
+		}
+	}
+	// 第二趟：未命中的登记新声纹（此时才 Add，故上面的检索全部只见历史库），命中的复用，回填。
+	for i, g := range reps {
 		var speakerID ids.ID
-		if matched {
-			speakerID = res.SpeakerID
+		if matched[i] {
+			speakerID = matchedID[i]
 		} else {
 			// 自动登记：name=说话人{5位随机串}，向量 BLOB 灾备。
 			// 登记向量优先用干净段（pickCleanSegVec 的结果）：混入他人语音的段会污染

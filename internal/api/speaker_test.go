@@ -13,11 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/profile"
 	"zhiwei/internal/repo"
 	"zhiwei/internal/repotest"
 	"zhiwei/internal/voiceprint"
@@ -250,6 +252,204 @@ func TestSpeakerListWithCandidates(t *testing.T) {
 	cands := out.Speakers[1].NameCandidates
 	if len(cands) != 2 || cands[0].Name != "张总" || cands[0].Confidence != 0.82 {
 		t.Fatalf("随机名说话人应带倒序候选（张总 0.82 在首），实际 %+v", cands)
+	}
+}
+
+// TestSpeakerListWithPersons 名册接口富化人物绑定：已绑人物的声纹带 person_id/person_name
+// （名册「跳人物」入口），未绑者为空字段。Persons 未装配（nil）时降级不填充不报错。
+func TestSpeakerListWithPersons(t *testing.T) {
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ids.InitForTest()
+	speakers := &repo.SpeakerRepo{DB: db}
+	persons := &repo.PersonRepo{DB: db}
+	r := chi.NewRouter()
+	RegisterSpeaker(r, &SpeakerHandler{
+		Speakers: speakers, Transcripts: &repo.TranscriptRepo{DB: db},
+		Voiceprint: fakeVoiceprintAPI{}, DataDir: t.TempDir(),
+		Persons: persons,
+	})
+	ctx := context.Background()
+	bound := &repo.Speaker{Name: "绑定声纹测试", Source: "enrolled"}
+	free := &repo.Speaker{Name: "未绑定声纹测试", Source: "enrolled"}
+	_ = speakers.Create(ctx, bound)
+	_ = speakers.Create(ctx, free)
+	// 绑定人物 + 收尾清理（person 行残留会污染 EnsurePersonBootstrap 类用例的 FindByName）
+	p := &repo.Person{DisplayName: "绑定人物测试", SpeakerID: &bound.ID}
+	if err := persons.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = persons.SetStatus(context.Background(), p.ID, "dismissed")
+		_ = speakers.Delete(context.Background(), bound.ID)
+		_ = speakers.Delete(context.Background(), free.ID)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/speakers", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Speakers []struct {
+			Name       string  `json:"name"`
+			PersonID   *string `json:"person_id"`
+			PersonName string  `json:"person_name"`
+		} `json:"speakers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]int{}
+	for i, s := range out.Speakers {
+		byName[s.Name] = i
+	}
+	i, ok := byName["绑定声纹测试"]
+	if !ok {
+		t.Fatalf("缺绑定声纹: %+v", out.Speakers)
+	}
+	if out.Speakers[i].PersonID == nil || *out.Speakers[i].PersonID != p.ID.String() ||
+		out.Speakers[i].PersonName != "绑定人物测试" {
+		t.Fatalf("绑定声纹应带 person_id/person_name: %+v", out.Speakers[i])
+	}
+	if j, ok := byName["未绑定声纹测试"]; !ok || out.Speakers[j].PersonID != nil || out.Speakers[j].PersonName != "" {
+		t.Fatalf("未绑定声纹应无人物字段: %+v", out.Speakers)
+	}
+}
+
+// TestSpeakerRenameSyncsPerson 绑定不变式的反向：已绑人物的声纹改名 → 人物名连带改
+// （走 profile.Service，保审计 + 同事务回写声纹名）。未装配 Persons/Service 的旧装配不受影响。
+func TestSpeakerRenameSyncsPerson(t *testing.T) {
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ids.InitForTest()
+	speakers := &repo.SpeakerRepo{DB: db}
+	persons := &repo.PersonRepo{DB: db}
+	svc := &profile.Service{
+		DB: db, Persons: persons, Speakers: speakers,
+		Attributes: &repo.PersonAttributeRepo{DB: db},
+		ChangeLogs: &repo.PersonChangeLogRepo{DB: db},
+	}
+	r := chi.NewRouter()
+	RegisterSpeaker(r, &SpeakerHandler{
+		Speakers: speakers, Transcripts: &repo.TranscriptRepo{DB: db},
+		Voiceprint: fakeVoiceprintAPI{}, DataDir: t.TempDir(),
+		Persons: persons, Service: svc,
+	})
+	ctx := context.Background()
+	sp := &repo.Speaker{Name: "绑定声纹改名测试", Source: "enrolled"}
+	_ = speakers.Create(ctx, sp)
+	p := &repo.Person{DisplayName: "旧人物名", SpeakerID: &sp.ID}
+	if err := persons.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = persons.SetStatus(context.Background(), p.ID, "dismissed")
+		_ = speakers.Delete(context.Background(), sp.ID)
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/speakers/"+sp.ID.String(),
+		strings.NewReader(`{"name":"新人物名"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("声纹改名失败: %d %s", rec.Code, rec.Body.String())
+	}
+	gotSp, _ := speakers.Get(ctx, sp.ID)
+	gotP, _ := persons.Get(ctx, 1, p.ID)
+	if gotSp.Name != "新人物名" || gotP.DisplayName != "新人物名" {
+		t.Fatalf("声纹改名应联动人物：speaker=%q person=%q", gotSp.Name, gotP.DisplayName)
+	}
+}
+
+// TestSpeakerSetPerson 声纹侧人物关联端点（转移语义）：关联（声纹名同步）/ 换绑（原持有人
+// 被清，不撞唯一键）/ 解绑（声纹名保留）/ 目标人物已绑其他声纹 409。
+func TestSpeakerSetPerson(t *testing.T) {
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ids.InitForTest()
+	speakers := &repo.SpeakerRepo{DB: db}
+	persons := &repo.PersonRepo{DB: db}
+	svc := &profile.Service{
+		DB: db, Persons: persons, Speakers: speakers,
+		ChangeLogs: &repo.PersonChangeLogRepo{DB: db},
+	}
+	r := chi.NewRouter()
+	RegisterSpeaker(r, &SpeakerHandler{
+		Speakers: speakers, Transcripts: &repo.TranscriptRepo{DB: db},
+		Voiceprint: fakeVoiceprintAPI{}, DataDir: t.TempDir(),
+		Persons: persons, Service: svc,
+	})
+	ctx := context.Background()
+	sp := &repo.Speaker{Name: "转移测试声纹", Source: "enrolled"}
+	_ = speakers.Create(ctx, sp)
+	otherSp := &repo.Speaker{Name: "另一条声纹", Source: "enrolled"}
+	_ = speakers.Create(ctx, otherSp)
+	pa := &repo.Person{DisplayName: "持有人甲"}
+	pb := &repo.Person{DisplayName: "目标人物乙"}
+	pc := &repo.Person{DisplayName: "占用者丙", SpeakerID: &otherSp.ID}
+	for _, p := range []*repo.Person{pa, pb, pc} {
+		if err := persons.Create(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = speakers.Delete(context.Background(), sp.ID)
+		_ = speakers.Delete(context.Background(), otherSp.ID)
+		for _, p := range []*repo.Person{pa, pb, pc} {
+			_ = persons.SetStatus(context.Background(), p.ID, "dismissed")
+		}
+	})
+
+	patch := func(sid ids.ID, personID string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/speakers/"+sid.String()+"/person",
+			strings.NewReader(`{"person_id":"`+personID+`"}`)))
+		return rec
+	}
+
+	// ① 关联：sp → 甲，声纹名同步为人物名
+	if rec := patch(sp.ID, pa.ID.String()); rec.Code != 200 {
+		t.Fatalf("关联失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := speakers.Get(ctx, sp.ID); got.Name != "持有人甲" {
+		t.Fatalf("关联后声纹名应同步为「持有人甲」，得: %q", got.Name)
+	}
+
+	// ② 换绑：sp → 乙（转移语义，原持有人甲被清，不撞 speaker_id 唯一键）
+	if rec := patch(sp.ID, pb.ID.String()); rec.Code != 200 {
+		t.Fatalf("换绑失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := persons.Get(ctx, 1, pa.ID); got.SpeakerID != nil {
+		t.Fatalf("换绑后原持有人甲应解绑，得: %v", got.SpeakerID)
+	}
+	if got, _ := persons.Get(ctx, 1, pb.ID); got.SpeakerID == nil || *got.SpeakerID != sp.ID {
+		t.Fatalf("换绑后乙应持有声纹，得: %v", got.SpeakerID)
+	}
+	if got, _ := speakers.Get(ctx, sp.ID); got.Name != "目标人物乙" {
+		t.Fatalf("换绑后声纹名应同步为「目标人物乙」，得: %q", got.Name)
+	}
+
+	// ③ 解绑：person_id 空串，声纹名保留
+	if rec := patch(sp.ID, ""); rec.Code != 200 {
+		t.Fatalf("解绑失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := persons.Get(ctx, 1, pb.ID); got.SpeakerID != nil {
+		t.Fatalf("解绑后乙不应再持有声纹，得: %v", got.SpeakerID)
+	}
+	if got, _ := speakers.Get(ctx, sp.ID); got.Name != "目标人物乙" {
+		t.Fatalf("解绑后声纹名应保留「目标人物乙」，得: %q", got.Name)
+	}
+
+	// ④ 冲突：目标人物丙已绑另一条声纹 → 409
+	if rec := patch(sp.ID, pc.ID.String()); rec.Code != 409 {
+		t.Fatalf("占用冲突应 409: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

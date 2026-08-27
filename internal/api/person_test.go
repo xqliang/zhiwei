@@ -56,7 +56,7 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 	}
 	r := newAuthedRouter() // 注入登录用户 1（handler 现要求 auth.UserID，否则 401）
 	RegisterPerson(r, &PersonHandler{
-		Persons: svc.Persons, Attributes: svc.Attributes,
+		Persons: svc.Persons, Speakers: svc.Speakers, Attributes: svc.Attributes,
 		Relationships: svc.Relationships, ChangeLogs: svc.ChangeLogs,
 		Events: svc.Events, Metrics: svc.Metrics, Cycles: svc.Cycles,
 		Activities: svc.Activities, Service: svc,
@@ -313,6 +313,130 @@ func TestPersonCreateSpeakerConflict(t *testing.T) {
 	if rec := doReq(t, h, "POST", "/api/persons",
 		map[string]any{"display_name": "冒名者", "speaker_id": sp.ID.String()}); rec.Code != 409 {
 		t.Fatalf("重复绑定应 409: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPersonDetailSpeakerName 详情接口的声纹富化 + PATCH 换绑/解绑（详情页「关联声纹」
+// 下拉的后端链路）：绑定时 speaker_name=声纹名；解绑后 speaker_name 为空。
+func TestPersonDetailSpeakerName(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+
+	// setup 已跑 EnsurePersonBootstrap，此后新建的声纹不会被自动建档占用
+	sp := &repo.Speaker{Name: "测试声纹王五", Source: "enrolled"}
+	if err := svc.Speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	rec := doReq(t, h, "POST", "/api/persons",
+		map[string]any{"display_name": "王五", "speaker_id": sp.ID.String()})
+	if rec.Code != 200 {
+		t.Fatalf("新建失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var p repo.Person
+	_ = json.Unmarshal(rec.Body.Bytes(), &p)
+
+	// 详情应带声纹名（徽标直接展示，前端不用二次查表）
+	rec = doReq(t, h, "GET", "/api/persons/"+p.ID.String(), nil)
+	if rec.Code != 200 {
+		t.Fatalf("详情失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var d struct {
+		SpeakerName string `json:"speaker_name"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &d)
+	// 绑定不变式：建档绑定后声纹名同步为人物名（原名「测试声纹王五」→「王五」），
+	// 故详情 speaker_name 即人物名。
+	if d.SpeakerName != "王五" {
+		t.Fatalf("speaker_name 应为同步后的声纹名（=人物名「王五」），得: %q", d.SpeakerName)
+	}
+
+	// PATCH 解绑（speaker_id 传空串）→ 详情 speaker_name 为空、person.speaker_id 为 NULL
+	if rec := doReq(t, h, "PATCH", "/api/persons/"+p.ID.String(),
+		map[string]any{"speaker_id": ""}); rec.Code != 200 {
+		t.Fatalf("解绑失败: %d %s", rec.Code, rec.Body.String())
+	}
+	got, _ := svc.Persons.Get(ctx, 1, p.ID)
+	if got.SpeakerID != nil {
+		t.Fatalf("解绑后 speaker_id 应为 NULL，得: %v", got.SpeakerID)
+	}
+	rec = doReq(t, h, "GET", "/api/persons/"+p.ID.String(), nil)
+	d.SpeakerName = "" // omitempty 省略的字段不会覆盖旧值，先清再 Unmarshal
+	_ = json.Unmarshal(rec.Body.Bytes(), &d)
+	if d.SpeakerName != "" {
+		t.Fatalf("解绑后 speaker_name 应为空，得: %q", d.SpeakerName)
+	}
+
+	// PATCH 换绑回原声纹 → 详情恢复声纹名
+	if rec := doReq(t, h, "PATCH", "/api/persons/"+p.ID.String(),
+		map[string]any{"speaker_id": sp.ID.String()}); rec.Code != 200 {
+		t.Fatalf("换绑失败: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doReq(t, h, "GET", "/api/persons/"+p.ID.String(), nil)
+	d.SpeakerName = ""
+	_ = json.Unmarshal(rec.Body.Bytes(), &d)
+	if d.SpeakerName != "王五" {
+		t.Fatalf("换绑后 speaker_name 应恢复（声纹名解绑期间保留为人物名「王五」），得: %q", d.SpeakerName)
+	}
+}
+
+// TestPersonSpeakerNameSync 绑定不变式（speaker.name 跟随 person.display_name）：
+// 建档绑定 / 人物改名 / 解绑 / 换绑 四个场景下声纹名的表现——绑定与改名同步，
+// 解绑不回改（保留历史名），换绑把新声纹名同步为人物名。
+func TestPersonSpeakerNameSync(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+
+	sp := &repo.Speaker{Name: "自动登记说话人x7", Source: "auto"}
+	if err := svc.Speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	sp2 := &repo.Speaker{Name: "另一个声纹y9", Source: "enrolled"}
+	if err := svc.Speakers.Create(ctx, sp2); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = svc.Speakers.Delete(context.Background(), sp.ID)
+		_ = svc.Speakers.Delete(context.Background(), sp2.ID)
+	})
+
+	// ① 建档绑定 → 声纹名同步为人物名
+	rec := doReq(t, h, "POST", "/api/persons",
+		map[string]any{"display_name": "王五", "speaker_id": sp.ID.String()})
+	if rec.Code != 200 {
+		t.Fatalf("新建失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var p repo.Person
+	_ = json.Unmarshal(rec.Body.Bytes(), &p)
+	t.Cleanup(func() { _ = svc.Persons.SetStatus(context.Background(), p.ID, "dismissed") })
+	if got, _ := svc.Speakers.Get(ctx, sp.ID); got.Name != "王五" {
+		t.Fatalf("建档绑定后声纹名应为人物名「王五」，得: %q", got.Name)
+	}
+
+	// ② 人物改名 → 已绑声纹名跟随
+	if rec := doReq(t, h, "PATCH", "/api/persons/"+p.ID.String(),
+		map[string]any{"display_name": "王五改"}); rec.Code != 200 {
+		t.Fatalf("改名失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := svc.Speakers.Get(ctx, sp.ID); got.Name != "王五改" {
+		t.Fatalf("人物改名后声纹名应跟随「王五改」，得: %q", got.Name)
+	}
+
+	// ③ 解绑 → 声纹名保留（不回改历史名）
+	if rec := doReq(t, h, "PATCH", "/api/persons/"+p.ID.String(),
+		map[string]any{"speaker_id": ""}); rec.Code != 200 {
+		t.Fatalf("解绑失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := svc.Speakers.Get(ctx, sp.ID); got.Name != "王五改" {
+		t.Fatalf("解绑后声纹名应保留「王五改」，得: %q", got.Name)
+	}
+
+	// ④ 换绑到新声纹 → 新声纹名同步为人物名（旧声纹不动）
+	if rec := doReq(t, h, "PATCH", "/api/persons/"+p.ID.String(),
+		map[string]any{"speaker_id": sp2.ID.String()}); rec.Code != 200 {
+		t.Fatalf("换绑失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := svc.Speakers.Get(ctx, sp2.ID); got.Name != "王五改" {
+		t.Fatalf("换绑后新声纹名应为人物名「王五改」，得: %q", got.Name)
 	}
 }
 
