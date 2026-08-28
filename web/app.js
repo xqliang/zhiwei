@@ -2793,7 +2793,7 @@ const app = createApp({
         await api('PATCH', '/api/agent/conversations/' + c.id, { title });
         await loadAgentConversations();
       } catch (e) {
-        notify(e.message || '保存标题失败', 'error');
+        notify(e.message || '保存标题失败', 4000);
       }
     }
     // 软删除：确认后 DELETE，若删的是当前会话则清空主区。
@@ -2809,7 +2809,7 @@ const app = createApp({
         await loadAgentConversations();
         notify('会话已删除');
       } catch (e) {
-        notify(e.message || '删除失败', 'error');
+        notify(e.message || '删除失败', 4000);
       }
     }
     // 新对话：POST 建会话 → 刷新列表 → 选中并连 WS。
