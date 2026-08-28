@@ -570,7 +570,15 @@ func (s *Service) applyCycleFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 		return nil
 	}
 
-	dec := DecideCycle(f, existing, dedup != nil, s.Gate)
+	// dedupEffective 语义同 pet（见 applyPetFact 注释）：本 session 已处理过同 key **且**
+	// 与现值参数一致 → 真幂等 skip；有变化（改 ASR 重新提取，如剂量/频次调整）则放行到
+	// DecisionConflictPending，走「pending 行 supersedes 现值」待人工确认（周期敏感，保守不静默覆盖）。
+	dedupEffective := dedup != nil
+	if existing != nil {
+		dedupEffective = dedup != nil && cycleParamsEqual(existing, f)
+	}
+
+	dec := DecideCycle(f, existing, dedupEffective, s.Gate)
 	switch dec {
 	case DecisionSkip:
 		st.Skipped++
@@ -651,7 +659,19 @@ func (s *Service) applyPetFact(ctx context.Context, tx *sqlx.Tx, userID int64, f
 		return nil
 	}
 
-	dec := DecidePet(f, existing, dedup != nil, s.Gate)
+	// dedupEffective = 「本 session 已处理过同 key」**且** 与现值一致 → 真幂等，可 skip。
+	// 关键：dedup 仅命中自然键（同 session 同 name）不代表内容无变化——用户改 ASR 后点
+	// 「重新提取」（同一 session 重跑）会抽出**payload 有变化**的 fact（如性别 公→母）。
+	// 若此处沿用 dedup!=nil 直接 skip，memory 走「删旧重插」能更新、pet 走 skip 不能，
+	// 就出现「记忆改成母猫、宠物还是公猫」的不一致。故有变化时 dedupEffective=false，
+	// 放行到下面的 DecisionConflictPending + autoWritable 分支走 mergePetRow 整只替换。
+	// existing==nil（无 active 现值，仅 superseded/pending 历史行）保持原 skip 语义。
+	dedupEffective := dedup != nil
+	if existing != nil {
+		dedupEffective = dedup != nil && petFieldsEqual(existing, f)
+	}
+
+	dec := DecidePet(f, existing, dedupEffective, s.Gate)
 	switch dec {
 	case DecisionSkip:
 		st.Skipped++
