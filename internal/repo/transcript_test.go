@@ -680,3 +680,80 @@ func TestMergeShortGroupSkipsAssignedSegments(t *testing.T) {
 		t.Fatalf("seq2 已回填不应被并入覆盖，实际 %+v reason=%+v", s.SpeakerID, s.CorrectedReason)
 	}
 }
+
+// TestReattributeSegmentByVoiceprint 逐段声纹改判：写 speaker_id=to + corrected_from=from + reason='mismatch'；
+// AND speaker_id=fromID 护栏——from 不匹配当前归属则不动。
+func TestReattributeSegmentByVoiceprint(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tr := &TranscriptRepo{DB: db}
+	speakers := &SpeakerRepo{DB: db}
+	a := &Speaker{Name: "说话人A", Source: "auto"}
+	b := &Speaker{Name: "说话人B", Source: "auto"}
+	c := &Speaker{Name: "说话人C", Source: "auto"}
+	for _, sp := range []*Speaker{a, b, c} {
+		if err := speakers.Create(ctx, sp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, sp := range []*Speaker{a, b, c} {
+			_ = speakers.Delete(context.Background(), sp.ID)
+		}
+	})
+	sid := ids.New()
+	if err := (&SessionRepo{DB: db}).Create(ctx, &AudioSession{
+		ID: sid, Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := &Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := tr.Create(ctx, tc); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.InsertSegments(ctx, []TranscriptSegment{
+		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "A", Text: "一段", StartMS: 0, EndMS: 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seg := mustSeg(t, tr, tc.ID, 1)
+	if err := tr.SetSegmentSpeaker(ctx, tc.ID, "A", a.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 护栏：from 传 c（非当前归属 a）→ 不动
+	if err := tr.ReattributeSegmentByVoiceprint(ctx, tc.ID, seg.ID, c.ID, b.ID); err != nil {
+		t.Fatalf("Reattribute(from=c): %v", err)
+	}
+	got := mustSeg(t, tr, tc.ID, 1)
+	if got.SpeakerID == nil || *got.SpeakerID != a.ID || got.CorrectedReason != nil {
+		t.Fatalf("from 不匹配应不动，实际 speaker=%+v reason=%+v", got.SpeakerID, got.CorrectedReason)
+	}
+
+	// 正常：from=a → 改判 b，reason=mismatch，corrected_from=a
+	if err := tr.ReattributeSegmentByVoiceprint(ctx, tc.ID, seg.ID, a.ID, b.ID); err != nil {
+		t.Fatalf("Reattribute(from=a): %v", err)
+	}
+	got = mustSeg(t, tr, tc.ID, 1)
+	if got.SpeakerID == nil || *got.SpeakerID != b.ID {
+		t.Fatalf("应改判给 b，实际 %+v", got.SpeakerID)
+	}
+	if got.CorrectedReason == nil || *got.CorrectedReason != "mismatch" {
+		t.Fatalf("应 corrected_reason=mismatch，实际 %+v", got.CorrectedReason)
+	}
+	if got.CorrectedFromSpeakerID == nil || *got.CorrectedFromSpeakerID != a.ID {
+		t.Fatalf("应 corrected_from=a，实际 %+v", got.CorrectedFromSpeakerID)
+	}
+
+	// 手动换人清标记（复用既有清理路径）
+	if err := tr.SetSegmentSpeakerByID(ctx, tc.ID, seg.ID, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	got = mustSeg(t, tr, tc.ID, 1)
+	if got.CorrectedReason != nil || got.CorrectedFromSpeakerID != nil {
+		t.Fatalf("手动换人后应清 mismatch 标记，实际 reason=%+v from=%+v", got.CorrectedReason, got.CorrectedFromSpeakerID)
+	}
+}

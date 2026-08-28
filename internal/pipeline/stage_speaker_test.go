@@ -966,3 +966,101 @@ func TestStageSpeakerMergesShortGroupIntoHistoricalMatch(t *testing.T) {
 		t.Fatalf("A 命中历史、B 缓起并入，应无新登记，实际 %d", len(fv.added))
 	}
 }
+
+// mkVec 造单位向量：indices/vals 指定分量（其余 0）。用于段级改判用例的相似度几何。
+func mkVec(pairs ...[2]float64) []float32 {
+	v := make([]float32, 256)
+	for _, p := range pairs {
+		v[int(p[0])] = float32(p[1])
+	}
+	return v
+}
+
+// TestStageSpeakerReattributesSegmentToBetterPresentSpeaker 段级改判：seq2 归属 A 但对在场 B 相似 0.85、
+// 对 A 仅 0.40（领先 0.45≥0.06 且 0.85≥0.72）→ 改判 B，corrected_reason=mismatch，corrected_from=A。
+func TestStageSpeakerReattributesSegmentToBetterPresentSpeaker(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "A", Text: "A 的干净长段", StartMS: 0, EndMS: 3500},
+		{SequenceNo: 2, SpeakerLabel: "A", Text: "其实更像 B 的一段", StartMS: 3600, EndMS: 4000},
+		{SequenceNo: 3, SpeakerLabel: "B", Text: "B 的干净长段", StartMS: 5000, EndMS: 8200},
+	})
+	vA := mkVec([2]float64{0, 1})
+	vB := mkVec([2]float64{1, 1})
+	vMix := mkVec([2]float64{0, 0.40}, [2]float64{1, 0.85}, [2]float64{2, math.Sqrt(1 - 0.40*0.40 - 0.85*0.85)})
+	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vA, 2: vMix, 3: vB}}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	bySeq := map[int]repo.TranscriptSegment{}
+	for _, s := range segs {
+		bySeq[s.SequenceNo] = s
+	}
+	aID, bID := bySeq[1].SpeakerID, bySeq[3].SpeakerID
+	if aID == nil || bID == nil {
+		t.Fatal("A/B 未回填")
+	}
+	seg2 := bySeq[2]
+	if seg2.SpeakerID == nil || *seg2.SpeakerID != *bID {
+		t.Fatalf("seq2 应改判给 B %v，实际 %+v", *bID, seg2.SpeakerID)
+	}
+	if seg2.CorrectedReason == nil || *seg2.CorrectedReason != "mismatch" {
+		t.Fatalf("seq2 应 corrected_reason=mismatch，实际 %+v", seg2.CorrectedReason)
+	}
+	if seg2.CorrectedFromSpeakerID == nil || *seg2.CorrectedFromSpeakerID != *aID {
+		t.Fatalf("seq2 应 corrected_from=A %v，实际 %+v", *aID, seg2.CorrectedFromSpeakerID)
+	}
+	if bySeq[1].CorrectedReason != nil || bySeq[3].CorrectedReason != nil {
+		t.Fatalf("seq1/seq3 不应被改判")
+	}
+}
+
+// TestStageSpeakerReattributeKeepsWhenLeadBelowGap best_other≥0.72 但领先<0.06 → 不动。
+func TestStageSpeakerReattributeKeepsWhenLeadBelowGap(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "A", Text: "A 的干净长段", StartMS: 0, EndMS: 3500},
+		{SequenceNo: 2, SpeakerLabel: "A", Text: "临界段", StartMS: 3600, EndMS: 4000},
+		{SequenceNo: 3, SpeakerLabel: "B", Text: "B 的干净长段", StartMS: 5000, EndMS: 8200},
+	})
+	vA := mkVec([2]float64{0, 1})
+	vB := mkVec([2]float64{1, 1})
+	vMix := mkVec([2]float64{0, 0.68}, [2]float64{1, 0.73}, [2]float64{2, math.Sqrt(1 - 0.68*0.68 - 0.73*0.73)})
+	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vA, 2: vMix, 3: vB}}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SequenceNo == 2 && s.CorrectedReason != nil {
+			t.Fatalf("领先<0.06 不应改判，实际 %+v", s.CorrectedReason)
+		}
+	}
+}
+
+// TestStageSpeakerReattributeKeepsWhenBelowSoftMin best_other<0.72 → 不动。
+func TestStageSpeakerReattributeKeepsWhenBelowSoftMin(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "A", Text: "A 的干净长段", StartMS: 0, EndMS: 3500},
+		{SequenceNo: 2, SpeakerLabel: "A", Text: "都不太像的段", StartMS: 3600, EndMS: 4000},
+		{SequenceNo: 3, SpeakerLabel: "B", Text: "B 的干净长段", StartMS: 5000, EndMS: 8200},
+	})
+	vA := mkVec([2]float64{0, 1})
+	vB := mkVec([2]float64{1, 1})
+	vMix := mkVec([2]float64{0, 0.50}, [2]float64{1, 0.70}, [2]float64{2, math.Sqrt(1 - 0.50*0.50 - 0.70*0.70)})
+	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vA, 2: vMix, 3: vB}}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SequenceNo == 2 && s.CorrectedReason != nil {
+			t.Fatalf("best_other<0.72 不应改判，实际 %+v", s.CorrectedReason)
+		}
+	}
+}

@@ -206,6 +206,10 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 	if err := mergeShortGroups(ctx, d, tr, reps, deferred, resolvedID, samples); err != nil {
 		return err
 	}
+	// 4) 逐段声纹改判：某段声纹明显更像另一在场说话人时改判该段（见 correctSegmentsByVoiceprint）。
+	if err := correctSegmentsByVoiceprint(ctx, d, tr); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -338,6 +342,68 @@ func mergeShortGroups(ctx context.Context, d StageDeps, tr *repo.Transcript,
 	for _, f := range fixes {
 		if err := d.Transcripts.MergeShortGroup(ctx, tr.ID, f.label, f.to); err != nil {
 			log.Printf("[speaker] 过短段并入失败 label=%s to=%s: %v", f.label, f.to, err)
+		}
+	}
+	return nil
+}
+
+// correctSegmentsByVoiceprint 逐段声纹改判（2026-08-28 需求）：ASR 分组内某段的段级声纹若明显更像
+// 另一个**在场说话人**（相似度 ≥ voiceprint.SoftMin 且比当前归属领先 > voiceprint.GapMin，与 1:N
+// 弱命中同判据），把该单段改判给那个人（corrected_reason='mismatch'）。自包含：重列段拿最终归属+
+// 逐段向量，不依赖 pass1-3 的内存模型（归属已被 phantom/short 改动过）。候选仅在场说话人（本录音各段
+// 非空 speaker_id 去重）——不改判给历史库里不在场的人。先算完全部再统一应用（避免本趟内相互影响判据）。
+//
+// 领先幅度判据用 `> GapMin+correctScoreEps`（严格大于 + float32 容差），与 pass3
+// correctPhantomHistoricalMatches 同纪律：本函数逐维内积同样是 float32（相对精度 ~1e-7），在「领先恰好
+// = GapMin」的边界上会被表示误差顶过阈值（实测某构造用例领先算得 0.0600000162 而非 0.06）。voiceprint.Matched
+// 的弱命中用 `>= GapMin` 是因其比较 sidecar 直接给出的 top1/top2 距离、无本地重算误差；此处重算内积，须与
+// pass3 一样加容差，否则同一条领先量在 pass3(不改判)/pass4(改判) 间出现边界不一致。
+func correctSegmentsByVoiceprint(ctx context.Context, d StageDeps, tr *repo.Transcript) error {
+	segs, err := d.Transcripts.ListSegments(ctx, tr.ID)
+	if err != nil {
+		return fmt.Errorf("逐段改判读 segments: %w", err)
+	}
+	samples := map[ids.ID][][]float32{}
+	for _, s := range segs {
+		if s.SpeakerID != nil {
+			if _, ok := samples[*s.SpeakerID]; !ok {
+				samples[*s.SpeakerID] = loadSpeakerSampleVecs(ctx, d, *s.SpeakerID)
+			}
+		}
+	}
+	if len(samples) < 2 {
+		return nil // 少于两个在场说话人，无可比对象
+	}
+	type fix struct {
+		segID, from, to ids.ID
+	}
+	var fixes []fix
+	for _, s := range segs {
+		if s.SpeakerID == nil || len(s.Embedding) == 0 {
+			continue
+		}
+		vec, ok := decodeEmbedding(s.Embedding)
+		if !ok || len(vec) != 256 {
+			continue
+		}
+		assigned := *s.SpeakerID
+		cur := segMaxScore(vec, samples[assigned])
+		bestOther, bestID, hasBest := 0.0, ids.ID(0), false
+		for spID, sv := range samples {
+			if spID == assigned {
+				continue
+			}
+			if sc := segMaxScore(vec, sv); !hasBest || sc > bestOther {
+				bestOther, bestID, hasBest = sc, spID, true
+			}
+		}
+		if hasBest && bestOther >= voiceprint.SoftMin && bestOther-cur > voiceprint.GapMin+correctScoreEps {
+			fixes = append(fixes, fix{segID: s.ID, from: assigned, to: bestID})
+		}
+	}
+	for _, f := range fixes {
+		if err := d.Transcripts.ReattributeSegmentByVoiceprint(ctx, tr.ID, f.segID, f.from, f.to); err != nil {
+			log.Printf("[speaker] 逐段声纹改判失败 seg=%s from=%s to=%s: %v", f.segID, f.from, f.to, err)
 		}
 	}
 	return nil

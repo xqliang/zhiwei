@@ -35,7 +35,8 @@ type TranscriptSegment struct {
 	// 手动换人 / 整人改判 / 重新识别时清 NULL。存量 / 未纠正段为 NULL。
 	CorrectedFromSpeakerID *ids.ID `db:"corrected_from_speaker_id" json:"corrected_from_speaker_id,omitempty"`
 	// CorrectedReason 自动纠正原因（000021 迁移加列）：'phantom'=幽灵历史声纹改判（配 CorrectedFromSpeakerID）；
-	// 'short'=过短噪声段并入最近在场说话人（CorrectedFromSpeakerID 为 NULL）。nil=未纠正。
+	// 'short'=过短噪声段并入最近在场说话人（CorrectedFromSpeakerID 为 NULL）；
+	// 'mismatch'=逐段声纹改判——该段更像另一在场说话人（配 CorrectedFromSpeakerID=改判前说话人）。nil=未纠正。
 	// 与 speaker_id 一同被手动换人/整人改判/重新识别清空。
 	CorrectedReason *string `db:"corrected_reason" json:"corrected_reason,omitempty"`
 	// Embedding 该段的 256 维声纹向量 BLOB（000007 迁移加列；speaker stage 逐段
@@ -205,6 +206,18 @@ func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID
 	_, err := r.DB.ExecContext(ctx,
 		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = NULL, corrected_reason = NULL WHERE id = ? AND transcript_id = ?`,
 		speakerID.Int64(), segID.Int64(), transcriptID.Int64())
+	return err
+}
+
+// ReattributeSegmentByVoiceprint 逐段声纹改判（2026-08-28 需求）：某段的段级声纹明显更像另一个
+// 在场说话人（≥SoftMin 且领先当前归属 ≥GapMin）时，把该单段从 fromID 改判给 toID，标记
+// corrected_reason='mismatch' + corrected_from_speaker_id=fromID（前端「已修改」徽章 tooltip「原判定：X」）。
+// `AND speaker_id = fromID` 护栏：仅在段仍归属改判前说话人时生效（防并发/重复改判误写）；带 transcript_id 作用域。
+func (r *TranscriptRepo) ReattributeSegmentByVoiceprint(ctx context.Context, transcriptID, segID, fromID, toID ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = ?, corrected_reason = 'mismatch'
+		 WHERE id = ? AND transcript_id = ? AND speaker_id = ?`,
+		toID.Int64(), fromID.Int64(), segID.Int64(), transcriptID.Int64(), fromID.Int64())
 	return err
 }
 
