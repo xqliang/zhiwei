@@ -54,6 +54,7 @@ type RuntimeConfig struct {
 	SessionRoot  string // DSH_SESSION_ROOT
 	SystemPrompt string // DSH_SYSTEM_PROMPT
 	MCPURL       string // ZW_AGENT_MCP_URL（子进程 mcp-client 连回本服务）
+	SkillDir     string // ZW_AGENT_SKILL_DIR（dsh skills 插件 customSkillDirs，指 <skillRoot>/enabled）
 }
 
 // rpcResp 是一次 JSON-RPC 请求的结果（result 与 err 二选一）。
@@ -187,6 +188,7 @@ func (r *dshRuntime) dshEnv() []string {
 		"DSH_HOME=" + filepath.Join(r.sidecarDir(), ".dsh"),
 		"DSH_SYSTEM_PROMPT=" + r.cfg.SystemPrompt,
 		"ZW_AGENT_MCP_URL=" + r.cfg.MCPURL,
+		"ZW_AGENT_SKILL_DIR=" + r.cfg.SkillDir,
 	}
 }
 

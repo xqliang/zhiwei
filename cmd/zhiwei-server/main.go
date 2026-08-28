@@ -356,6 +356,15 @@ func main() {
 		log.Fatalf("初次生成 cordis 配置: %v", err)
 	}
 
+	// 技能磁盘布局：<AgentSkillRoot>/enabled（dsh skills 插件监听根，经 env 注入）+ /disabled（移出即对模型不可见）。
+	// skills 插件常开（空目录=无技能），技能增删/启禁全部是文件操作，dsh watcher 热生效（spec §3）。
+	skillEnabledDir := filepath.Join(cfg.AgentSkillRoot, "enabled")
+	skillDisabledDir := filepath.Join(cfg.AgentSkillRoot, "disabled")
+	if err := os.MkdirAll(skillEnabledDir, 0o755); err != nil {
+		log.Fatalf("建技能目录: %v", err)
+	}
+	_ = os.MkdirAll(skillDisabledDir, 0o755)
+
 	// 2B-B：每登录用户一个 dsh 运行时 + 一个 MCP token 的进程池。baseCfg 是模板——
 	// CordisConfig/Model/SystemPrompt 全用户共享；MCPURL 留空、SessionRoot 作父目录，由 pool
 	// 按每用户 token 派生（MCPURL=mcpBaseURL+"/"+token、SessionRoot=base/u<uid>）。cap 超出按 LRU
@@ -364,6 +373,7 @@ func main() {
 	mcpBaseURL := "http://127.0.0.1:" + cfg.Port + "/internal/mcp"
 	agentPool := agent.NewRuntimePool(agent.RuntimeConfig{
 		CordisConfig: cfg.AgentCordisGenerated,
+		SkillDir:     skillEnabledDir,
 		Model:        agentModel, // 解析后的模型(ZW_AGENT_MODEL 空则回退 LLMStrongModel), 与报告/抽取一致
 		SessionRoot:  cfg.DSHSessionRoot,
 		SystemPrompt: cfg.DSHSystemPrompt,

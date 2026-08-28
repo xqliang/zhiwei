@@ -30,7 +30,12 @@
     persona: !!js process.env.DSH_SYSTEM_PROMPT ?? 'You are a friendly assistant.'
     workspaceContext: false
     skills:
-      enabled: false
+      enabled: true
+      filesystem:
+        customSkillDirs:
+          # 绝对路径由 Go 侧经 env 注入（ZW_AGENT_SKILL_DIR=<skillRoot>/enabled）；
+          # 兜底相对路径仅保证无 env 时配置合法（目录不存在=无技能，无害）。
+          - !!js process.env.ZW_AGENT_SKILL_DIR ?? './.dsh/skills'
     toolBash: false
     toolJobs: false
 
