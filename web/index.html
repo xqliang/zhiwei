@@ -1032,6 +1032,55 @@
         <div v-if="mcpErr" class="muted" style="font-size:var(--fs-xs); color:var(--danger,#c33); margin-top:6px">{{ mcpErr }}</div>
       </div>
     </div>
+
+    <!-- ============ 技能 Skills（搜索安装/启禁/删除，落盘热生效） ============ -->
+    <div class="card">
+      <h2 style="margin:0 0 4px">技能（Skills）</h2>
+      <div class="muted" style="font-size:var(--fs-sm); margin-bottom:16px">
+        从 skills.sh 搜索安装技能（SKILL.md 指令集），安装/启禁/删除<b>下一轮对话即生效</b>（热加载，无需重启）。
+        技能内容会作为指令注入模型，<b>仅安装可信来源</b>。
+      </div>
+
+      <!-- 已装列表 -->
+      <div style="display:flex; flex-direction:column; gap:8px">
+        <div v-for="s in agentSkills" :key="s.id"
+             style="display:flex; align-items:center; gap:12px; padding:10px 12px; border:1px solid var(--border,#ddd); border-radius:8px">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+            <input type="checkbox" :checked="s.enabled" @change="toggleSkill(s)">
+            <code style="font-weight:600">{{ s.name }}</code>
+          </label>
+          <span class="muted" style="font-size:var(--fs-xs); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">{{ s.description }}</span>
+          <span class="muted" style="font-size:var(--fs-xs)">{{ s.source || 'manual' }}</span>
+          <button class="btn" style="padding:4px 10px; font-size:var(--fs-xs)" @click="skillView = (skillView && skillView.id === s.id ? null : s)">查看</button>
+          <button class="btn" style="padding:4px 10px; font-size:var(--fs-xs)" @click="deleteSkill(s)">删除</button>
+        </div>
+        <div v-if="skillView" style="padding:12px; border:1px solid var(--border,#eee); border-radius:8px">
+          <div class="muted" style="font-size:var(--fs-xs); margin-bottom:6px">SKILL.md（{{ skillView.name }}）</div>
+          <pre class="chat-code" style="max-height:320px; overflow:auto">{{ skillView.content }}</pre>
+        </div>
+      </div>
+
+      <!-- 搜索安装 -->
+      <div style="margin-top:18px; padding-top:14px; border-top:1px solid var(--border,#eee)">
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <input class="txt" v-model="skillSearchQ" placeholder="搜索技能（如 git、pdf、code-review）" style="flex:1; min-width:220px" @keyup.enter="searchSkills">
+          <button class="btn primary" :disabled="skillSearching" @click="searchSkills">{{ skillSearching ? '搜索中…' : '搜索 skills.sh' }}</button>
+        </div>
+        <div v-if="skillResults.length" style="margin-top:10px; display:flex; flex-direction:column; gap:6px">
+          <div v-for="hit in skillResults" :key="hit.id" style="display:flex; align-items:center; gap:10px; font-size:var(--fs-sm)">
+            <code>{{ hit.name }}</code>
+            <span class="muted" style="font-size:var(--fs-xs); flex:1">{{ hit.id }}</span>
+            <span class="muted" style="font-size:var(--fs-xs)">{{ hit.installs }} 次安装</span>
+            <button class="btn" style="padding:4px 10px; font-size:var(--fs-xs)" @click="installSkill(hit.id)">安装</button>
+          </div>
+        </div>
+        <div style="margin-top:12px; display:flex; gap:8px; align-items:center">
+          <input class="txt" v-model="skillManual" placeholder="手动安装：owner/repo/skill" style="flex:1; min-width:220px">
+          <button class="btn" :disabled="!skillManual.trim()" @click="installSkill(skillManual.trim())">安装</button>
+        </div>
+        <div v-if="skillErr" class="muted" style="font-size:var(--fs-xs); color:var(--danger,#c33); margin-top:6px">{{ skillErr }}</div>
+      </div>
+    </div>
   </div>
 
   <!-- ============ 报告（日报/周报 + 话题状态） ============ -->

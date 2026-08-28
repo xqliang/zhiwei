@@ -365,6 +365,9 @@ func main() {
 	}
 	_ = os.MkdirAll(skillDisabledDir, 0o755)
 
+	// 技能安装器：codeload 拉 tarball + skills.sh 搜索代理（生产地址；测试注入 httptest，见 skillinstall_test）。
+	skillInst := agent.NewSkillInstaller("https://codeload.github.com", "https://www.skills.sh", cfg.AgentSkillRoot)
+
 	// 2B-B：每登录用户一个 dsh 运行时 + 一个 MCP token 的进程池。baseCfg 是模板——
 	// CordisConfig/Model/SystemPrompt 全用户共享；MCPURL 留空、SessionRoot 作父目录，由 pool
 	// 按每用户 token 派生（MCPURL=mcpBaseURL+"/"+token、SessionRoot=base/u<uid>）。cap 超出按 LRU
@@ -405,6 +408,7 @@ func main() {
 		agentConvs := &repo.AgentConversationRepo{DB: db}
 		agentMsgs := &repo.AgentMessageRepo{DB: db}
 		agentConfigs := &repo.AgentConfigRepo{DB: db}
+		agentSkills := &repo.AgentSkillRepo{DB: db}
 		// Orchestrator 按 conv.UserID 经 pool.Get 选运行时（2B-B：每用户独立 dsh + MCP token）。
 		// 装配可选的画像上下文头（每轮把 owner 概要 + 关键属性 + 当天日期前置到「发给 dsh 的文本」，
 		// 让 agent 天然「认识我」；Head/Seeds 现按 conv.UserID 取，不改落库，见 agent/context.go）。
@@ -452,6 +456,9 @@ func main() {
 				}
 				agentPool.ApplyMCPAll(ctx, agent.SpecsFromServers(rows))
 			},
+			// 技能管理（二期）：安装/启禁/删除都是磁盘操作（skillInst 持根目录），dsh skills 插件热加载。
+			Skills:    agentSkills,
+			SkillInst: skillInst,
 		})
 		// 预热 owner(id=1) 的 dsh 边车：启动后后台 spawn + initialize 握手，把 node 启动的一次性
 		// 延迟从「首条消息」挪到启动阶段（best-effort：失败仅记日志，首条消息会自行懒启动）。
