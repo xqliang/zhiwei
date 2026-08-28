@@ -226,6 +226,13 @@ const defaultCorrectMargin = 0.06
 // 噪声级别的微弱超出不触发翻转。远大于噪声的正常改判（领先 ≥0.09）不受影响。
 const correctScoreEps = 1e-6
 
+// segReattributeMinSim 逐段声纹改判（pass4）的绝对相似度下限：0.6——比 1:N 弱命中的
+// voiceprint.SoftMin(0.72) 更低（2026-08-28 需求）。pass4 只在「另一在场说话人比当前归属明显
+// 领先（> GapMin）」时才改判，故这里的绝对下限可放宽到 0.6：段级归属靠「相对领先」把关，
+// 下限只用于挡掉两边都很低（都不像）的噪声段。不复用 SoftMin：SoftMin 是 1:N 登记/复用阈值，
+// 改它会影响声纹匹配与 phantom 判定，故 pass4 用独立常量。
+const segReattributeMinSim = 0.6
+
 // correctPhantomHistoricalMatches 幽灵历史声纹纠正（2026-08-27 需求）：
 // ASR 过度切分出的幽灵组常命中历史库某真人；若该组名下的段被同录音另一在场说话人
 // 匹配得更好（max 相似度口径，与详情页 topVoiceMatchesVec 同口径），判为幽灵、整组改判
@@ -348,8 +355,8 @@ func mergeShortGroups(ctx context.Context, d StageDeps, tr *repo.Transcript,
 }
 
 // correctSegmentsByVoiceprint 逐段声纹改判（2026-08-28 需求）：ASR 分组内某段的段级声纹若明显更像
-// 另一个**在场说话人**（相似度 ≥ voiceprint.SoftMin 且比当前归属领先 > voiceprint.GapMin，与 1:N
-// 弱命中同判据），把该单段改判给那个人（corrected_reason='mismatch'）。自包含：重列段拿最终归属+
+// 另一个**在场说话人**（相似度 ≥ segReattributeMinSim(0.6) 且比当前归属领先 > voiceprint.GapMin），
+// 把该单段改判给那个人（corrected_reason='mismatch'）。自包含：重列段拿最终归属+
 // 逐段向量，不依赖 pass1-3 的内存模型（归属已被 phantom/short 改动过）。候选仅在场说话人（本录音各段
 // 非空 speaker_id 去重）——不改判给历史库里不在场的人。先算完全部再统一应用（避免本趟内相互影响判据）。
 //
@@ -397,7 +404,7 @@ func correctSegmentsByVoiceprint(ctx context.Context, d StageDeps, tr *repo.Tran
 				bestOther, bestID, hasBest = sc, spID, true
 			}
 		}
-		if hasBest && bestOther >= voiceprint.SoftMin && bestOther-cur > voiceprint.GapMin+correctScoreEps {
+		if hasBest && bestOther >= segReattributeMinSim && bestOther-cur > voiceprint.GapMin+correctScoreEps {
 			fixes = append(fixes, fix{segID: s.ID, from: assigned, to: bestID})
 		}
 	}

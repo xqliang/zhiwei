@@ -12,7 +12,7 @@
 
 ## 2. 目标
 
-对每一段：若**另一个在场说话人**的段级声纹相似度 `≥ 0.72` 且比**当前归属说话人**的相似度**领先 ≥ 0.06**，则把该段自动改判给那个说话人并标记「已修改」。
+对每一段：若**另一个在场说话人**的段级声纹相似度 `≥ 0.6` 且比**当前归属说话人**的相似度**领先 ≥ 0.06**，则把该段自动改判给那个说话人并标记「已修改」。
 
 ## 3. 非目标
 
@@ -22,12 +22,12 @@
 
 ## 4. 触发与判定
 
-阈值直接复用现有 `voiceprint.SoftMin = 0.72` 与 `voiceprint.GapMin = 0.06`（与 1:N 弱命中同参数，语义一致：明显更像且有区分度）。
+领先幅度门槛复用现有 `voiceprint.GapMin = 0.06`（与 1:N 弱命中同参数）。绝对相似度下限用 **pass4 独立常量 `segReattributeMinSim = 0.6`**（2026-08-28 需求，比 `voiceprint.SoftMin=0.72` 低）：段级归属主要靠「相对领先 > GapMin」把关，下限只用于挡掉两边都很低（都不像）的噪声段，故可放宽到 0.6。**不复用 `SoftMin`**——它是 1:N 登记/复用阈值，改它会影响声纹匹配与 phantom 判定。
 
 对每一段 `seg`（用其**最终归属**后的 speaker_id = `S`）：
 - `cur` = `segMaxScore(seg.embedding, samples[S])`（对 S 的多条样本取最大余弦，详情页同口径）
 - 遍历**其他在场说话人** `Y`（≠S），`bestOther` = max `segMaxScore(seg.embedding, samples[Y])`，`bestID` = 取得 max 的 Y
-- 若 `bestID != S` 且 `bestOther ≥ SoftMin` 且 `bestOther − cur ≥ GapMin` → 改判 `seg` 给 `bestID`。
+- 若 `bestID != S` 且 `bestOther ≥ segReattributeMinSim(0.6)` 且 `bestOther − cur ≥ GapMin` → 改判 `seg` 给 `bestID`。
 
 > 实现注（与代码对齐）：领先判据实际用**严格大于 + float32 容差** `bestOther − cur > GapMin + correctScoreEps`（`correctScoreEps=1e-6`），与 pass3 幽灵纠正同一容差纪律——pass4 与 pass3 会对**同一段**重算同一 float32 内积并共享边界，若这里用 `≥` 会在「恰好 = GapMin」的浮点舍入（如 0.06000001）上悄悄推翻 pass3 的「严格大于才纠正」判定（`TestStageSpeakerCorrectionMarginBoundary` 即守护此点）。`voiceprint.Matched` 用 `≥` 无需容差，因其比较的是 sidecar 下发的距离、非本地重算。见 `internal/pipeline/stage_speaker.go`。
 
@@ -42,7 +42,7 @@
 3. 逐段（有 embedding 且有归属）算 `cur` / `bestOther` / `bestID`；满足判据的收集为 `fix{segID, from:S, to:bestID}`。**先算完全部、再统一应用**（与 phantom/short 一致，避免链式影响本趟内其他段的判定基准）。
 4. 逐条 `d.Transcripts.ReattributeSegmentByVoiceprint(ctx, tr.ID, segID, from, to)`；best-effort（失败仅 `log`，不致命——段已有归属）。
 
-跳过：present 说话人 <2（无可比对象）、段无 embedding、段无归属（NULL）。归属人 `samples[S]` 为空时 `cur=0`（该段声纹不可取，若他人 ≥0.72 则允许改判——与「提向失败」同等降级）。
+跳过：present 说话人 <2（无可比对象）、段无 embedding、段无归属（NULL）。归属人 `samples[S]` 为空时 `cur=0`（该段声纹不可取，若他人 ≥0.6 则允许改判——与「提向失败」同等降级）。
 
 ## 6. 标记与各层改动
 
@@ -60,15 +60,16 @@
 
 - 只在整段（重）识别时跑：`runSpeakerStage` 在 `len(reps)==0`（幂等 reextract 全组已解析）时提前 return，pass4 不跑；reidentify 清空后重跑，pass4 覆盖全段。与 phantom/short 一致。
 - 与 phantom/short 顺序：pass4 最后、最细粒度，基于最终归属再评估。组级已选「最近/最像」，段级通常找不到再领先 0.06 的他人，实测不来回翻；单趟不迭代。
-- **对「信任 ASR 分组」的段级放宽**：仅当另一在场声纹明显更像（≥0.72 且领先 ≥0.06）才改，且只改到在场的人——有意、受控。
+- **对「信任 ASR 分组」的段级放宽**：仅当另一在场声纹明显更像（≥0.6 且领先 >0.06）才改，且只改到在场的人——有意、受控。下限 0.6 偏低是刻意的（靠相对领先把关），换来对错分段更积极的纠正。
 - present <2 或段无向量/归属人无样本 → 跳过或按降级处理（见 §5）。
 
 ## 8. 测试
 
 - **stage**（有状态 fake `libVoiceprint`）：
-  - `TestStageSpeakerReattributesSegmentToBetterPresentSpeaker`：两在场说话人 A、B；某段归属 A 但对 B 相似度 ≥0.72 且领先 ≥0.06 → 改判 B、`corrected_reason='mismatch'`、`corrected_from=A`。
+  - `TestStageSpeakerReattributesSegmentToBetterPresentSpeaker`：两在场说话人 A、B；某段归属 A 但对 B 相似度高且领先 ≥0.06 → 改判 B、`corrected_reason='mismatch'`、`corrected_from=A`。
+  - `TestStageSpeakerReattributesAtLoweredFloor`：对 B 相似 0.65（0.6≤0.65<0.72）且领先 ≥0.06 → 改判 B（守护下限降到 0.6）。
   - `TestStageSpeakerReattributeKeepsWhenLeadBelowGap`：领先 <0.06 → 不动、无标记。
-  - `TestStageSpeakerReattributeKeepsWhenBelowSoftMin`：best_other <0.72 → 不动。
+  - `TestStageSpeakerReattributeKeepsWhenBelowMinSim`：best_other <0.6 → 不动。
 - **repo**：`TestReattributeSegmentByVoiceprint`：写 `mismatch`+`corrected_from`；`AND speaker_id=fromID` 护栏（from 不匹配则不动）。
 - 回归：既有 phantom/short/repo/api 测试全绿。
 
