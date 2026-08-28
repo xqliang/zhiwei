@@ -135,4 +135,11 @@ func TestPersonChangeLogListBySession(t *testing.T) {
 	if len(rowsB) != 1 || rowsB[0].NewValue == nil || *rowsB[0].NewValue != `"豆豆（狗）"` {
 		t.Fatalf("sessB 应 1 条豆豆: %+v", rowsB)
 	}
+
+	// 显式守护：无 session 的手动改值行（new_value JSON 存为 `"手动改"`，含引号）绝不出现在任一 session 的结果里
+	for _, r := range append(append([]PersonChangeLog{}, rowsA...), rowsB...) {
+		if r.NewValue != nil && *r.NewValue == `"手动改"` {
+			t.Fatalf("无 session 的手动行不应被 ListBySession 命中: %+v", r)
+		}
+	}
 }
