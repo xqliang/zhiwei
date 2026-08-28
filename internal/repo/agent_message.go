@@ -52,3 +52,12 @@ func (r *AgentMessageRepo) ListByConversation(ctx context.Context, userID int64,
 		`SELECT * FROM agent_message WHERE conversation_id = ? AND user_id = ? ORDER BY id ASC`, convID.Int64(), userID)
 	return rows, err
 }
+
+// CountByConversation 统计某会话的 user 消息数（判定是否到第 2 轮）。行级 user_id 过滤。
+func (r *AgentMessageRepo) CountByConversation(ctx context.Context, userID int64, convID ids.ID) (int, error) {
+	var n int
+	err := r.DB.GetContext(ctx, &n,
+		`SELECT COUNT(*) FROM agent_message WHERE conversation_id=? AND user_id=? AND role='user'`,
+		convID.Int64(), userID)
+	return n, err
+}

@@ -69,3 +69,47 @@ func TestAgentMessageListEmpty(t *testing.T) {
 		t.Errorf("空会话应返回空列表, got %d", len(list))
 	}
 }
+
+func TestCountByConversation(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convRepo := &AgentConversationRepo{DB: db}
+	msgRepo := &AgentMessageRepo{DB: db}
+	ctx := t.Context()
+
+	c := &AgentConversation{Title: "计数用"}
+	if err := convRepo.Create(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	cid := &c.ID
+
+	// 2 条 user + 1 条 assistant
+	for _, m := range []*AgentMessage{
+		{ConversationID: cid, Role: "user", Content: "问1"},
+		{ConversationID: cid, Role: "assistant", Content: "答1"},
+		{ConversationID: cid, Role: "user", Content: "问2"},
+	} {
+		if err := msgRepo.Append(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := msgRepo.CountByConversation(ctx, 1, c.ID)
+	if err != nil {
+		t.Fatalf("CountByConversation: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("user 消息数应为 2, got %d", n)
+	}
+
+	// 越权：user_id=2 看不到 user_id=1 的消息 → 0
+	n2, err := msgRepo.CountByConversation(ctx, 2, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n2 != 0 {
+		t.Errorf("越权计数应为 0, got %d", n2)
+	}
+}
