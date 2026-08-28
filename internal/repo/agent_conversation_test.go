@@ -118,3 +118,38 @@ func TestAgentConversationMissing(t *testing.T) {
 		t.Errorf("SetDSHSession 缺失应返回 nil, got %v", err)
 	}
 }
+
+func TestAgentConversationUpdateTitle(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &AgentConversationRepo{DB: db}
+	ctx := t.Context()
+
+	c := &AgentConversation{Title: "原标题"}
+	if err := r.Create(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+
+	// 手动改标题 → source=manual
+	if err := r.UpdateTitle(ctx, 1, c.ID, "用户改的标题", "manual"); err != nil {
+		t.Fatalf("UpdateTitle: %v", err)
+	}
+	title, source, err := r.TitleState(ctx, 1, c.ID)
+	if err != nil {
+		t.Fatalf("TitleState: %v", err)
+	}
+	if title != "用户改的标题" || source != "manual" {
+		t.Errorf("got title=%q source=%q, want 用户改的标题/manual", title, source)
+	}
+
+	// 越权：user_id=2 改不到 user_id=1 的会话 → ErrNoRows
+	if err := r.UpdateTitle(ctx, 2, c.ID, "越权改", "manual"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("越权 UpdateTitle 应 ErrNoRows, got %v", err)
+	}
+	// 越权读也拿不到
+	if _, _, err := r.TitleState(ctx, 2, c.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("越权 TitleState 应 ErrNoRows, got %v", err)
+	}
+}

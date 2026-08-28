@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -14,6 +15,7 @@ type AgentConversation struct {
 	ID           ids.ID    `db:"id" json:"id"`
 	UserID       int64     `db:"user_id" json:"user_id"`
 	Title        string    `db:"title" json:"title"`
+	TitleSource  string    `db:"title_source" json:"title_source"` // ''|manual|auto
 	DSHSessionID string    `db:"dsh_session_id" json:"dsh_session_id"`
 	Status       string    `db:"status" json:"status"` // active|archived
 	CreatedAt    time.Time `db:"created_at" json:"created_at"`
@@ -68,4 +70,27 @@ func (r *AgentConversationRepo) SetDSHSession(ctx context.Context, id ids.ID, ds
 	_, err := r.DB.ExecContext(ctx,
 		`UPDATE agent_conversation SET dsh_session_id = ? WHERE id = ?`, dshSessionID, id.Int64())
 	return err
+}
+
+// UpdateTitle 改标题并标记来源（manual|auto）。行级 user_id 过滤（IDOR）：越权/不存在 → 0 行 → ErrNoRows。
+func (r *AgentConversationRepo) UpdateTitle(ctx context.Context, userID int64, id ids.ID, title, source string) error {
+	res, err := r.DB.ExecContext(ctx,
+		`UPDATE agent_conversation SET title=?, title_source=? WHERE id=? AND user_id=?`,
+		title, source, id.Int64(), userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// TitleState 取标题与来源（自动生成判定用）。行级 user_id 过滤：越权/不存在 → ErrNoRows。
+func (r *AgentConversationRepo) TitleState(ctx context.Context, userID int64, id ids.ID) (title, source string, err error) {
+	err = r.DB.QueryRowContext(ctx,
+		`SELECT title, title_source FROM agent_conversation WHERE id=? AND user_id=?`,
+		id.Int64(), userID).Scan(&title, &source)
+	return title, source, err
 }
