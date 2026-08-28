@@ -116,7 +116,7 @@
   .badge.pending, .badge.running, .badge.suggested { background: var(--warn-soft); color: var(--warn); }
   .badge.completed, .badge.done, .badge.active, .badge.confirmed { background: var(--ok-soft); color: var(--ok); }
   .badge.failed { background: var(--danger-soft); color: var(--danger); }
-  /* 转写段「已修改」徽章：幽灵历史声纹自动纠正的标记（琥珀色，悬停显示原判定说话人） */
+  /* 转写段「已修改」徽章：声纹自动纠正的标记（琥珀色，悬停显示原因）——含幽灵历史声纹改判(原判定 X)与过短噪声段并入 */
   .corrected-badge{display:inline-block;align-self:center;flex-shrink:0;margin-left:2px;padding:0 6px;font-size:var(--fs-xs);line-height:18px;color:#8a6d00;background:#fff4d6;border:1px solid #f0d98a;border-radius:9px;cursor:help}
   .badge.dismissed { background: var(--surface-sunken); color: var(--muted); }
 
@@ -628,10 +628,11 @@
               <!-- 段级声纹相似度 top-3（该段音频的向量 vs 全库，含归属者）：一句话可能混
                    多个人——top-1 不是归属说话人（或他人 ≥0.72）时该段可能被 ASR 切错/归错，
                    可用段首下拉换人或说话人 chip 的 ⇄ 批量切换。存量会话无逐段向量则不显示；
-                   「已修改」徽章贴在本行末尾（幽灵历史声纹自动纠正标记），无相似度数据时单独成行。 -->
-              <div v-if="(sg.voice_matches||[]).length || sg.corrected_from" class="muted" style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
-                   :title="(sg.voice_matches||[]).length ? '该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）')">
+                   「已修改」徽章贴在本行末尾（声纹自动纠正标记：幽灵历史声纹改判 或 过短噪声段并入），无相似度数据时单独成行。 -->
+              <div v-if="(sg.voice_matches||[]).length || sg.corrected_reason || sg.corrected_from" class="muted" style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
+                   :title="(sg.voice_matches||[]).length ? '该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错' : (sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'))">
                 <template v-if="(sg.voice_matches||[]).length">
+                  <span>时长 {{ (segDurMs(sg)/1000).toFixed(2) }} s ·</span>
                   <span>声纹 ≈</span>
                   <span v-for="(m, mi) in sg.voice_matches" :key="m.speaker_id"
                         :style="(m.similarity >= 0.72 && m.speaker_id !== sg.speaker_id) ? { color: 'var(--accent-2)', fontWeight: 600 } : {}"
@@ -639,8 +640,8 @@
                     {{ mi > 0 ? '·' : '' }} {{ m.name }} {{ m.similarity.toFixed(2) }}
                   </span>
                 </template>
-                <span v-if="sg.corrected_from" class="corrected-badge"
-                      :title="sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'">已修改</span>
+                <span v-if="sg.corrected_reason || sg.corrected_from" class="corrected-badge"
+                      :title="sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）')">已修改</span>
               </div>
             </div>
           </div>

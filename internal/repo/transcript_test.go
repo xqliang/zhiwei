@@ -509,3 +509,174 @@ func TestCorrectSegmentSpeakerAndClearOnManual(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeShortGroupAndReasonClearing 覆盖过短并入的标记写入 + corrected_reason 清理：
+// MergeShortGroup 把某 label 未回填段并入目标并写 corrected_reason='short'(corrected_from 为 NULL)；
+// CorrectSegmentSpeaker 写 'phantom'；手动换人/整人改判/重新识别清 corrected_reason。
+func TestMergeShortGroupAndReasonClearing(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tr := &TranscriptRepo{DB: db}
+	speakers := &SpeakerRepo{DB: db}
+	target := &Speaker{Name: "说话人target", Source: "auto"}
+	ghost := &Speaker{Name: "铉晔", Source: "auto"}
+	if err := speakers.Create(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := speakers.Create(ctx, ghost); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), target.ID); _ = speakers.Delete(context.Background(), ghost.ID) })
+
+	sid := ids.New()
+	if err := (&SessionRepo{DB: db}).Create(ctx, &AudioSession{
+		ID: sid, Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := &Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := tr.Create(ctx, tc); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.InsertSegments(ctx, []TranscriptSegment{
+		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "noise", Text: "嗯。", StartMS: 0, EndMS: 400},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 过短并入：label "noise" 未回填段 → 目标 target，reason=short，corrected_from 置空
+	if err := tr.MergeShortGroup(ctx, tc.ID, "noise", target.ID); err != nil {
+		t.Fatalf("MergeShortGroup: %v", err)
+	}
+	got, err := tr.ListSegments(ctx, tc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].SpeakerID == nil || *got[0].SpeakerID != target.ID {
+		t.Fatalf("应并入 target，实际 %+v", got[0].SpeakerID)
+	}
+	if got[0].CorrectedReason == nil || *got[0].CorrectedReason != "short" {
+		t.Fatalf("应 corrected_reason=short，实际 %+v", got[0].CorrectedReason)
+	}
+	if got[0].CorrectedFromSpeakerID != nil {
+		t.Fatalf("short 并入 corrected_from 应为 NULL，实际 %+v", got[0].CorrectedFromSpeakerID)
+	}
+
+	// 手动换人 → 清 corrected_reason
+	if err := tr.SetSegmentSpeakerByID(ctx, tc.ID, got[0].ID, ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	if got[0].CorrectedReason != nil {
+		t.Fatalf("手动换人后应清 corrected_reason，实际 %+v", got[0].CorrectedReason)
+	}
+
+	// CorrectSegmentSpeaker 写 phantom（segment 当前 speaker_id=ghost）
+	if err := tr.CorrectSegmentSpeaker(ctx, tc.ID, "noise", ghost.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	if got[0].CorrectedReason == nil || *got[0].CorrectedReason != "phantom" {
+		t.Fatalf("CorrectSegmentSpeaker 应写 phantom，实际 %+v", got[0].CorrectedReason)
+	}
+	// 整人改判(ReassignSpeakerSegments) → 清 corrected_reason（段当前 speaker_id=target）
+	if _, err := tr.ReassignSpeakerSegments(ctx, tc.ID, target.ID, ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	if got[0].CorrectedReason != nil {
+		t.Fatalf("整人改判后应清 corrected_reason，实际 %+v", got[0].CorrectedReason)
+	}
+	// 重新打上 phantom（段当前 speaker_id=ghost），供 ClearSegmentSpeakers 验证清理
+	if err := tr.CorrectSegmentSpeaker(ctx, tc.ID, "noise", ghost.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 重新识别清两者
+	if err := tr.ClearSegmentSpeakers(ctx, tc.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	if got[0].SpeakerID != nil || got[0].CorrectedReason != nil || got[0].CorrectedFromSpeakerID != nil {
+		t.Fatalf("重新识别应清空 speaker_id/corrected_reason/corrected_from，实际 %+v/%+v/%+v",
+			got[0].SpeakerID, got[0].CorrectedReason, got[0].CorrectedFromSpeakerID)
+	}
+}
+
+// mustSeg 按 sequence_no 取本 transcript 的某段（测试辅助）；未找到即 t.Fatal。
+func mustSeg(t *testing.T, tr *TranscriptRepo, transcriptID ids.ID, seq int) TranscriptSegment {
+	t.Helper()
+	segs, err := tr.ListSegments(context.Background(), transcriptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range segs {
+		if s.SequenceNo == seq {
+			return s
+		}
+	}
+	t.Fatalf("seg seq %d 未找到", seq)
+	return TranscriptSegment{}
+}
+
+// TestMergeShortGroupSkipsAssignedSegments 守护 MergeShortGroup 的 speaker_id IS NULL 护栏：
+// 同一 label 下已回填(手动/前次)的段不被并入覆盖，只并入尚未回填的段。
+func TestMergeShortGroupSkipsAssignedSegments(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tr := &TranscriptRepo{DB: db}
+	speakers := &SpeakerRepo{DB: db}
+	target := &Speaker{Name: "说话人target", Source: "auto"}
+	keep := &Speaker{Name: "说话人keep", Source: "auto"}
+	if err := speakers.Create(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := speakers.Create(ctx, keep); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), target.ID); _ = speakers.Delete(context.Background(), keep.ID) })
+	sid := ids.New()
+	if err := (&SessionRepo{DB: db}).Create(ctx, &AudioSession{
+		ID: sid, Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := &Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := tr.Create(ctx, tc); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.InsertSegments(ctx, []TranscriptSegment{
+		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "noise", Text: "未回填段", StartMS: 0, EndMS: 400},
+		{TranscriptID: tc.ID, SequenceNo: 2, SpeakerLabel: "noise", Text: "已回填段", StartMS: 500, EndMS: 900},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// seq2 预先回填给 keep（模拟已手动/前次赋值的同 label 段）
+	if err := tr.SetSegmentSpeakerByID(ctx, tc.ID, mustSeg(t, tr, tc.ID, 2).ID, keep.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.MergeShortGroup(ctx, tc.ID, "noise", target.ID); err != nil {
+		t.Fatalf("MergeShortGroup: %v", err)
+	}
+	got, err := tr.ListSegments(ctx, tc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bySeq := map[int]TranscriptSegment{}
+	for _, s := range got {
+		bySeq[s.SequenceNo] = s
+	}
+	// seq1(未回填) 被并入 target + short
+	if s := bySeq[1]; s.SpeakerID == nil || *s.SpeakerID != target.ID || s.CorrectedReason == nil || *s.CorrectedReason != "short" {
+		t.Fatalf("seq1 应并入 target/short，实际 %+v reason=%+v", s.SpeakerID, s.CorrectedReason)
+	}
+	// seq2(已回填) 不被覆盖：仍 keep、无 corrected_reason
+	if s := bySeq[2]; s.SpeakerID == nil || *s.SpeakerID != keep.ID || s.CorrectedReason != nil {
+		t.Fatalf("seq2 已回填不应被并入覆盖，实际 %+v reason=%+v", s.SpeakerID, s.CorrectedReason)
+	}
+}
