@@ -600,8 +600,8 @@
               <option v-for="sp in allSpeakers.filter(x => x.id !== sg.speaker_id)" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
               <option value="__new">+ 新加…</option>
             </select>
-            <span v-if="sg.corrected_from" class="corrected-badge"
-                  :title="sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'">已修改</span>
+            <span v-if="sg.corrected_reason || sg.corrected_from" class="corrected-badge"
+                  :title="sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）')">已修改</span>
             <button class="btn mini seg-play" @click="toggleTimelineSegPlay(sg)" style="padding:2px 8px; flex-shrink:0" :title="tlPlayingSegId===sg.id?'播放中，点暂停':'播放此段音频'">{{ tlPlayingSegId===sg.id ? '⏸' : '▶' }}</button>
             <button v-if="!mergeMode && segEnrollId!==sg.id" class="btn mini" :disabled="!canEnrollSeg(sg)" @click="startSegEnroll(sg)" style="padding:2px 8px; flex-shrink:0" :title="canEnrollSeg(sg) ? '用此段音频录入声纹' : ('时长 ' + (segDurMs(sg)/1000).toFixed(1) + 's 不足，至少需 ' + (MIN_ENROLL_MS/1000) + 's')">录入</button>
             <div class="seg-text">
@@ -624,6 +624,7 @@
                    可用段首下拉换人或说话人 chip 的 ⇄ 批量切换。存量会话无逐段向量则不显示 -->
               <div v-if="(sg.voice_matches||[]).length" class="muted" style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
                    title="该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错">
+                <span>时长 {{ (segDurMs(sg)/1000).toFixed(2) }} s ·</span>
                 <span>声纹 ≈</span>
                 <span v-for="(m, mi) in sg.voice_matches" :key="m.speaker_id"
                       :style="(m.similarity >= 0.72 && m.speaker_id !== sg.speaker_id) ? { color: 'var(--accent-2)', fontWeight: 600 } : {}"
