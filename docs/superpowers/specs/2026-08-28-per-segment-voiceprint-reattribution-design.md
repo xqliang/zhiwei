@@ -29,6 +29,8 @@
 - 遍历**其他在场说话人** `Y`（≠S），`bestOther` = max `segMaxScore(seg.embedding, samples[Y])`，`bestID` = 取得 max 的 Y
 - 若 `bestID != S` 且 `bestOther ≥ SoftMin` 且 `bestOther − cur ≥ GapMin` → 改判 `seg` 给 `bestID`。
 
+> 实现注（与代码对齐）：领先判据实际用**严格大于 + float32 容差** `bestOther − cur > GapMin + correctScoreEps`（`correctScoreEps=1e-6`），与 pass3 幽灵纠正同一容差纪律——pass4 与 pass3 会对**同一段**重算同一 float32 内积并共享边界，若这里用 `≥` 会在「恰好 = GapMin」的浮点舍入（如 0.06000001）上悄悄推翻 pass3 的「严格大于才纠正」判定（`TestStageSpeakerCorrectionMarginBoundary` 即守护此点）。`voiceprint.Matched` 用 `≥` 无需容差，因其比较的是 sidecar 下发的距离、非本地重算。见 `internal/pipeline/stage_speaker.go`。
+
 **在场说话人**：本录音各段当前非空 `speaker_id` 的去重集合。
 
 ## 5. 实现（新增 pass4，自包含）
