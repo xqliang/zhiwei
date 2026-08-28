@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -152,6 +153,69 @@ func (p *RuntimePool) evictLocked() []AgentRuntime {
 func closeAll(rts []AgentRuntime) {
 	for _, rt := range rts {
 		_ = rt.Close()
+	}
+}
+
+// ApplyMCPAll 向所有在用运行时下发期望的外部 MCP 服务集（热插拔）。逐个下发；某运行时报错则
+// 对其 EvictIdle 兜底（下一轮用 cordis.generated.yml respawn）。收集运行时引用在锁外调用，
+// 避免下发 RPC（可能阻塞）时占用池锁而卡住并发 Get/TokenUserID。
+func (p *RuntimePool) ApplyMCPAll(ctx context.Context, servers []MCPServerSpec) {
+	p.mu.Lock()
+	rts := make([]AgentRuntime, 0, len(p.runtimes))
+	for _, e := range p.runtimes {
+		rts = append(rts, e.rt)
+	}
+	p.mu.Unlock()
+	for _, rt := range rts {
+		if err := rt.ApplyMCP(ctx, servers); err != nil {
+			p.evictRuntimeIfIdle(rt)
+		}
+	}
+}
+
+// EvictIdle 关停所有空闲（无进行中轮次）运行时；下一轮 Prompt 惰性 respawn。锁内摘表、锁外 Close。
+func (p *RuntimePool) EvictIdle() {
+	p.mu.Lock()
+	var victims []AgentRuntime
+	for uid, e := range p.runtimes {
+		if e.rt.IsIdle() {
+			victims = append(victims, e.rt)
+			delete(p.runtimes, uid)
+			delete(p.byToken, e.token)
+			p.removeLRULocked(uid)
+		}
+	}
+	p.mu.Unlock()
+	closeAll(victims)
+}
+
+// evictRuntimeIfIdle 仅当 target 仍在池中且空闲时，把它从三表摘除并（锁外）Close——ApplyMCPAll
+// 的下发失败兜底。运行中（有活轮）的运行时不动，避免中断进行中的对话。
+func (p *RuntimePool) evictRuntimeIfIdle(target AgentRuntime) {
+	p.mu.Lock()
+	var victim AgentRuntime
+	for uid, e := range p.runtimes {
+		if e.rt == target && e.rt.IsIdle() {
+			victim = e.rt
+			delete(p.runtimes, uid)
+			delete(p.byToken, e.token)
+			p.removeLRULocked(uid)
+			break
+		}
+	}
+	p.mu.Unlock()
+	if victim != nil {
+		_ = victim.Close()
+	}
+}
+
+// removeLRULocked 从 lru 切片移除 uid（调用者持 mu）。
+func (p *RuntimePool) removeLRULocked(uid int64) {
+	for i, id := range p.lru {
+		if id == uid {
+			p.lru = append(p.lru[:i], p.lru[i+1:]...)
+			return
+		}
 	}
 }
 

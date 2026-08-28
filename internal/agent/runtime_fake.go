@@ -32,6 +32,9 @@ type FakeRuntime struct {
 	cancels       int                   // Cancel 被调用的次数
 	lastCancelSID string                // 最近一次 Cancel 的 sessionID
 	openTurns     map[string]chan Event // Block 模式下未关闭的 turn channel：sessionID -> ch
+
+	// LastApplied 记录最近一次 ApplyMCP 下发的服务集（pool_test 断言热插拔下发用）。
+	LastApplied []MCPServerSpec
 }
 
 // Warm 测试实现：no-op（无子进程可 spawn）。
@@ -91,3 +94,16 @@ func (f *FakeRuntime) CancelInfo() (calls int, lastSessionID string) {
 }
 
 func (f *FakeRuntime) Close() error { f.Closed++; return nil }
+
+// ApplyMCP 测试实现：记录下发内容即返回成功（无真 dsh）。
+func (f *FakeRuntime) ApplyMCP(_ context.Context, servers []MCPServerSpec) error {
+	f.LastApplied = servers
+	return nil
+}
+
+// IsIdle 测试实现：Block 模式下有挂起轮次即非空闲；否则空闲（无真 dsh 轮次跟踪）。
+func (f *FakeRuntime) IsIdle() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.openTurns) == 0
+}

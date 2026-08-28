@@ -31,6 +31,20 @@ type AgentRuntime interface {
 	Cancel(ctx context.Context, sessionID string) error
 	// Close 关停底层 dsh 进程。
 	Close() error
+	// ApplyMCP 向已启动的 dsh 下发期望的外部 MCP 服务集（热插拔）。未启动则跳过。
+	ApplyMCP(ctx context.Context, servers []MCPServerSpec) error
+	// IsIdle 报告本运行时当前无进行中轮次（EvictIdle 用）。
+	IsIdle() bool
+}
+
+// MCPServerSpec 是下发给 dsh mcp/apply 的单个外部 MCP 服务（不含 builtin）。
+type MCPServerSpec struct {
+	ServerName string            `json:"serverName"`
+	Transport  string            `json:"transport"`
+	URL        string            `json:"url,omitempty"`
+	Command    string            `json:"command,omitempty"`
+	Args       []string          `json:"args,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
 }
 
 // RuntimeConfig 是 dshRuntime 的启动参数（来自 config）。
@@ -359,6 +373,26 @@ func (r *dshRuntime) Cancel(ctx context.Context, sessionID string) error {
 	}
 	_, err := r.call(ctx, "session/cancel", map[string]any{"sessionId": sessionID})
 	return err
+}
+
+// ApplyMCP 向已启动的 dsh 下发期望的外部 MCP 服务集（热插拔）。未启动则跳过（下次 spawn 由
+// cordis.generated.yml 生效）。返回 dsh 侧错误（调用方据此决定是否降级 respawn）。
+func (r *dshRuntime) ApplyMCP(ctx context.Context, servers []MCPServerSpec) error {
+	r.startMu.Lock()
+	started := r.started
+	r.startMu.Unlock()
+	if !started {
+		return nil
+	}
+	_, err := r.call(ctx, "mcp/apply", map[string]any{"servers": servers})
+	return err
+}
+
+// IsIdle 无进行中轮次（EvictIdle 用）。
+func (r *dshRuntime) IsIdle() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.turns) == 0
 }
 
 func (r *dshRuntime) Close() error {
