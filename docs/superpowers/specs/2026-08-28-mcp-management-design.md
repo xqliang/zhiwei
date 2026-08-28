@@ -33,7 +33,7 @@
 ## 3. 架构总览
 
 ```
-设置页(Vue)  ──REST──▶  /api/agent/mcp (handlers.go)  ──▶  mcp_server 表(000021)
+设置页(Vue)  ──REST──▶  /api/agent/mcp (handlers.go)  ──▶  mcp_server 表(000022)
                                    │
                                    ├─▶ cordisgen: DB → 生成 cordis.generated.yml（供新 spawn 的进程读取）
                                    └─▶ 生效: 对每个在用 dsh 运行时下发 mcp/apply（热插拔）
@@ -42,9 +42,9 @@
 
 两条生效路径**互补**：`cordisgen` 保证「将来新 spawn 的进程」拿到正确配置；`mcp/apply` 保证「当前活着的进程」立即生效。
 
-## 4. 数据模型 — 迁移 `000021_mcp_server`
+## 4. 数据模型 — 迁移 `000022_mcp_server`
 
-沿用 golang-migrate 成对 up/down、InnoDB/utf8mb4；迁移号下一个是 000021（main HEAD 已有 000020_conversation_title）。
+沿用 golang-migrate 成对 up/down、InnoDB/utf8mb4；迁移号 000022（main 已有 000020_conversation_title 与 000021_segment_corrected_reason，原 000021 重排避让）。
 
 ```sql
 CREATE TABLE mcp_server (

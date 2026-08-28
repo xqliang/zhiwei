@@ -16,7 +16,7 @@
 
 ## File Structure
 
-- Create `migrations/000021_mcp_server.up.sql` / `.down.sql` — 表 + 内置行。
+- Create `migrations/000022_mcp_server.up.sql` / `.down.sql` — 表 + 内置行。
 - Create `internal/repo/mcp_server.go` — `MCPServer` 结构 + `MCPServerRepo`（List/Get/Create/Update/SetEnabled/Delete，builtin 保护）。
 - Create `internal/repo/mcp_server_test.go` — repo 集成测试。
 - Create `internal/agent/cordisgen.go` — 从 `[]repo.MCPServer` 生成 cordis 配置文本（基模板 + 外部块）。
@@ -34,15 +34,15 @@
 
 ---
 
-## Task 1: 迁移 `000021_mcp_server`
+## Task 1: 迁移 `000022_mcp_server`
 
 **Files:**
-- Create: `migrations/000021_mcp_server.up.sql`
-- Create: `migrations/000021_mcp_server.down.sql`
+- Create: `migrations/000022_mcp_server.up.sql`
+- Create: `migrations/000022_mcp_server.down.sql`
 
 - [ ] **Step 1: 写 up 迁移**
 
-`migrations/000021_mcp_server.up.sql`:
+`migrations/000022_mcp_server.up.sql`:
 ```sql
 -- 全局 MCP 服务清单：dsh agent 连接的外部/内置 MCP 服务。启禁/增删经 /api/agent/mcp 管理，
 -- 生效走 cordisgen 重写配置 + 运行时 mcp/apply 热插拔（见 spec 2026-08-28-mcp-management）。
@@ -72,7 +72,7 @@ VALUES (1, 'zhiwei', '知微内置工具', 'streamable-http', '', 1, 1);
 
 - [ ] **Step 2: 写 down 迁移**
 
-`migrations/000021_mcp_server.down.sql`:
+`migrations/000022_mcp_server.down.sql`:
 ```sql
 DROP TABLE IF EXISTS mcp_server;
 ```
@@ -85,7 +85,7 @@ Expected: 迁移全部 up 成功，日志出现 `19/u agent_config`…`21/u mcp_
 - [ ] **Step 4: Commit**
 
 ```bash
-git add migrations/000021_mcp_server.up.sql migrations/000021_mcp_server.down.sql
+git add migrations/000022_mcp_server.up.sql migrations/000022_mcp_server.down.sql
 git commit -m "feat(mcp): 000021 mcp_server 表 + 内置 zhiwei 行"
 ```
 
