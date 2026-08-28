@@ -1,8 +1,16 @@
 diff --git a/lib/index.js b/lib/index.js
-index e29c7e33c60e3c47b35467ad6b419a301b7e0f08..3219d26d9d93b7fbfc48125b386dd6e086c4c616 100644
+index e29c7e33c60e3c47b35467ad6b419a301b7e0f08..0f7b82e3996c44344833ef5f03295fe1332819f0 100644
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -117,6 +117,43 @@ var HarnessSdkJsonRpcServer = class {
+@@ -5,6 +5,7 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
+ import { carrierKeyOf } from "@deepseek-ai/dsh-scope";
+ import { SessionId } from "@deepseek-ai/dsh-session";
+ import * as LlmDeepSeek from "@deepseek-ai/dsh-llm-deepseek";
++import * as McpClient from "@deepseek-ai/dsh-mcp-client";
+ //#region lib/types/server.js
+ /**
+ * JSON-RPC methods and notifications for out-of-process harness SDKs.
+@@ -117,6 +118,104 @@ var HarnessSdkJsonRpcServer = class {
  		return { messageId: message.id };
  	}
  	/**
@@ -43,14 +51,76 @@ index e29c7e33c60e3c47b35467ad6b419a301b7e0f08..3219d26d9d93b7fbfc48125b386dd6e0
 +		};
 +	}
 +	/**
++	* Hot-swap the set of external MCP client plugins at runtime, without a
++	* process restart. Each desired server is materialised as a `dsh-mcp-client`
++	* plugin fork on the server context; forks whose config is unchanged are left
++	* alone, changed ones are disposed and re-forked, and forks not in the desired
++	* set are disposed. Per-server failures are reported instead of thrown so a
++	* single bad server does not poison the rest.
++	* @param params - `{ servers: McpClientConfig[] }` keyed by `serverName`.
++	* @returns `{ ok, results: Array<{ serverName, ok, unchanged?, error? }> }`.
++	*/
++	async applyMcp(params) {
++		if (this._mcpForks === void 0) this._mcpForks = new Map();
++		const servers = Array.isArray(params?.servers) ? params.servers : [];
++		const desired = new Map(servers.map((s) => [s.serverName, s]));
++		const results = [];
++		for (const [name, entry] of [...this._mcpForks]) if (!desired.has(name)) {
++			try {
++				entry.fork.dispose();
++			} catch {}
++			this._mcpForks.delete(name);
++		}
++		for (const [name, cfg] of desired) {
++			const sig = JSON.stringify(cfg);
++			const existing = this._mcpForks.get(name);
++			if (existing && existing.sig === sig) {
++				results.push({
++					serverName: name,
++					ok: true,
++					unchanged: true
++				});
++				continue;
++			}
++			if (existing) {
++				try {
++					existing.fork.dispose();
++				} catch {}
++				this._mcpForks.delete(name);
++			}
++			try {
++				const fork = await this.ctx.plugin(McpClient, cfg);
++				this._mcpForks.set(name, {
++					fork,
++					sig
++				});
++				results.push({
++					serverName: name,
++					ok: true
++				});
++			} catch (e) {
++				results.push({
++					serverName: name,
++					ok: false,
++					error: String(e && e.message || e)
++				});
++			}
++		}
++		return {
++			ok: results.every((r) => r.ok),
++			results
++		};
++	}
++	/**
  	* Dispose server-owned agents, adapter, and subscriptions to quiescence.
  	* The surrounding context remains running.
  	* @returns empty JSON-RPC result.
-@@ -156,6 +193,7 @@ var HarnessSdkJsonRpcServer = class {
+@@ -156,6 +255,8 @@ var HarnessSdkJsonRpcServer = class {
  		switch (method) {
  			case "initialize": return this.initialize(params);
  			case "session/prompt": return this.prompt(params);
 +			case "session/cancel": return this.cancel(params);
++			case "mcp/apply": return this.applyMcp(params);
  			case "shutdown": return this.shutdown();
  			default: throw new Error(`unknown DeepSeek Harness SDK runtime method: ${method}`);
  		}
