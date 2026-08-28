@@ -158,6 +158,9 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		if matched[i] {
 			speakerID = matchedID[i]
 		} else {
+			// 自动登记：name=说话人{5位随机串}，向量 BLOB 灾备。
+			// 登记向量优先用干净段（pickCleanSegVec 的结果）：混入他人语音的段会污染
+			// 聚合向量，新声纹「出厂即脏」；无干净段才退回聚合代表。
 			embVec, sampleN := g.rep, g.vecN
 			if g.clean != nil {
 				embVec, sampleN = g.clean, 1
@@ -169,6 +172,8 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 			if err := d.Voiceprint.Add(ctx, embVec, sp.ID); err != nil {
 				return fmt.Errorf("voiceprint add: %w", err)
 			}
+			// 样本行落库（多条声纹模型；nil = 旧装配跳过。失败仅 log 不致命——speaker/FAISS
+			// 已就绪，样本行缺失只影响后续聚合重算来源，可用启动 bootstrap 兜底补齐）
 			if d.SpeakerEmbeddings != nil {
 				e := &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: float32Blob(embVec), SampleCount: sampleN, Source: "auto"}
 				if err := d.SpeakerEmbeddings.Create(ctx, e); err != nil {
@@ -291,7 +296,8 @@ func buildGroupSamples(ctx context.Context, d StageDeps, reps []groupRep, matche
 // mergeShortGroups 过短噪声段并入（2026-08-28 需求）：把 pass2 缓起(deferred)的过短组
 // 整组并入本录音里最匹配的「非过短在场说话人」（max 余弦，详情页同口径），无阈值——噪声句总要
 // 归给对话中某人。目标候选排除其他 deferred 组。best-effort：失败仅 log（段已在 pass2 留 NULL，
-// 并入失败则维持 NULL，不致命）。hasTarget 已保证存在至少一个非 deferred 候选。
+// 并入失败则维持 NULL，不致命）。hasTarget 保证存在非 deferred 组；若其样本恰好全为空(历史匹配且
+// 向量不可取，极端)则 bestJ=-1，该段维持 NULL（与提向失败同等降级，不致命）。
 func mergeShortGroups(ctx context.Context, d StageDeps, tr *repo.Transcript,
 	reps []groupRep, deferred []bool, resolvedID []ids.ID, samples [][][]float32) error {
 	type fix struct {
@@ -319,6 +325,7 @@ func mergeShortGroups(ctx context.Context, d StageDeps, tr *repo.Transcript,
 			}
 		}
 		if bestJ >= 0 {
+			// resolvedID[bestJ] 指向真实存在的 speaker；即便该目标组的段刚被幽灵纠正搬走(本录音内可能零段)，并入引用仍有效。
 			fixes = append(fixes, fix{label: g.label, to: resolvedID[bestJ]})
 		}
 	}

@@ -904,3 +904,53 @@ func TestStageSpeakerAllShortFallbackRegisters(t *testing.T) {
 		t.Fatalf("全过短退回：两组各登记 1 个，实际 %d", len(fv.added))
 	}
 }
+
+// TestStageSpeakerMergesShortGroupIntoHistoricalMatch 过短噪声组并入的目标是「命中历史库的真人」：
+// label"A"(seq1,2)=真人且命中历史声纹 H（复用，不新建）；label"B"(seq3)=0.4s 噪声 → 并入 H。
+// 覆盖 mergeShortGroups 目标为 matched 组（resolvedID 指向历史 speaker）的路径。
+func TestStageSpeakerMergesShortGroupIntoHistoricalMatch(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "A", Text: "真人说话一", StartMS: 0, EndMS: 2000},
+		{SequenceNo: 2, SpeakerLabel: "A", Text: "真人说话二", StartMS: 2100, EndMS: 4100},
+		{SequenceNo: 3, SpeakerLabel: "B", Text: "嗯。", StartMS: 4200, EndMS: 4600},
+	})
+	vHist := make([]float32, 256)
+	vHist[0] = 1
+	hist := &repo.Speaker{Name: "历史真人", Source: "auto", Embedding: float32Blob(vHist), SampleCount: 1}
+	if err := speakers.Create(ctx, hist); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), hist.ID) })
+	vNoise := make([]float32, 256)
+	vNoise[0] = 0.69
+	vNoise[1] = float32(math.Sqrt(1 - 0.69*0.69))
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vHist, 2: vHist, 3: vNoise}, // A 命中历史 H；B 噪声最近 H
+		entries:  []libEntry{{id: hist.ID, vec: vHist}},
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	bySeq := map[int]repo.TranscriptSegment{}
+	for _, s := range segs {
+		bySeq[s.SequenceNo] = s
+	}
+	// A 复用历史 H
+	if s := bySeq[1]; s.SpeakerID == nil || *s.SpeakerID != hist.ID {
+		t.Fatalf("真人组应复用历史 H %v，实际 %+v", hist.ID, s.SpeakerID)
+	}
+	// B(过短) 并入 H + short
+	seg3 := bySeq[3]
+	if seg3.SpeakerID == nil || *seg3.SpeakerID != hist.ID {
+		t.Fatalf("过短段应并入历史 H %v，实际 %+v", hist.ID, seg3.SpeakerID)
+	}
+	if seg3.CorrectedReason == nil || *seg3.CorrectedReason != "short" {
+		t.Fatalf("过短段应 corrected_reason=short，实际 %+v", seg3.CorrectedReason)
+	}
+	if len(fv.added) != 0 {
+		t.Fatalf("A 命中历史、B 缓起并入，应无新登记，实际 %d", len(fv.added))
+	}
+}
