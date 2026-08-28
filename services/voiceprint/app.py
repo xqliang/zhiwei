@@ -76,6 +76,10 @@ class _NumpyIndex:
     def count(self) -> int:
         return len(self.ids)
 
+    def all_ids(self) -> list:
+        """返回索引中所有 speaker_id（不去重，去重由调用方负责）。"""
+        return list(self.ids)
+
     def _npz_path(self) -> str:
         # np.savez 会在无 .npz 后缀时自动补 .npz；这里显式拼好，读写用同一路径。
         return INDEX_PATH + ".npz"
@@ -170,6 +174,19 @@ class RemoveReq(BaseModel):
 def health() -> dict:
     n = _index.count() if isinstance(_index, _NumpyIndex) else _index.ntotal
     return {"status": "ok", "model": type(_embedder).__name__, "n_vectors": n}
+
+
+@app.get("/ids")
+def list_ids() -> dict:
+    """返回索引中所有 speaker_id（去重）——resync 时清理幽灵 ID（DB 已删但索引残留）。"""
+    ids = _index.all_ids() if isinstance(_index, _NumpyIndex) else []
+    if not isinstance(_index, _NumpyIndex) and hasattr(_index, "ntotal") and _index.ntotal > 0:
+        # FAISS IndexIDMap：从 id_map 提取所有 id
+        try:
+            ids = [int(_index.id_map.at(i)) for i in range(_index.ntotal)]
+        except Exception:
+            ids = []
+    return {"ids": sorted(set(ids))}
 
 
 @app.post("/embed")

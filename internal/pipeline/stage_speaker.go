@@ -129,6 +129,12 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		// 或区分性弱命中 sim≥0.72 且明显领先第二名（top1−top2≥0.06）——
 		// 分数略低于阈值但明显是同一个人的也复用，减少真匹配被误登记成新声纹。
 		if res.Matched && voiceprint.Matched(res.Distance, res.SecondDistance, threshold) {
+			// 防御性校验：FAISS 索引可能残留已删说话人（删 DB 时 /remove 失败/旧装配未清），
+			// 此时 Search 返回幽灵 id——必须确认该 speaker 仍存在于 DB，否则按未命中登记新声纹。
+			if sp, gerr := d.Speakers.Get(ctx, res.SpeakerID); gerr != nil || sp == nil {
+				log.Printf("[speaker] Search 命中幽灵说话人 %s（DB 已不存在，按未命中登记新声纹）: %v", res.SpeakerID, gerr)
+				continue
+			}
 			matched[i], matchedID[i] = true, res.SpeakerID
 		}
 	}

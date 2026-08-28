@@ -180,7 +180,9 @@ func (h *SpeakerHandler) Resync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spN, vecN := 0, 0
+	mysqlIDs := make(map[ids.ID]bool, len(list))
 	for _, sp := range list {
+		mysqlIDs[sp.ID] = true
 		entries, err := h.SpeakerEmbeddings.ListBySpeaker(r.Context(), sp.ID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -201,7 +203,20 @@ func (h *SpeakerHandler) Resync(w http.ResponseWriter, r *http.Request) {
 		}
 		spN++
 	}
-	writeJSON(w, map[string]any{"ok": true, "speakers": spN, "vectors": vecN})
+	// 清理幽灵 ID：FAISS 索引中可能残留已删说话人（删 DB 时 /remove 失败/旧装配未清），
+	// 这些幽灵 ID 会导致 speaker stage Search 误命中非存在说话人。逐条 Remove 清理。
+	ghostN := 0
+	if indexIDs, err := h.Voiceprint.IDs(r.Context()); err == nil {
+		for _, sid := range indexIDs {
+			if !mysqlIDs[sid] {
+				_ = h.Voiceprint.Remove(r.Context(), sid)
+				ghostN++
+			}
+		}
+	} else {
+		log.Printf("[voiceprint] resync 取索引 ID 列表失败（跳过幽灵清理）: %v", err)
+	}
+	writeJSON(w, map[string]any{"ok": true, "speakers": spN, "vectors": vecN, "ghosts_removed": ghostN})
 }
 
 // List 全部 active 说话人（管理页/换人下拉用）。随机名说话人附 LLM 推断的候选名（倒排）；

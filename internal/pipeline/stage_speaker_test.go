@@ -63,6 +63,7 @@ func (f *fakeVoiceprint) Add(_ context.Context, vec []float32, id ids.ID) error 
 	return nil
 }
 func (f *fakeVoiceprint) Remove(_ context.Context, _ ids.ID) error { return nil }
+func (f *fakeVoiceprint) IDs(_ context.Context) ([]ids.ID, error)  { return nil, nil }
 
 var _ voiceprint.Client = (*fakeVoiceprint)(nil) // 编译期接口符合性
 
@@ -555,6 +556,17 @@ func (f *libVoiceprint) Add(_ context.Context, vec []float32, id ids.ID) error {
 	return nil
 }
 func (f *libVoiceprint) Remove(_ context.Context, _ ids.ID) error { return nil }
+func (f *libVoiceprint) IDs(_ context.Context) ([]ids.ID, error) {
+	seen := map[ids.ID]bool{}
+	var ids2 []ids.ID
+	for _, e := range f.entries {
+		if !seen[e.id] {
+			seen[e.id] = true
+			ids2 = append(ids2, e.id)
+		}
+	}
+	return ids2, nil
+}
 
 var _ voiceprint.Client = (*libVoiceprint)(nil)
 

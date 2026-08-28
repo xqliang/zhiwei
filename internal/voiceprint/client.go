@@ -36,6 +36,8 @@ type Client interface {
 	Add(ctx context.Context, vec []float32, id ids.ID) error
 	// Remove 删除某个说话人的全部声纹（删除说话人时调用）。
 	Remove(ctx context.Context, id ids.ID) error
+	// IDs 返回索引中所有 speaker_id（resync 时清理幽灵 ID：DB 已删但索引残留）。
+	IDs(ctx context.Context) ([]ids.ID, error)
 }
 
 // httpClient 是 Client 的默认 HTTP 实现。
@@ -125,4 +127,32 @@ func (c *httpClient) Add(ctx context.Context, vec []float32, id ids.ID) error {
 
 func (c *httpClient) Remove(ctx context.Context, id ids.ID) error {
 	return c.post(ctx, "/remove", map[string]int64{"speaker_id": id.Int64()}, nil)
+}
+
+// IDs 返回 sidecar 索引中所有 speaker_id（去重，升序）——resync 时用于清理幽灵 ID。
+func (c *httpClient) IDs(ctx context.Context) ([]ids.ID, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+"/ids", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("voiceprint /ids: http %d: %s", resp.StatusCode, raw)
+	}
+	var out struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("voiceprint /ids 解析: %w", err)
+	}
+	result := make([]ids.ID, len(out.IDs))
+	for i, v := range out.IDs {
+		result[i] = ids.ID(v)
+	}
+	return result, nil
 }
