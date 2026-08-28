@@ -3008,6 +3008,44 @@ const app = createApp({
       catch (e) { showError(e); }
     }
 
+    // ---------- 设置：技能 Skills（全局；从 skills.sh 搜索/手动 GitHub 路径安装，落盘热生效） ----------
+    // 后端契约：GET /api/agent/skills → {skills:[AgentSkill]}；GET /skills/search?q= → {skills:[{id,name,installs,source}]}；
+    // POST /skills/install {source:'owner/repo/skill'}；PATCH /skills/{id} {enabled}；DELETE /skills/{id}。
+    // 安装/启禁/删除都是磁盘操作，dsh skills 插件热加载，下一轮对话即生效。
+    const agentSkills = ref([]);
+    const skillSearchQ = ref('');
+    const skillResults = ref([]);
+    const skillSearching = ref(false);
+    const skillManual = ref('');
+    const skillErr = ref('');
+    const skillView = ref(null); // 展开查看的技能（含 content）
+    async function loadSkills() {
+      try { const d = await api('GET', '/api/agent/skills'); agentSkills.value = (d && d.skills) || []; }
+      catch (e) { showError(e); }
+    }
+    async function searchSkills() {
+      const q = (skillSearchQ.value || '').trim();
+      if (!q) return;
+      skillSearching.value = true; skillErr.value = '';
+      try { const d = await api('GET', '/api/agent/skills/search?q=' + encodeURIComponent(q)); skillResults.value = (d && d.skills) || []; }
+      catch (e) { skillErr.value = (e && e.message) || String(e); }
+      finally { skillSearching.value = false; }
+    }
+    async function installSkill(source) {
+      skillErr.value = '';
+      try { await api('POST', '/api/agent/skills/install', { source }); await loadSkills(); }
+      catch (e) { skillErr.value = (e && e.message) || String(e); }
+    }
+    async function toggleSkill(s) {
+      try { await api('PATCH', '/api/agent/skills/' + s.id, { enabled: !s.enabled }); await loadSkills(); }
+      catch (e) { showError(e); }
+    }
+    async function deleteSkill(s) {
+      if (!confirm('删除技能「' + s.name + '」？')) return;
+      try { await api('DELETE', '/api/agent/skills/' + s.id); skillView.value = null; await loadSkills(); }
+      catch (e) { showError(e); }
+    }
+
     // ---------- 报告（日报/周报 + 话题状态；后端 internal/api/review.go + internal/review/types.go） ----------
     // 契约（读源确认）：
     //   日报  GET  /api/reviews/daily?date=YYYY-MM-DD       → DailyReview 行 {content, status, review_date, created_at}
@@ -3175,7 +3213,7 @@ const app = createApp({
       // 问知微 tab：拉会话列表；若已有选中会话，重拉历史 + 重连 WS（切回时恢复现场）。
       if (name === 'agent') { loadAgentConversations(); if (agentConvId.value) { const cid = agentConvId.value; loadAgentHistory(cid); openAgentWS(cid); } }
       // 设置 tab：拉当前人设（identity/soul）到表单。
-      if (name === 'settings') { loadAgentConfig(); loadMCP(); }
+      if (name === 'settings') { loadAgentConfig(); loadMCP(); loadSkills(); }
       // 报告 tab：拉主题列表（话题状态选择器数据源）+ 按当前日报/周报类型加载报告。
       if (name === 'reports') { loadTopics(); loadReport(); }
       // 人物 tab：进入时复位详情/删除确认态，拉名册 + 已删除列表 + 确认队列（跨平面 pending 并集，独立刷新）+ 属性目录（受控输入元数据，懒加载缓存）。
@@ -3231,6 +3269,7 @@ const app = createApp({
       loadAgentConversations, newAgentConversation, selectAgentConversation, startEditConv, cancelEditConv, saveAgentTitle, askDeleteConv, cancelDeleteConv, deleteAgentConversation, sendAgentMessage, stopAgentMessage,
       agentCfgIdentity, agentCfgSoul, agentCfgSaving, agentCfgSaved, agentCfgPreview, agentCfgSystemPrompt, agentCfgOwnerHead, agentCfgFullPrompt, loadAgentConfig, saveAgentConfig,
       mcpServers, mcpForm, mcpErr, loadMCP, addMCP, toggleMCP, deleteMCP,
+      agentSkills, skillSearchQ, skillResults, skillSearching, skillManual, skillErr, skillView, loadSkills, searchSkills, installSkill, toggleSkill, deleteSkill,
       confirmProposal, dismissProposal,
       renderMarkdown, reportSections, prettyJSON,
       // 报告（日报/周报 + 话题状态）

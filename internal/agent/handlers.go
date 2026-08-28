@@ -29,6 +29,8 @@ type AgentHandler struct {
 	// OnMCPChange 在任一 MCP 写操作成功后调用一次（重生成 cordis + 对在用运行时热插拔下发）；
 	// nil 时只落库不生效（下次进程重启才读新配置）。
 	OnMCPChange func(ctx context.Context)
+	Skills      *repo.AgentSkillRepo // 已装技能元数据；nil 时技能端点 503
+	SkillInst   *SkillInstaller      // 安装器（tarball/搜索代理 + 磁盘根）；nil 时技能端点 503
 }
 
 // RegisterAgent 挂载 /api/agent 路由。
@@ -51,6 +53,12 @@ func RegisterAgent(r chi.Router, h *AgentHandler) {
 	r.Put("/api/agent/mcp/{id}", h.updateMCP)              // 编辑（内置行仅 display_name）
 	r.Patch("/api/agent/mcp/{id}", h.patchMCP)             // 启/禁（内置禁用被拒）
 	r.Delete("/api/agent/mcp/{id}", h.deleteMCP)           // 删除（内置拒删）
+	r.Get("/api/agent/skills", h.listSkills)               // 技能清单（已装）
+	r.Get("/api/agent/skills/search", h.searchSkills)      // skills.sh 搜索代理（在 /{id} 前注册）
+	r.Post("/api/agent/skills/install", h.installSkill)    // 安装（owner/repo/skill）
+	r.Get("/api/agent/skills/{id}", h.getSkill)
+	r.Patch("/api/agent/skills/{id}", h.patchSkill)  // 启禁（目录 rename 热生效）
+	r.Delete("/api/agent/skills/{id}", h.deleteSkill)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

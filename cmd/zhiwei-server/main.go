@@ -357,6 +357,23 @@ func main() {
 		log.Fatalf("初次生成 cordis 配置: %v", err)
 	}
 
+	// 技能磁盘布局：<AgentSkillRoot>/enabled（dsh skills 插件监听根，经 env 注入）+ /disabled（移出即对模型不可见）。
+	// skills 插件常开（空目录=无技能），技能增删/启禁全部是文件操作，dsh watcher 热生效（spec §3）。
+	// 必须【绝对路径】：dsh 子进程 cwd=sidecarDir，相对路径会相对它再解析一次而失效（同 CordisConfig 的坑）。
+	skillRoot := cfg.AgentSkillRoot
+	if abs, err := filepath.Abs(skillRoot); err == nil {
+		skillRoot = abs
+	}
+	skillEnabledDir := filepath.Join(skillRoot, "enabled")
+	skillDisabledDir := filepath.Join(skillRoot, "disabled")
+	if err := os.MkdirAll(skillEnabledDir, 0o755); err != nil {
+		log.Fatalf("建技能目录: %v", err)
+	}
+	_ = os.MkdirAll(skillDisabledDir, 0o755)
+
+	// 技能安装器：codeload 拉 tarball + skills.sh 搜索代理（生产地址；测试注入 httptest，见 skillinstall_test）。
+	skillInst := agent.NewSkillInstaller("https://codeload.github.com", "https://www.skills.sh", skillRoot)
+
 	// 2B-B：每登录用户一个 dsh 运行时 + 一个 MCP token 的进程池。baseCfg 是模板——
 	// CordisConfig/Model/SystemPrompt 全用户共享；MCPURL 留空、SessionRoot 作父目录，由 pool
 	// 按每用户 token 派生（MCPURL=mcpBaseURL+"/"+token、SessionRoot=base/u<uid>）。cap 超出按 LRU
@@ -365,6 +382,7 @@ func main() {
 	mcpBaseURL := "http://127.0.0.1:" + cfg.Port + "/internal/mcp"
 	agentPool := agent.NewRuntimePool(agent.RuntimeConfig{
 		CordisConfig: cfg.AgentCordisGenerated,
+		SkillDir:     skillEnabledDir,
 		Model:        agentModel, // 解析后的模型(ZW_AGENT_MODEL 空则回退 LLMStrongModel), 与报告/抽取一致
 		SessionRoot:  cfg.DSHSessionRoot,
 		SystemPrompt: cfg.DSHSystemPrompt,
@@ -396,6 +414,7 @@ func main() {
 		agentConvs := &repo.AgentConversationRepo{DB: db}
 		agentMsgs := &repo.AgentMessageRepo{DB: db}
 		agentConfigs := &repo.AgentConfigRepo{DB: db}
+		agentSkills := &repo.AgentSkillRepo{DB: db}
 		// Orchestrator 按 conv.UserID 经 pool.Get 选运行时（2B-B：每用户独立 dsh + MCP token）。
 		// 装配可选的画像上下文头（每轮把 owner 概要 + 关键属性 + 当天日期前置到「发给 dsh 的文本」，
 		// 让 agent 天然「认识我」；Head/Seeds 现按 conv.UserID 取，不改落库，见 agent/context.go）。
@@ -443,6 +462,9 @@ func main() {
 				}
 				agentPool.ApplyMCPAll(ctx, agent.SpecsFromServers(rows))
 			},
+			// 技能管理（二期）：安装/启禁/删除都是磁盘操作（skillInst 持根目录），dsh skills 插件热加载。
+			Skills:    agentSkills,
+			SkillInst: skillInst,
 		})
 		// 预热 owner(id=1) 的 dsh 边车：启动后后台 spawn + initialize 握手，把 node 启动的一次性
 		// 延迟从「首条消息」挪到启动阶段（best-effort：失败仅记日志，首条消息会自行懒启动）。

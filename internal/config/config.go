@@ -56,6 +56,7 @@ type Config struct {
 	AgentCordisConfig     string // ZW_AGENT_CORDIS_CONFIG：cordis.yml 基模板路径（生成文件的输入，不直接给 dsh 用）
 	AgentCordisGenerated  string // ZW_AGENT_CORDIS_GENERATED：生成的 cordis 配置路径（基模板 + 启用的外部 MCP 块；dsh 实际读它）
 	AgentMCPURL           string // ZW_AGENT_MCP_URL：供 cordis.yml 连回的 MCP-HTTP 地址
+	AgentSkillRoot        string // ZW_AGENT_SKILL_ROOT：技能磁盘根（enabled/ + disabled/ 子目录），dsh 热加载源
 	DSHSessionRoot    string // DSH_SESSION_ROOT：dsh 内部会话日志目录
 	DSHSystemPrompt   string // DSH_SYSTEM_PROMPT：dsh 进程级人设
 	AgentRetrieveTopK int    // ZW_AGENT_RETRIEVE_TOPK：上下文头检索种子条数
@@ -138,6 +139,7 @@ func Load() (*Config, error) {
 		AgentCordisConfig:    getenv("ZW_AGENT_CORDIS_CONFIG", "services/agent-sidecar/cordis.agent.yml"),
 		AgentCordisGenerated: getenv("ZW_AGENT_CORDIS_GENERATED", "services/agent-sidecar/cordis.generated.yml"),
 		AgentMCPURL:          getenv("ZW_AGENT_MCP_URL", "http://127.0.0.1:8080/internal/mcp"),
+		AgentSkillRoot:       getenv("ZW_AGENT_SKILL_ROOT", "./data/agent-skills"),
 		DSHSessionRoot:    getenv("DSH_SESSION_ROOT", "./data/dsh-sessions"),
 		DSHSystemPrompt:   getenv("DSH_SYSTEM_PROMPT", "你是知微(zhiwei)个人智能体，基于用户的记忆/时间线/话题/待办用简体中文亲切、简洁地回答；需要时调用工具读取用户数据，不要编造。"),
 		AgentRetrieveTopK: getenvInt("ZW_AGENT_RETRIEVE_TOPK", 10),
