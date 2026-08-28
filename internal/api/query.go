@@ -370,6 +370,9 @@ type segmentView struct {
 	// 值为被顶掉的原历史说话人 id，CorrectedFromName 为其显示名（前端"已修改"徽章 + tooltip）。
 	CorrectedFrom     string `json:"corrected_from,omitempty"`
 	CorrectedFromName string `json:"corrected_from_name,omitempty"`
+	// CorrectedReason 非空=该段被自动纠正；'phantom'=幽灵历史声纹改判(配 CorrectedFrom)；
+	// 'short'=过短噪声段并入最近在场说话人(CorrectedFrom 为空)。前端据此渲染徽章 + tooltip。
+	CorrectedReason string `json:"corrected_reason,omitempty"`
 }
 
 func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
@@ -442,6 +445,9 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 					}
 					views[i].CorrectedFromName = name
 				}
+			}
+			if sg.CorrectedReason != nil {
+				views[i].CorrectedReason = *sg.CorrectedReason
 			}
 			// 段级声纹 top-3（含归属者）：speaker stage 落库的逐段向量 vs 全库余弦
 			if len(lib) > 0 && len(sg.Embedding) > 0 {

@@ -1084,3 +1084,68 @@ func mustJobID(t *testing.T, sessions *repo.SessionRepo, sid ids.ID) ids.ID {
 	}
 	return *s.JobID
 }
+
+// TestGetSessionCorrectedReasonShort 详情返回过短并入段的 corrected_reason=short（corrected_from 为空）。
+func TestGetSessionCorrectedReasonShort(t *testing.T) {
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+	target := &repo.Speaker{Name: "说话人target", Source: "auto"}
+	if err := speakers.Create(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), target.ID) })
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tc); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "noise", Text: "嗯。", StartMS: 0, EndMS: 400},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.MergeShortGroup(ctx, tc.ID, "noise", target.ID); err != nil {
+		t.Fatal(err)
+	}
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(w, req.WithContext(auth.WithUserID(req.Context(), 1)))
+		})
+	})
+	RegisterQuery(r, &QueryHandler{Sessions: sessions, Transcripts: transcripts, Speakers: speakers})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Segments []struct {
+			CorrectedReason string `json:"corrected_reason"`
+			CorrectedFrom   string `json:"corrected_from"`
+		} `json:"segments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Segments) != 1 {
+		t.Fatalf("应 1 段，实际 %d", len(resp.Segments))
+	}
+	if resp.Segments[0].CorrectedReason != "short" {
+		t.Fatalf("corrected_reason 应为 short，实际 %q", resp.Segments[0].CorrectedReason)
+	}
+	if resp.Segments[0].CorrectedFrom != "" {
+		t.Fatalf("short 段 corrected_from 应为空，实际 %q", resp.Segments[0].CorrectedFrom)
+	}
+}
