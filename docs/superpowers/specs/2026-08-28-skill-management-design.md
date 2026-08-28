@@ -59,7 +59,10 @@ dsh spine（skills 插件常开）── 监听 ZW_AGENT_SKILL_DIR=…/agent-ski
           - !!js process.env.ZW_AGENT_SKILL_DIR ?? './.dsh/skills-fallback'
 ```
 - 绝对路径经 env 注入（对齐 `ZW_AGENT_MCP_URL` 模式）：`runtime.go` 的 `dshEnv()` 追加 `ZW_AGENT_SKILL_DIR=<skillRoot>/enabled`。
-- **注意**：`DSH_HOME` 已设为 `<sidecar>/.dsh`，dsh 默认还会扫 `<dshHome>/skills`（user-dsh root）——我们不用它（技能全部经 customSkillDirs 管理）；`includeDefaultRoots` 保持默认 true 无妨（那些目录不存在即无技能）。
+- **注意（e2e 实证修订）**：
+  - `skillRoot` 必须**绝对化**（dsh 子进程 cwd=sidecarDir，相对路径相对它再解析而失效——同 CordisConfig 的坑）。
+  - `includeDefaultRoots` 必须为 **false**：默认 true 时 dsh 会扫到本机 `~/.agents/skills` 等目录的技能，绕过管理界面泄漏给模型（管理的=可见的全集）。
+  - `DSH_HOME` 已设为 `<sidecar>/.dsh`；默认 roots 关闭后只剩 customSkillDirs 一个来源。
 - 运行中的旧进程（未启 skills 插件）自然不加载技能；下轮 respawn 后统一生效——不为此做强制 evict（部署重启本来就会发生；一期合并后首次部署即全量生效）。
 
 ## 5. 存储布局与数据模型
