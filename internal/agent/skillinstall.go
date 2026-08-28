@@ -297,3 +297,31 @@ func (si *SkillInstaller) Search(ctx context.Context, q string) ([]SkillSearchHi
 	}
 	return out.Skills, nil
 }
+
+// renameSkill 启禁的磁盘动作：enabled↔disabled 目录 rename（chokidar 热生效）。
+// 目录缺失（磁盘态丢失）返回明确错误。
+func (si *SkillInstaller) renameSkill(name string, enable bool) error {
+	from := filepath.Join(si.DisabledDir(), name)
+	to := filepath.Join(si.EnabledDir(), name)
+	if !enable {
+		from, to = to, from
+	}
+	if _, err := os.Stat(from); err != nil {
+		return fmt.Errorf("技能目录缺失（%s），请删除后重装: %w", from, err)
+	}
+	if _, err := os.Stat(to); err == nil {
+		return fmt.Errorf("目标目录已存在: %s", to)
+	}
+	return os.Rename(from, to)
+}
+
+// removeSkill 删除磁盘上的技能目录（enabled 与 disabled 下都试；幂等）。
+func (si *SkillInstaller) removeSkill(name string) error {
+	for _, dir := range []string{si.EnabledDir(), si.DisabledDir()} {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			return os.RemoveAll(p)
+		}
+	}
+	return nil
+}
