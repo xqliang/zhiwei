@@ -730,8 +730,11 @@ const app = createApp({
     // ---------- 待办批量操作（待确认/进行中/已完成 分组各自勾选、统一处理） ----------
     // todoSel：勾选中的 todo id 集合（跨组共用，批量按钮只作用于本组勾选项）；
     // todoBatchAsk：破坏性批量操作（忽略/删除）的 2 步确认态 {act, group}，与单条操作的行内确认同风格。
+    // todoMultiMode：多选模式开关。默认关闭——此时不显示行级勾选框、分组「全选」与批量条，
+    //   待办标题自然左对齐；点击工具栏「多选」进入后，三类勾选控件与批量条才出现。
     const todoSel = reactive(new Set());
     const todoBatchAsk = ref(null);
+    const todoMultiMode = ref(false);
     function toggleTodoSel(id) { todoSel.has(id) ? todoSel.delete(id) : todoSel.add(id); }
     // 组内已勾选条目
     function todoGroupSel(list) { return list.filter(td => todoSel.has(td.id)); }
@@ -739,6 +742,11 @@ const app = createApp({
     function toggleTodoGroupSel(list) {
       if (list.length && todoGroupSel(list).length === list.length) list.forEach(td => todoSel.delete(td.id));
       else list.forEach(td => todoSel.add(td.id));
+    }
+    // 进入/退出多选模式：退出时清空勾选与批量确认态，避免残留批量条
+    function toggleTodoMultiMode() {
+      todoMultiMode.value = !todoMultiMode.value;
+      if (!todoMultiMode.value) { todoSel.clear(); todoBatchAsk.value = null; }
     }
     // 批量改状态：逐条 PATCH（单用户量级足够；状态机已放行 suggested→done 与 done→confirmed）。
     // 失败逐条计数（不刷屏），最后统一刷新列表并清掉已处理项的勾选。
@@ -2808,6 +2816,7 @@ const app = createApp({
     const agentCfgSaving = ref(false);
     const agentCfgSaved = ref(false);
     const agentCfgSystemPrompt = ref(''); // 进程级 persona（只读）
+    const agentCfgDatetimeHead = ref(''); // 每轮无条件注入的「当前日期+时区」（只读，动态）
     const agentCfgOwnerHead = ref('');    // 每轮注入的 owner 画像头（只读，动态）
     // 注入预览：与后端 AssemblePersona 同格式，随输入实时更新（保存后即后端每轮注入的内容）。
     const agentCfgPreview = computed(() => {
@@ -2818,12 +2827,14 @@ const app = createApp({
       if (soul) b.push('你的性格与说话风格：\n' + soul);
       return b.join('\n\n');
     });
-    // 整体 prompt 组装（只读预览）：system(进程级) + 每轮注入前缀(人设+owner画像) + 动态检索说明 + 你的问题。
+    // 整体 prompt 组装（只读预览）：system(进程级) + 每轮注入前缀(人设+当前日期时区+owner画像) + 动态检索说明 + 你的问题。
+    // 顺序须与后端 orchestrator.runTurn 一致：人设 → 当前日期+时区 → owner 画像头 →（动态检索种子）→ 你的问题。
     const agentCfgFullPrompt = computed(() => {
       const seg = [];
       seg.push('【System · 进程级人设（不可编辑）】\n' + (agentCfgSystemPrompt.value || '（未设置）'));
       const inject = [];
       if (agentCfgPreview.value) inject.push(agentCfgPreview.value);
+      if (agentCfgDatetimeHead.value) inject.push(agentCfgDatetimeHead.value);
       if (agentCfgOwnerHead.value) inject.push(agentCfgOwnerHead.value);
       seg.push('【每轮注入到你消息之前的背景】\n' + (inject.length ? inject.join('\n\n') : '（无额外注入）'));
       seg.push('【每轮还会按你的提问动态检索相关记忆/时间线作为背景（此处不预览）】');
@@ -2836,6 +2847,7 @@ const app = createApp({
         agentCfgIdentity.value = (d && d.identity) || '';
         agentCfgSoul.value = (d && d.soul) || '';
         agentCfgSystemPrompt.value = (d && d.system_prompt) || '';
+        agentCfgDatetimeHead.value = (d && d.datetime_head) || '';
         agentCfgOwnerHead.value = (d && d.owner_head) || '';
         agentCfgSaved.value = false;
       } catch (e) { showError(e); }
@@ -3011,7 +3023,7 @@ const app = createApp({
       if (name === 'timeline') { deletingSessionId.value = null; reextractConfirmId.value = null; segDraft.value = {}; loadSessions(); loadAllSpeakers(); }
       if (name === 'memories') { memSearch.value = ''; loadMemories(); }
       if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; dismissingTopicId.value = null; topicSearch.value = ''; cancelManualMerge(); loadDismissedTopics(); loadTopics(); }
-      if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; todoSel.clear(); todoBatchAsk.value = null; todoSearch.value = ''; loadTopics(); loadTodos(); loadDismissedTodos(); }
+      if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; todoSel.clear(); todoBatchAsk.value = null; todoMultiMode.value = false; todoSearch.value = ''; loadTopics(); loadTodos(); loadDismissedTodos(); }
       // 声纹 tab：进入时复位本 tab 的临时态（收起录入表单/展开项/改名/播放）并拉全量名册。
       if (name === 'voiceprint') { showEnrollForm.value = false; expandedSpeakerId.value = null; speakerSegments.value = []; renamingSpeaker.value = null; playingSegId.value = null; speakerSearch.value = ''; loadAllSpeakers(); }
       // 问知微 tab：拉会话列表；若已有选中会话，重拉历史 + 重连 WS（切回时恢复现场）。
@@ -3063,6 +3075,7 @@ const app = createApp({
       todos, doneCollapsed, suggestedTodos, activeTodos, doneTodos, dismissedTodos, dismissedTodoCollapsed, loadDismissedTodos,
       loadTodos, setTodoStatus, jumpToSession,
       todoSel, todoBatchAsk, toggleTodoSel, todoGroupSel, toggleTodoGroupSel, batchTodoStatus, batchTodoDelete,
+      todoMultiMode, toggleTodoMultiMode,
       editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       // 问知微（流式对话）

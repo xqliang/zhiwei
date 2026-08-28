@@ -52,7 +52,10 @@ func reqUserID(r *http.Request) (int64, bool) {
 }
 
 // getConfig 返回全局人设（identity/soul）+ 组装预览，以及只读的整体 prompt 组成：
-// system_prompt（进程级 persona，不可编辑）、owner_head（每轮注入的 owner 画像头，动态）。
+// system_prompt（进程级 persona，不可编辑）、datetime_head（每轮无条件注入的「当前日期+时区」，
+// 动态）、owner_head（每轮注入的 owner 画像头，动态）。
+// 注意：整体 prompt 预览须与 orchestrator.runTurn 的实际注入保持一致——今后任何注入内容/顺序调整，
+// 都要同步更新这里的字段与前端 agentCfgFullPrompt 的拼装。
 func (h *AgentHandler) getConfig(w http.ResponseWriter, r *http.Request) {
 	uid, ok := reqUserID(r)
 	if !ok {
@@ -70,6 +73,8 @@ func (h *AgentHandler) getConfig(w http.ResponseWriter, r *http.Request) {
 		resp["preview"] = AssemblePersona(c.Identity, c.Soul)
 		resp["updated_at"] = c.UpdatedAt
 	}
+	// 当前日期 + 时区：每轮无条件注入（不依赖 owner），动态计算——预览也每次取当前值。
+	resp["datetime_head"] = DateTimeHead(time.Now())
 	// owner 画像头（每轮动态注入的背景；无 Ctx/owner/数据时为空串）——供「整体 prompt」只读预览。
 	if h.Ctx != nil {
 		resp["owner_head"] = h.Ctx.Head(r.Context(), uid, time.Now())

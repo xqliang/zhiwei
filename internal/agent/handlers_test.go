@@ -53,7 +53,10 @@ func TestAgentConfigAPI(t *testing.T) {
 	if getRec.Code != http.StatusOK {
 		t.Fatalf("GET code=%d", getRec.Code)
 	}
-	var out struct{ Identity, Soul, Preview string }
+	var out struct {
+		Identity, Soul, Preview string
+		DatetimeHead            string `json:"datetime_head"`
+	}
 	if err := json.Unmarshal(getRec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("resp 解析: %v", err)
 	}
@@ -62,6 +65,10 @@ func TestAgentConfigAPI(t *testing.T) {
 	}
 	if !strings.Contains(out.Preview, "我是知微API") || !strings.Contains(out.Preview, "简洁API") {
 		t.Errorf("预览应含 identity+soul: %q", out.Preview)
+	}
+	// 整体 prompt 预览须含每轮无条件注入的「当前日期+时区」头（与 orchestrator 实际注入一致）。
+	if !strings.Contains(out.DatetimeHead, "今天是 ") || !strings.Contains(out.DatetimeHead, "UTC") {
+		t.Errorf("应返回当前日期+时区头 datetime_head: %q", out.DatetimeHead)
 	}
 }
 

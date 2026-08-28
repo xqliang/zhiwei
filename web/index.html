@@ -600,8 +600,6 @@
               <option v-for="sp in allSpeakers.filter(x => x.id !== sg.speaker_id)" :key="sp.id" :value="sp.id">{{ sp.name }}</option>
               <option value="__new">+ 新加…</option>
             </select>
-            <span v-if="sg.corrected_from" class="corrected-badge"
-                  :title="sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'">已修改</span>
             <button class="btn mini seg-play" @click="toggleTimelineSegPlay(sg)" style="padding:2px 8px; flex-shrink:0" :title="tlPlayingSegId===sg.id?'播放中，点暂停':'播放此段音频'">{{ tlPlayingSegId===sg.id ? '⏸' : '▶' }}</button>
             <button v-if="!mergeMode && segEnrollId!==sg.id" class="btn mini" :disabled="!canEnrollSeg(sg)" @click="startSegEnroll(sg)" style="padding:2px 8px; flex-shrink:0" :title="canEnrollSeg(sg) ? '用此段音频录入声纹' : ('时长 ' + (segDurMs(sg)/1000).toFixed(1) + 's 不足，至少需 ' + (MIN_ENROLL_MS/1000) + 's')">录入</button>
             <div class="seg-text">
@@ -621,15 +619,20 @@
               </div>
               <!-- 段级声纹相似度 top-3（该段音频的向量 vs 全库，含归属者）：一句话可能混
                    多个人——top-1 不是归属说话人（或他人 ≥0.72）时该段可能被 ASR 切错/归错，
-                   可用段首下拉换人或说话人 chip 的 ⇄ 批量切换。存量会话无逐段向量则不显示 -->
-              <div v-if="(sg.voice_matches||[]).length" class="muted" style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
-                   title="该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错">
-                <span>声纹 ≈</span>
-                <span v-for="(m, mi) in sg.voice_matches" :key="m.speaker_id"
-                      :style="(m.similarity >= 0.72 && m.speaker_id !== sg.speaker_id) ? { color: 'var(--accent-2)', fontWeight: 600 } : {}"
-                      :title="m.speaker_id === sg.speaker_id ? '本段归属的说话人' : (m.similarity >= 0.72 ? '与他人相似度 ≥ 0.72：这句可能属于此人，可换人/切换声纹' : '')">
-                  {{ mi > 0 ? '·' : '' }} {{ m.name }} {{ m.similarity.toFixed(2) }}
-                </span>
+                   可用段首下拉换人或说话人 chip 的 ⇄ 批量切换。存量会话无逐段向量则不显示；
+                   「已修改」徽章贴在本行末尾（幽灵历史声纹自动纠正标记），无相似度数据时单独成行。 -->
+              <div v-if="(sg.voice_matches||[]).length || sg.corrected_from" class="muted" style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
+                   :title="(sg.voice_matches||[]).length ? '该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）')">
+                <template v-if="(sg.voice_matches||[]).length">
+                  <span>声纹 ≈</span>
+                  <span v-for="(m, mi) in sg.voice_matches" :key="m.speaker_id"
+                        :style="(m.similarity >= 0.72 && m.speaker_id !== sg.speaker_id) ? { color: 'var(--accent-2)', fontWeight: 600 } : {}"
+                        :title="m.speaker_id === sg.speaker_id ? '本段归属的说话人' : (m.similarity >= 0.72 ? '与他人相似度 ≥ 0.72：这句可能属于此人，可换人/切换声纹' : '')">
+                    {{ mi > 0 ? '·' : '' }} {{ m.name }} {{ m.similarity.toFixed(2) }}
+                  </span>
+                </template>
+                <span v-if="sg.corrected_from" class="corrected-badge"
+                      :title="sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'">已修改</span>
               </div>
             </div>
           </div>
@@ -2241,16 +2244,19 @@
     <div class="toolbar">
       <input class="txt" v-model="todoSearch" placeholder="搜索待办标题…" style="max-width:280px">
       <div class="spacer"></div>
+      <button class="btn mini" :class="{primary: todoMultiMode}" @click="toggleTodoMultiMode()">
+        {{ todoMultiMode ? '退出多选' : '多选' }}
+      </button>
       <span class="muted">{{ suggestedTodos.length + activeTodos.length + doneTodos.length }} 条</span>
     </div>
     <div class="todo-group-title" style="display:flex; align-items:center; gap:10px">
       <span>待确认（{{ suggestedTodos.length }}）</span>
-      <label v-if="suggestedTodos.length" style="font-weight:400; font-size:var(--fs-xs); cursor:pointer; display:flex; align-items:center; gap:4px">
+      <label v-if="todoMultiMode && suggestedTodos.length" style="font-weight:400; font-size:var(--fs-xs); cursor:pointer; display:flex; align-items:center; gap:4px">
         <input type="checkbox" :checked="suggestedTodos.length > 0 && todoGroupSel(suggestedTodos).length === suggestedTodos.length" @change="toggleTodoGroupSel(suggestedTodos)"> 全选
       </label>
     </div>
     <!-- 批量操作条：本组有勾选才显示。忽略（终态不可恢复）走 2 步确认 -->
-    <div v-if="todoGroupSel(suggestedTodos).length" class="card" style="padding:8px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#f0f6ff">
+    <div v-if="todoMultiMode && todoGroupSel(suggestedTodos).length" class="card" style="padding:8px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#f0f6ff">
       <b style="font-size:var(--fs-sm)">已选 {{ todoGroupSel(suggestedTodos).length }} 条</b>
       <button class="btn mini primary" @click="batchTodoStatus(todoGroupSel(suggestedTodos), 'confirmed')">统一加入</button>
       <button class="btn mini primary" @click="batchTodoStatus(todoGroupSel(suggestedTodos), 'done')">统一完成</button>
@@ -2265,7 +2271,7 @@
     <div v-if="!suggestedTodos.length" class="card empty">没有待确认的待办</div>
     <div class="card" v-for="td in suggestedTodos" :key="td.id" style="background:#fffdf5">
       <div class="kv">
-        <label style="display:flex; align-items:center; cursor:pointer; flex-shrink:0" title="勾选后可用上方批量操作">
+        <label v-if="todoMultiMode" style="display:flex; align-items:center; cursor:pointer; flex-shrink:0" title="勾选后可用上方批量操作">
           <input type="checkbox" :checked="todoSel.has(td.id)" @change="toggleTodoSel(td.id)">
         </label>
         <div v-if="!editingTodo || editingTodo.id !== td.id" class="editable" @click="startEditTodo(td)" title="点击编辑">☑️ {{ td.title }}<span class="hint">✎</span></div>
@@ -2295,12 +2301,12 @@
 
     <div class="todo-group-title" style="display:flex; align-items:center; gap:10px">
       <span>进行中（{{ activeTodos.length }}）</span>
-      <label v-if="activeTodos.length" style="font-weight:400; font-size:var(--fs-xs); cursor:pointer; display:flex; align-items:center; gap:4px">
+      <label v-if="todoMultiMode && activeTodos.length" style="font-weight:400; font-size:var(--fs-xs); cursor:pointer; display:flex; align-items:center; gap:4px">
         <input type="checkbox" :checked="activeTodos.length > 0 && todoGroupSel(activeTodos).length === activeTodos.length" @change="toggleTodoGroupSel(activeTodos)"> 全选
       </label>
     </div>
     <!-- 批量操作条：完成即改状态；忽略（终态）与删除（硬删）均 2 步确认 -->
-    <div v-if="todoGroupSel(activeTodos).length" class="card" style="padding:8px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#f0f6ff">
+    <div v-if="todoMultiMode && todoGroupSel(activeTodos).length" class="card" style="padding:8px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#f0f6ff">
       <b style="font-size:var(--fs-sm)">已选 {{ todoGroupSel(activeTodos).length }} 条</b>
       <button class="btn mini primary" @click="batchTodoStatus(todoGroupSel(activeTodos), 'done')">统一完成</button>
       <template v-if="todoBatchAsk && todoBatchAsk.act==='dismiss' && todoBatchAsk.group==='active'">
@@ -2319,7 +2325,7 @@
     <div v-if="!activeTodos.length" class="card empty">没有进行中的待办</div>
     <div class="card" v-for="td in activeTodos" :key="td.id">
       <div class="kv">
-        <label style="display:flex; align-items:center; cursor:pointer; flex-shrink:0" title="勾选后可用上方批量操作">
+        <label v-if="todoMultiMode" style="display:flex; align-items:center; cursor:pointer; flex-shrink:0" title="勾选后可用上方批量操作">
           <input type="checkbox" :checked="todoSel.has(td.id)" @change="toggleTodoSel(td.id)">
         </label>
         <div v-if="!editingTodo || editingTodo.id !== td.id" class="editable" @click="startEditTodo(td)" title="点击编辑">☑️ {{ td.title }}<span class="hint">✎</span></div>
@@ -2350,13 +2356,13 @@
     <div class="todo-group-title" style="cursor:pointer; display:flex; align-items:center; gap:10px" @click="doneCollapsed = !doneCollapsed">
       <span>已完成（{{ doneTodos.length }}）{{ doneCollapsed ? ' ▸' : ' ▾' }}</span>
       <!-- @click.stop：全选不触发行折叠切换 -->
-      <label v-if="doneTodos.length" @click.stop style="font-weight:400; font-size:var(--fs-xs); cursor:pointer; display:flex; align-items:center; gap:4px">
+      <label v-if="todoMultiMode && doneTodos.length" @click.stop style="font-weight:400; font-size:var(--fs-xs); cursor:pointer; display:flex; align-items:center; gap:4px">
         <input type="checkbox" :checked="doneTodos.length > 0 && todoGroupSel(doneTodos).length === doneTodos.length" @change="toggleTodoGroupSel(doneTodos)"> 全选
       </label>
     </div>
     <template v-if="!doneCollapsed">
       <!-- 批量操作条：重新打开（done→confirmed）与删除（硬删） -->
-      <div v-if="todoGroupSel(doneTodos).length" class="card" style="padding:8px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#f0f6ff">
+      <div v-if="todoMultiMode && todoGroupSel(doneTodos).length" class="card" style="padding:8px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#f0f6ff">
         <b style="font-size:var(--fs-sm)">已选 {{ todoGroupSel(doneTodos).length }} 条</b>
         <button class="btn mini primary" @click="batchTodoStatus(todoGroupSel(doneTodos), 'confirmed')">统一重新打开</button>
         <template v-if="todoBatchAsk && todoBatchAsk.act==='delete' && todoBatchAsk.group==='done'">
@@ -2370,7 +2376,7 @@
       <div v-if="!doneTodos.length" class="card empty">没有已完成的待办</div>
       <div class="card" v-for="td in doneTodos" :key="td.id" style="opacity:.62">
         <div class="kv">
-          <label style="display:flex; align-items:center; cursor:pointer; flex-shrink:0" title="勾选后可用上方批量操作">
+          <label v-if="todoMultiMode" style="display:flex; align-items:center; cursor:pointer; flex-shrink:0" title="勾选后可用上方批量操作">
             <input type="checkbox" :checked="todoSel.has(td.id)" @change="toggleTodoSel(td.id)">
           </label>
           <div>✅ <s>{{ td.title }}</s></div>
@@ -2411,6 +2417,6 @@
   </template>
 </div>
 
-<script src="/app/app.494b46ba.js"></script>
+<script src="/app/app.a9978f3e.js"></script>
 </body>
 </html>

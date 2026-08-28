@@ -67,8 +67,19 @@ func (pc *ProfileContext) Head(ctx context.Context, userID int64, now time.Time)
 	if len(parts) == 0 {
 		return "" // 无任何可用背景：不注入
 	}
-	return fmt.Sprintf("今天是 %s。关于用户本人：%s（背景信息，自然运用，不必复述）",
-		now.Format("2006-01-02"), strings.Join(parts, "；"))
+	// 注意：日期不再由此处输出，改由 DateTimeHead 无条件统一注入（避免 owner 存在时日期重复）。
+	return fmt.Sprintf("关于用户本人：%s（背景信息，自然运用，不必复述）",
+		strings.Join(parts, "；"))
+}
+
+// DateTimeHead 组装「当前日期 + 时区」背景句：无条件每轮注入（不依赖 owner 画像），
+// 让 agent 始终知道「今天几号 / 什么时区」。now 由调用方传 time.Now()（服务端本就可用系统
+// 时间；单测经该参数注入固定时刻做断言）。时区取服务端本地时区：now.Zone() 给缩写（如 CST），
+// now.Format("-07:00") 给 UTC 偏移（如 +08:00）。
+func DateTimeHead(now time.Time) string {
+	zone, _ := now.Zone() // 时区缩写，如 CST / UTC（第二个返回值是偏移秒数，这里用格式化取 ±hh:mm）
+	return fmt.Sprintf("今天是 %s（%s, UTC%s）。",
+		now.Format("2006-01-02"), zone, now.Format("-07:00"))
 }
 
 // AssemblePersona 把可配置的 identity + soul 拼成「每轮注入的人设前言」：

@@ -65,7 +65,8 @@ func TestOrchestratorRunTurn(t *testing.T) {
 	if final.Content != "你有 1 条待办：待办A。" {
 		t.Errorf("最终助手文本异常: %q", final.Content)
 	}
-	if fake.LastText != "我有哪些待办？" || fake.LastSessionID != conv.DSHSessionID {
+	// 未装配 Ctx/Persona，但日期+时区块无条件注入 → LastText = 日期头 + 原始问题（含原始，且被前置）。
+	if !strings.Contains(fake.LastText, "我有哪些待办？") || fake.LastSessionID != conv.DSHSessionID {
 		t.Errorf("Prompt 入参异常: text=%q sid=%q", fake.LastText, fake.LastSessionID)
 	}
 
@@ -489,9 +490,7 @@ func TestProfileContextHead(t *testing.T) {
 	pc := &ProfileContext{Persons: persons, Attributes: attrs}
 	now := time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)
 	head := pc.Head(ctx, toolUserID, now)
-	if !strings.Contains(head, "今天是 2026-03-15") {
-		t.Errorf("头应含当天日期: %q", head)
-	}
+	// 日期已移出 Head，改由 DateTimeHead 统一注入（见 TestDateTimeHead）；Head 只留 owner 画像。
 	if !strings.Contains(head, "关于用户本人") {
 		t.Errorf("头应含 owner 前缀: %q", head)
 	}
@@ -506,6 +505,19 @@ func TestProfileContextHead(t *testing.T) {
 	var np *ProfileContext
 	if np.Head(ctx, toolUserID, now) != "" {
 		t.Error("nil 接收者应返回空头")
+	}
+}
+
+// TestDateTimeHead 锁定「当前日期 + 时区」背景句的格式：日期 + 时区缩写 + UTC 偏移。
+// 用 FixedZone 固定时刻，断言可确定（不受运行机器本地时区影响）。
+func TestDateTimeHead(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600) // 东八区，缩写 CST，偏移 +08:00
+	now := time.Date(2026, 3, 15, 10, 0, 0, 0, loc)
+	got := DateTimeHead(now)
+	for _, want := range []string{"今天是 2026-03-15", "CST", "UTC+08:00"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("DateTimeHead 应含 %q: %q", want, got)
+		}
 	}
 }
 
@@ -622,10 +634,11 @@ func TestOrchestratorRuntimeForByUser(t *testing.T) {
 	if fakeA.calls != 1 || fakeB.calls != 1 {
 		t.Fatalf("每个运行时应恰被调一次: A=%d B=%d", fakeA.calls, fakeB.calls)
 	}
-	if fakeA.LastSessionID != convA.DSHSessionID || fakeA.LastText != "来自7" {
+	// 无条件日期头会前置到 LastText，故用 Contains 校验「路由到对方 + 带上各自原始文本」这一被测点。
+	if fakeA.LastSessionID != convA.DSHSessionID || !strings.Contains(fakeA.LastText, "来自7") {
 		t.Errorf("fakeA 应收到 conv7 的会话/文本: sid=%q text=%q", fakeA.LastSessionID, fakeA.LastText)
 	}
-	if fakeB.LastSessionID != convB.DSHSessionID || fakeB.LastText != "来自9" {
+	if fakeB.LastSessionID != convB.DSHSessionID || !strings.Contains(fakeB.LastText, "来自9") {
 		t.Errorf("fakeB 应收到 conv9 的会话/文本: sid=%q text=%q", fakeB.LastSessionID, fakeB.LastText)
 	}
 	// 交叉核对：绝不能把某会话串到对方运行时。

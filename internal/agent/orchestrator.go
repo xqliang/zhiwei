@@ -89,6 +89,9 @@ func (o *Orchestrator) runTurn(ctx context.Context, conv *repo.AgentConversation
 			blocks = append(blocks, p)
 		}
 	}
+	// 当前日期 + 时区：无条件每轮注入（不依赖 owner 画像 / Ctx），让 agent 始终知道「今天几号 /
+	// 什么时区」。取 time.Now() 的服务端本地时区，实时计算，每轮替换。
+	blocks = append(blocks, DateTimeHead(time.Now()))
 	if o.Ctx != nil {
 		if h := o.Ctx.Head(ctx, conv.UserID, time.Now()); h != "" {
 			blocks = append(blocks, h)
