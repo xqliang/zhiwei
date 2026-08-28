@@ -71,3 +71,68 @@ func TestPersonChangeLogAppendOnly(t *testing.T) {
 
 // fp float64 取址小工具（测试专用；strp 已在 person_relationship_test.go 定义，复用）。
 func fp(f float64) *float64 { return &f }
+
+func TestPersonChangeLogListBySession(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	persons := &PersonRepo{DB: db}
+	logs := &PersonChangeLogRepo{DB: db}
+
+	p := &Person{DisplayName: "session审计测试人物"}
+	if err := persons.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	sessA := ids.New()
+	sessB := ids.New()
+
+	// sessA 两条（attribute + pet）
+	if err := logs.Create(ctx, &PersonChangeLog{
+		PersonID: p.ID, EntityKind: "attribute", AttrKey: strp("occupation"),
+		ChangeType: "create", ChangedBy: "llm", NewValue: strp(`"工程师"`), SessionID: &sessA, Confidence: fp(0.9),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := logs.Create(ctx, &PersonChangeLog{
+		PersonID: p.ID, EntityKind: "pet",
+		ChangeType: "create", ChangedBy: "llm", NewValue: strp(`"泡泡（猫）"`), SessionID: &sessA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// sessB 一条
+	if err := logs.Create(ctx, &PersonChangeLog{
+		PersonID: p.ID, EntityKind: "pet",
+		ChangeType: "create", ChangedBy: "llm", NewValue: strp(`"豆豆（狗）"`), SessionID: &sessB,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 一条无 session（手动改值，不应被 ListBySession 命中）
+	if err := logs.Create(ctx, &PersonChangeLog{
+		PersonID: p.ID, EntityKind: "pet",
+		ChangeType: "update", ChangedBy: "user", NewValue: strp(`"手动改"`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// ListBySession(sessA)：2 条，按 id 正序
+	rowsA, err := logs.ListBySession(ctx, sessA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rowsA) != 2 {
+		t.Fatalf("sessA 应 2 条: %d", len(rowsA))
+	}
+	if rowsA[0].EntityKind != "attribute" || rowsA[1].EntityKind != "pet" {
+		t.Fatalf("sessA 应按 id 正序: %+v", rowsA)
+	}
+	// ListBySession(sessB)：1 条
+	rowsB, err := logs.ListBySession(ctx, sessB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rowsB) != 1 || rowsB[0].NewValue == nil || *rowsB[0].NewValue != `"豆豆（狗）"` {
+		t.Fatalf("sessB 应 1 条豆豆: %+v", rowsB)
+	}
+}
