@@ -2474,6 +2474,10 @@ const app = createApp({
       for (const line of lines) {
         const t = line.trim();
         if (/^\uE000B\d+\uE000$/.test(t)) { flushPara(); closeList(); html += t; continue; } // 独立成行的代码块占位符
+        // ATX 标题：行首 1-6 个 # + 空格 → <h1>~<h6>（class=chat-h 控样式），标题文本走行内格式；
+        // 结尾可选的收尾 #（如「## 标题 ##」）一并去掉。须放在列表/段落判定之前。
+        const hd = t.match(/^(#{1,6})\s+(.*?)\s*#*$/);
+        if (hd) { flushPara(); closeList(); const lv = hd[1].length; html += '<h' + lv + ' class="chat-h">' + inlineMd(hd[2]) + '</h' + lv + '>'; continue; }
         const ul = line.match(/^\s*[-*+]\s+(.*)$/);
         const ol = line.match(/^\s*\d+\.\s+(.*)$/);
         if (ul) { flushPara(); if (listType !== 'ul') { closeList(); html += '<ul>'; listType = 'ul'; } html += '<li>' + inlineMd(ul[1]) + '</li>'; }
@@ -2684,8 +2688,19 @@ const app = createApp({
       return items;
     }
 
-    function scrollAgentBottom() {
-      nextTick(() => { const el = agentStreamEl.value; if (el) el.scrollTop = el.scrollHeight; });
+    // 距底判定：容器内容已滚到接近底部（60px 容差）时返回 true。容器未就绪按 true（默认跟随）。
+    function agentNearBottom() {
+      const el = agentStreamEl.value;
+      if (!el) return true;
+      return el.scrollHeight - el.scrollTop - el.clientHeight <= 60;
+    }
+    // 滚动跟随：force=true 强制到底（新载入历史 / 用户刚发消息）；否则仅当用户当前贴底时才跟随，
+    // 用户上滚查看历史/思考过程时锁定其位置、不被新内容拽到底。
+    // 关键时序：须在改动消息数据后、Vue 刷新 DOM 前【同步】调用——此刻读到的是旧内容的滚动量，
+    // 正确反映「用户在新内容出现前是否贴底」；再于 nextTick（DOM 更新后）按此决定是否滚到底。
+    function scrollAgentBottom(force) {
+      const stick = force || agentNearBottom();
+      nextTick(() => { const el = agentStreamEl.value; if (el && stick) el.scrollTop = el.scrollHeight; });
     }
     async function loadAgentConversations() {
       try { const d = await api('GET', '/api/agent/conversations'); agentConversations.value = d || []; }
@@ -2701,7 +2716,7 @@ const app = createApp({
         for (const m of msgs) if (m.id) agentSeen.add(m.id);
         resetStreamDraft(); // 重连/重载：清空流式草稿，靠重放/历史重建
         agentMessages.value = mapAgentHistory(msgs);
-        scrollAgentBottom();
+        scrollAgentBottom(true); // 新载入会话历史：强制到底
       } catch (e) { showError(e); }
       finally { agentLoading.value = false; }
     }
@@ -2726,7 +2741,9 @@ const app = createApp({
         case 'tool_result': fillToolResult(agentMessages.value, f.call_id, f.content, f.is_error); break;
         case 'turn_end': agentTyping.value = false; resetStreamDraft(); if (f.error) agentTurnError.value = f.error; break;
       }
-      scrollAgentBottom();
+      // 用户自己发的消息回显 → 强制到底（用户刚发言，期望看到自己的气泡）；其余帧（思考/答复流、
+      // 工具卡等）仅当用户贴底时跟随，用户上滚查看时不打扰。
+      scrollAgentBottom(f.type === 'user');
     }
     // 打开/重开 WS（先关旧连接）。断线时若仍希望连接且仍停留在本会话/本 tab，则 1.5s 后重连。
     function openAgentWS(cid) {
@@ -2764,6 +2781,7 @@ const app = createApp({
     // 选中某会话：切换前关旧 WS、清流，拉历史后开新 WS。
     async function selectAgentConversation(c) {
       if (agentConvId.value === c.id) return;
+      deletingConvId.value = null; // 切换会话清掉他项残留的删除确认态
       closeAgentWS();
       agentConvId.value = c.id;
       persistAgentConv(c.id);
@@ -2774,8 +2792,9 @@ const app = createApp({
       await loadAgentHistory(c.id);
       openAgentWS(c.id);
     }
-    // 进入行内编辑：记下目标会话 + 临时标题；不触发选中（按钮已 @click.stop）。
+    // 进入行内编辑：记下目标会话 + 临时标题；不触发选中（按钮已 @click.stop）。清删除确认态（互斥）。
     function startEditConv(c) {
+      deletingConvId.value = null;
       agentEditConvId.value = c.id;
       agentEditTitle.value = c.title || '';
     }
@@ -2797,11 +2816,20 @@ const app = createApp({
         notify(e.message || '保存标题失败', 4000);
       }
     }
-    // 软删除：确认后 DELETE，若删的是当前会话则清空主区。
+    // 2 步行内删除确认（对齐 todo/topic 等的 ask/confirm 模式，不弹原生 confirm）：
+    // 点🗑 → askDeleteConv 进入确认态（列表项就地显示「确认删除?/取消」）；清编辑态（互斥）。
+    function askDeleteConv(c) {
+      agentEditConvId.value = null;
+      deletingConvId.value = c.id;
+    }
+    function cancelDeleteConv() {
+      deletingConvId.value = null;
+    }
+    // 软删除：DELETE 会话（后端置 archived）。若删的是当前会话则关 WS + 清空主区。成功后重拉列表。
     async function deleteAgentConversation(c) {
-      if (!confirm('删除会话「' + (c.title || '新对话') + '」？')) return;
       try {
         await api('DELETE', '/api/agent/conversations/' + c.id);
+        deletingConvId.value = null;
         if (agentConvId.value === c.id) {
           closeAgentWS();
           agentConvId.value = null;
@@ -2810,7 +2838,7 @@ const app = createApp({
         await loadAgentConversations();
         notify('会话已删除');
       } catch (e) {
-        notify(e.message || '删除失败', 4000);
+        showError(e);
       }
     }
     // 新对话：POST 建会话 → 刷新列表 → 选中并连 WS。
@@ -3160,9 +3188,9 @@ const app = createApp({
       editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       // 问知微（流式对话）
-      agentConversations, agentConvId, agentEditConvId, agentEditTitle, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
+      agentConversations, agentConvId, agentEditConvId, agentEditTitle, deletingConvId, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
       agentTurns, turnRunning, agentThinkingGap, turnDuration, fmtDur, isTurnOpen, toggleTurn, streamDraft,
-      loadAgentConversations, newAgentConversation, selectAgentConversation, startEditConv, cancelEditConv, saveAgentTitle, deleteAgentConversation, sendAgentMessage, stopAgentMessage,
+      loadAgentConversations, newAgentConversation, selectAgentConversation, startEditConv, cancelEditConv, saveAgentTitle, askDeleteConv, cancelDeleteConv, deleteAgentConversation, sendAgentMessage, stopAgentMessage,
       agentCfgIdentity, agentCfgSoul, agentCfgSaving, agentCfgSaved, agentCfgPreview, agentCfgSystemPrompt, agentCfgOwnerHead, agentCfgFullPrompt, loadAgentConfig, saveAgentConfig,
       mcpServers, mcpForm, mcpErr, loadMCP, addMCP, toggleMCP, deleteMCP,
       confirmProposal, dismissProposal,
