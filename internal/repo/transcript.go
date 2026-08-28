@@ -34,6 +34,10 @@ type TranscriptSegment struct {
 	// 的纠正 pass 自动改判过，值为被顶掉的原历史说话人 id（前端"已修改"徽章 + 审计 + 手动改回依据）。
 	// 手动换人 / 整人改判 / 重新识别时清 NULL。存量 / 未纠正段为 NULL。
 	CorrectedFromSpeakerID *ids.ID `db:"corrected_from_speaker_id" json:"corrected_from_speaker_id,omitempty"`
+	// CorrectedReason 自动纠正原因（000021 迁移加列）：'phantom'=幽灵历史声纹改判（配 CorrectedFromSpeakerID）；
+	// 'short'=过短噪声段并入最近在场说话人（CorrectedFromSpeakerID 为 NULL）。nil=未纠正。
+	// 与 speaker_id 一同被手动换人/整人改判/重新识别清空。
+	CorrectedReason *string `db:"corrected_reason" json:"corrected_reason,omitempty"`
 	// Embedding 该段的 256 维声纹向量 BLOB（000007 迁移加列；speaker stage 逐段
 	// 提取后落库，供详情页按段展示与声纹库的相似度 top-N）。json:"-" 不外泄，
 	// API 层按需转成 top-N 明文列表。存量会话（新列前处理）为 NULL。
@@ -192,14 +196,14 @@ func (r *TranscriptRepo) SetSegmentSpeaker(ctx context.Context, transcriptID ids
 // 注意：会覆盖手动纠正的换人（调用方需在 UI 二次确认）。
 func (r *TranscriptRepo) ClearSegmentSpeakers(ctx context.Context, transcriptID ids.ID) error {
 	_, err := r.DB.ExecContext(ctx,
-		`UPDATE transcript_segment SET speaker_id = NULL, corrected_from_speaker_id = NULL WHERE transcript_id = ?`, transcriptID.Int64())
+		`UPDATE transcript_segment SET speaker_id = NULL, corrected_from_speaker_id = NULL, corrected_reason = NULL WHERE transcript_id = ?`, transcriptID.Int64())
 	return err
 }
 
 // SetSegmentSpeakerByID 单段换人（前端"换人"下拉用）。带 transcript_id 作用域防跨会话误写。
 func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID, segID, speakerID ids.ID) error {
 	_, err := r.DB.ExecContext(ctx,
-		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = NULL WHERE id = ? AND transcript_id = ?`,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = NULL, corrected_reason = NULL WHERE id = ? AND transcript_id = ?`,
 		speakerID.Int64(), segID.Int64(), transcriptID.Int64())
 	return err
 }
@@ -212,9 +216,21 @@ func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID
 // 单条 UPDATE 原子写、并发安全。
 func (r *TranscriptRepo) CorrectSegmentSpeaker(ctx context.Context, transcriptID ids.ID, speakerLabel string, fromID, toID ids.ID) error {
 	_, err := r.DB.ExecContext(ctx,
-		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = ?
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = ?, corrected_reason = 'phantom'
 		 WHERE transcript_id = ? AND speaker_label = ? AND speaker_id = ?`,
 		toID.Int64(), fromID.Int64(), transcriptID.Int64(), speakerLabel, fromID.Int64())
+	return err
+}
+
+// MergeShortGroup 过短噪声段并入（2026-08-28 需求）：把本 transcript 内某 speaker_label 下
+// **尚未回填**（speaker_id IS NULL）的段整组并入目标在场说话人 toID，并标记 corrected_reason='short'
+// （无原判定说话人，corrected_from_speaker_id 显式置 NULL）。这类组因总时长<3s 未登记独立声纹，
+// 其段在 speaker stage pass2 被留 NULL、pass3 并入。带 transcript_id 作用域；单条 UPDATE 原子写。
+func (r *TranscriptRepo) MergeShortGroup(ctx context.Context, transcriptID ids.ID, speakerLabel string, toID ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_reason = 'short', corrected_from_speaker_id = NULL
+		 WHERE transcript_id = ? AND speaker_label = ? AND speaker_id IS NULL`,
+		toID.Int64(), transcriptID.Int64(), speakerLabel)
 	return err
 }
 
@@ -239,7 +255,7 @@ func (r *TranscriptRepo) SaveSegmentEmbeddings(ctx context.Context, transcriptID
 // 返回受影响段数（0 = 本会话没有该说话人的段）。
 func (r *TranscriptRepo) ReassignSpeakerSegments(ctx context.Context, transcriptID, fromID, toID ids.ID) (int, error) {
 	res, err := r.DB.ExecContext(ctx,
-		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = NULL WHERE transcript_id = ? AND speaker_id = ?`,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = NULL, corrected_reason = NULL WHERE transcript_id = ? AND speaker_id = ?`,
 		toID.Int64(), transcriptID.Int64(), fromID.Int64())
 	if err != nil {
 		return 0, err
@@ -256,7 +272,7 @@ func (r *TranscriptRepo) ReassignSpeakerSegments(ctx context.Context, transcript
 // 用于 timeline「用此段录音纹」：录入新说话人后，把该说话人在本会话的全部段一并改判到新说话人。
 func (r *TranscriptRepo) ReassignSpeakerInTranscript(ctx context.Context, transcriptID, fromID, toID ids.ID) (int, error) {
 	res, err := r.DB.ExecContext(ctx,
-		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = NULL WHERE transcript_id = ? AND speaker_id = ?`,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = NULL, corrected_reason = NULL WHERE transcript_id = ? AND speaker_id = ?`,
 		toID.Int64(), transcriptID.Int64(), fromID.Int64())
 	if err != nil {
 		return 0, err

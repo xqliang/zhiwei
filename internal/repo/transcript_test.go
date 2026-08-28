@@ -509,3 +509,83 @@ func TestCorrectSegmentSpeakerAndClearOnManual(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeShortGroupAndReasonClearing 覆盖过短并入的标记写入 + corrected_reason 清理：
+// MergeShortGroup 把某 label 未回填段并入目标并写 corrected_reason='short'(corrected_from 为 NULL)；
+// CorrectSegmentSpeaker 写 'phantom'；手动换人/整人改判/重新识别清 corrected_reason。
+func TestMergeShortGroupAndReasonClearing(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tr := &TranscriptRepo{DB: db}
+	speakers := &SpeakerRepo{DB: db}
+	target := &Speaker{Name: "说话人target", Source: "auto"}
+	ghost := &Speaker{Name: "铉晔", Source: "auto"}
+	if err := speakers.Create(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := speakers.Create(ctx, ghost); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), target.ID); _ = speakers.Delete(context.Background(), ghost.ID) })
+
+	sid := ids.New()
+	if err := (&SessionRepo{DB: db}).Create(ctx, &AudioSession{
+		ID: sid, Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tc := &Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := tr.Create(ctx, tc); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.InsertSegments(ctx, []TranscriptSegment{
+		{TranscriptID: tc.ID, SequenceNo: 1, SpeakerLabel: "noise", Text: "嗯。", StartMS: 0, EndMS: 400},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 过短并入：label "noise" 未回填段 → 目标 target，reason=short，corrected_from 置空
+	if err := tr.MergeShortGroup(ctx, tc.ID, "noise", target.ID); err != nil {
+		t.Fatalf("MergeShortGroup: %v", err)
+	}
+	got, _ := tr.ListSegments(ctx, tc.ID)
+	if got[0].SpeakerID == nil || *got[0].SpeakerID != target.ID {
+		t.Fatalf("应并入 target，实际 %+v", got[0].SpeakerID)
+	}
+	if got[0].CorrectedReason == nil || *got[0].CorrectedReason != "short" {
+		t.Fatalf("应 corrected_reason=short，实际 %+v", got[0].CorrectedReason)
+	}
+	if got[0].CorrectedFromSpeakerID != nil {
+		t.Fatalf("short 并入 corrected_from 应为 NULL，实际 %+v", got[0].CorrectedFromSpeakerID)
+	}
+
+	// 手动换人 → 清 corrected_reason
+	if err := tr.SetSegmentSpeakerByID(ctx, tc.ID, got[0].ID, ghost.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	if got[0].CorrectedReason != nil {
+		t.Fatalf("手动换人后应清 corrected_reason，实际 %+v", got[0].CorrectedReason)
+	}
+
+	// CorrectSegmentSpeaker 写 phantom（segment 当前 speaker_id=ghost）
+	if err := tr.CorrectSegmentSpeaker(ctx, tc.ID, "noise", ghost.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	if got[0].CorrectedReason == nil || *got[0].CorrectedReason != "phantom" {
+		t.Fatalf("CorrectSegmentSpeaker 应写 phantom，实际 %+v", got[0].CorrectedReason)
+	}
+	// 重新识别清两者
+	if err := tr.ClearSegmentSpeakers(ctx, tc.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = tr.ListSegments(ctx, tc.ID)
+	if got[0].SpeakerID != nil || got[0].CorrectedReason != nil || got[0].CorrectedFromSpeakerID != nil {
+		t.Fatalf("重新识别应清空 speaker_id/corrected_reason/corrected_from，实际 %+v/%+v/%+v",
+			got[0].SpeakerID, got[0].CorrectedReason, got[0].CorrectedFromSpeakerID)
+	}
+}
