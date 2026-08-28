@@ -94,3 +94,12 @@ func (r *AgentConversationRepo) TitleState(ctx context.Context, userID int64, id
 		id.Int64(), userID).Scan(&title, &source)
 	return title, source, err
 }
+
+// Archive 软删除：status→archived。幂等（已是 archived 则 0 行、返回 nil，不报错）。
+// 行级 user_id 过滤：越权行 n=0 同样返回 nil（软删语义无「不存在即错」）。
+func (r *AgentConversationRepo) Archive(ctx context.Context, userID int64, id ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE agent_conversation SET status='archived' WHERE id=? AND user_id=? AND status='active'`,
+		id.Int64(), userID)
+	return err
+}

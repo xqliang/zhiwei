@@ -153,3 +153,50 @@ func TestAgentConversationUpdateTitle(t *testing.T) {
 		t.Errorf("越权 TitleState 应 ErrNoRows, got %v", err)
 	}
 }
+
+func TestAgentConversationArchive(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &AgentConversationRepo{DB: db}
+	ctx := t.Context()
+
+	c := &AgentConversation{Title: "待归档"}
+	if err := r.Create(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+
+	// 归档：成功
+	if err := r.Archive(ctx, 1, c.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	// List（只查 active）不再含它
+	list, err := r.List(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range list {
+		if x.ID == c.ID {
+			t.Error("已归档会话不应出现在 List(active) 中")
+		}
+	}
+	// 但 Get 仍能读到（status=archived）
+	got, err := r.Get(ctx, 1, c.ID)
+	if err != nil {
+		t.Fatalf("Get 归档会话: %v", err)
+	}
+	if got.Status != "archived" {
+		t.Errorf("status 应为 archived, got %q", got.Status)
+	}
+
+	// 幂等：再次 Archive 不报错（已是 archived，0 行但返回 nil）
+	if err := r.Archive(ctx, 1, c.ID); err != nil {
+		t.Errorf("重复 Archive 应幂等无错, got %v", err)
+	}
+
+	// 越权：user_id=2 归档 user_id=1 的会话 → 0 行，不报错（幂等语义，非 ErrNoRows）
+	if err := r.Archive(ctx, 2, c.ID); err != nil {
+		t.Errorf("越权 Archive 应幂等无错, got %v", err)
+	}
+}
