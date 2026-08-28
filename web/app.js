@@ -12,6 +12,18 @@ const TYPE_META = {
   preference: { label: '偏好', color: '#059669' },
 };
 
+// profile 平面元信息（变更事件流的平面标签；对齐 TYPE_META）。entity_kind 覆盖 8 平面。
+const PROFILE_PLANE_META = {
+  person:       { label: '人物', icon: '👤', color: '#6b7280' },
+  attribute:    { label: '属性', icon: '🏷️', color: '#6366f1' },
+  relationship: { label: '关系', icon: '🔗', color: '#7c3aed' },
+  event:        { label: '大事记', icon: '📌', color: '#d97706' },
+  metric:       { label: '指标', icon: '📈', color: '#059669' },
+  cycle:        { label: '周期', icon: '💊', color: '#dc2626' },
+  activity:     { label: '轨迹', icon: '🏃', color: '#0284c7' },
+  pet:          { label: '宠物', icon: '🐱', color: '#0891b2' },
+};
+
 const app = createApp({
   setup() {
     const tab = ref('timeline');
@@ -141,6 +153,31 @@ const app = createApp({
     }
 
     function typeMeta(t) { return TYPE_META[t] || { label: t, color: '#6b7280' }; }
+    // ---------- profile 平面变更（转写详情 timeline）----------
+    function profilePlaneMeta(kind) { return PROFILE_PLANE_META[kind] || { label: kind, icon: '•', color: '#6b7280' }; }
+    // 变更动作归一：change_type+note → {label, color}。新增(note空)/更新(含「合并更新」)/佐证(reaffirm)/待确认(含 conflict/待人工确认)。
+    function profileChangeAction(log) {
+      const note = log.note || '';
+      if (log.change_type === 'reaffirm' || note.includes('佐证')) return { label: '佐证', color: '#059669' };
+      if (note.includes('合并更新')) return { label: '更新', color: '#d97706' };
+      if (note.includes('conflict') || note.includes('待人工确认')) return { label: '待确认', color: '#dc2626' };
+      return { label: '新增', color: '#6366f1' };
+    }
+    // 实体摘要：new_value 是带引号的 JSON 字符串，parse 去引号；失败原样显示。
+    function fmtChangeSummary(log) {
+      if (!log.new_value) return profilePlaneMeta(log.entity_kind).label + '变更';
+      try { return JSON.parse(log.new_value); } catch (e) { return log.new_value; }
+    }
+    // 按 entity_kind 分组（组内后端已按 id 正序）。
+    const profileChangeGroups = computed(() => {
+      const g = {};
+      for (const log of (detail.value && detail.value.profile_changes) || []) {
+        (g[log.entity_kind] = g[log.entity_kind] || []).push(log);
+      }
+      return g;
+    });
+    // 跳转「人物」tab 的确认队列处理待确认项（确认队列在 persons tab，见 index.html 确认队列区）。
+    function goProfilePending() { switchTab('persons'); }
     function statusText(status, stage) {
       if (status === 'done' || status === 'completed') return '已完成';
       if (status === 'failed') return '失败';
@@ -3155,6 +3192,7 @@ const app = createApp({
       // 登录门（cookie + session 鉴权）
       authed, currentUser, loginForm, loginError, loggingIn, submitLogin, logout,
       fmtTime, fmtDue, typeMeta, statusText, todoStatusText, spClass,
+      profilePlaneMeta, profileChangeAction, fmtChangeSummary, profileChangeGroups, goProfilePending,
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissingMemId, askDismissMem, cancelDismissMem, confirmDismissMem, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
       tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay, detailInsights,
       segDraft, segEditing, startEditSeg, cancelEditSeg, saveSegEdit, segDirty, saveTranscript, rawAsrView, toggleRawAsr,

@@ -73,3 +73,13 @@ func (r *PersonChangeLogRepo) ListByPerson(ctx context.Context, personID ids.ID,
 	err := r.DB.SelectContext(ctx, &list, q, args...)
 	return list, err
 }
+
+// ListBySession 返回某次录音（session）触发的全平面画像变更审计，按 id（≈时间）正序。
+// 供转写详情页 timeline 展示「这条录音涉及的 profile 平面变更」。只命中带 session_id 的
+// LLM 抽取行；手动改值（session_id 为空）不命中，符合「该录音触发」语义（对齐 ListByPerson 的 ORDER BY id）。
+func (r *PersonChangeLogRepo) ListBySession(ctx context.Context, sessionID ids.ID) ([]PersonChangeLog, error) {
+	const q = `SELECT * FROM person_change_log WHERE session_id = ? ORDER BY id`
+	var list []PersonChangeLog
+	err := r.DB.SelectContext(ctx, &list, q, sessionID.Int64())
+	return list, err
+}
