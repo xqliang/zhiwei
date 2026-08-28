@@ -144,3 +144,71 @@ func TestCreateConversationBackfill(t *testing.T) {
 		t.Errorf("title=%q", got.Title)
 	}
 }
+
+// TestConversationTitleAndDelete 锁定：PATCH 改标题(manual)、DELETE 软删(列表消失)、越权 404。
+func TestConversationTitleAndDelete(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convRepo := &repo.AgentConversationRepo{DB: db}
+	msgRepo := &repo.AgentMessageRepo{DB: db}
+	ctx := t.Context()
+	conv := &repo.AgentConversation{Title: "原标题"}
+	if err := convRepo.Create(ctx, conv); err != nil {
+		t.Fatal(err)
+	}
+	h := &AgentHandler{Conversations: convRepo, Messages: msgRepo}
+	r := chi.NewRouter()
+	r.Use(injectUser(1))
+	RegisterAgent(r, h)
+	cid := conv.ID.String()
+
+	// PATCH 改标题 → 200，title_source=manual
+	patch := httptest.NewRequest("PATCH", "/api/agent/conversations/"+cid,
+		strings.NewReader(`{"title":"手动标题"}`))
+	prec := httptest.NewRecorder()
+	r.ServeHTTP(prec, patch)
+	if prec.Code != http.StatusOK {
+		t.Fatalf("PATCH code=%d body=%s", prec.Code, prec.Body.String())
+	}
+	var out repo.AgentConversation
+	_ = json.Unmarshal(prec.Body.Bytes(), &out)
+	if out.Title != "手动标题" || out.TitleSource != "manual" {
+		t.Errorf("PATCH 结果异常: %+v", out)
+	}
+
+	// DELETE 软删 → 204
+	del := httptest.NewRequest("DELETE", "/api/agent/conversations/"+cid, nil)
+	drec := httptest.NewRecorder()
+	r.ServeHTTP(drec, del)
+	if drec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE code=%d body=%s", drec.Code, drec.Body.String())
+	}
+	// 列表查不到
+	list, err := convRepo.List(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range list {
+		if x.ID.String() == cid {
+			t.Error("已软删会话不应在列表中")
+		}
+	}
+
+	// 越权：user_id=2 操作 user_id=1 的会话 → 404
+	conv2 := &repo.AgentConversation{Title: "user2 看不到的"}
+	if err := convRepo.Create(ctx, conv2); err != nil {
+		t.Fatal(err)
+	}
+	r2 := chi.NewRouter()
+	r2.Use(injectUser(2))
+	RegisterAgent(r2, h)
+	p2 := httptest.NewRequest("PATCH", "/api/agent/conversations/"+conv2.ID.String(),
+		strings.NewReader(`{"title":"越权"}`))
+	p2rec := httptest.NewRecorder()
+	r2.ServeHTTP(p2rec, p2)
+	if p2rec.Code != http.StatusNotFound {
+		t.Errorf("越权 PATCH 应 404, got %d", p2rec.Code)
+	}
+}

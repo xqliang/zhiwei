@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,6 +23,7 @@ type AgentHandler struct {
 	SystemPrompt  string                // 进程级 system prompt（DSH_SYSTEM_PROMPT/persona，只读展示用）
 	Ctx           *ProfileContext       // 与 orchestrator 同一份：getConfig 据此算 owner 画像头（动态注入预览）
 	Hub           *turnHub              // 每会话轮次广播器（nil 时由 RegisterAgent 惰性初始化）
+	Gen           func(ctx context.Context, uid int64, cid ids.ID) (string, error) // 手动生成标题（nil 时端点 503）
 }
 
 // RegisterAgent 挂载 /api/agent 路由。
@@ -33,6 +36,9 @@ func RegisterAgent(r chi.Router, h *AgentHandler) {
 	r.Post("/api/agent/conversations", h.createConversation)
 	r.Get("/api/agent/conversations", h.listConversations)
 	r.Get("/api/agent/conversations/{cid}", h.getConversation)
+	r.Patch("/api/agent/conversations/{cid}", h.patchConversation)
+	r.Delete("/api/agent/conversations/{cid}", h.deleteConversation)
+	r.Post("/api/agent/conversations/{cid}/title/generate", h.generateTitle)
 	r.Post("/api/agent/conversations/{cid}/messages", h.postMessage)
 	r.Get("/api/agent/conversations/{cid}/ws", h.handleWS) // WS 流式（上行发消息 + 下行流式帧）
 }
@@ -164,6 +170,90 @@ func (h *AgentHandler) getConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"conversation_id": cid, "messages": msgs})
+}
+
+// patchConversation 手动改标题：写 title_source=manual。越权/不存在 → 404。
+func (h *AgentHandler) patchConversation(w http.ResponseWriter, r *http.Request) {
+	uid, ok := reqUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	cid, err := ids.ParseID(chi.URLParam(r, "cid"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cid"})
+		return
+	}
+	var body struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	title := strings.TrimSpace(body.Title)
+	if title == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title required"})
+		return
+	}
+	if err := h.Conversations.UpdateTitle(r.Context(), uid, cid, title, titleSourceManual); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
+		return
+	}
+	full, err := h.Conversations.Get(r.Context(), uid, cid)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, full)
+}
+
+// deleteConversation 软删除：status→archived。幂等（已归档也 204）。越权/不存在 → 404。
+func (h *AgentHandler) deleteConversation(w http.ResponseWriter, r *http.Request) {
+	uid, ok := reqUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	cid, err := ids.ParseID(chi.URLParam(r, "cid"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cid"})
+		return
+	}
+	// 先确认存在且归属当前用户（Archive 幂等不报错，越权需显式 404）。
+	if _, err := h.Conversations.Get(r.Context(), uid, cid); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
+		return
+	}
+	if err := h.Conversations.Archive(r.Context(), uid, cid); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// generateTitle 手动触发一次自动生成（兜底）。装配了 Gen 才可用，否则 503。
+func (h *AgentHandler) generateTitle(w http.ResponseWriter, r *http.Request) {
+	uid, ok := reqUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	cid, err := ids.ParseID(chi.URLParam(r, "cid"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cid"})
+		return
+	}
+	if h.Gen == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "标题生成不可用"})
+		return
+	}
+	title, err := h.Gen(r.Context(), uid, cid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"title": title, "title_source": titleSourceAuto})
 }
 
 func (h *AgentHandler) postMessage(w http.ResponseWriter, r *http.Request) {
