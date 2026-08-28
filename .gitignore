@@ -25,3 +25,6 @@ __pycache__/
 .claude/worktrees/
 .workbuddy/
 .DS_Store
+
+# MCP 服务管理：启动时由基模板+DB 动态生成（勿提交）
+services/agent-sidecar/cordis.generated.yml

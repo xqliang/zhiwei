@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -9,6 +10,24 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// TestApplyMCPAllAndEvictIdle：ApplyMCPAll 把期望的外部 MCP 服务集下发到所有在用运行时；
+// EvictIdle 关停空闲（无进行中轮次）运行时。用 FakeRuntime 断言，无需真 dsh。
+// 注：FakeRuntime.Closed 是既有的 int 计数器（Close 调用次数），故用 == 0 断言未关停。
+func TestApplyMCPAllAndEvictIdle(t *testing.T) {
+	fake := &FakeRuntime{}
+	pool := NewRuntimePool(RuntimeConfig{}, "http://x/mcp", 4, func(RuntimeConfig) AgentRuntime { return fake })
+	pool.Get(7) // 建一个运行时
+	specs := []MCPServerSpec{{ServerName: "echo_srv", Transport: "stdio", Command: "node", Args: []string{"e.mjs"}}}
+	pool.ApplyMCPAll(context.Background(), specs)
+	if len(fake.LastApplied) != 1 || fake.LastApplied[0].ServerName != "echo_srv" {
+		t.Fatalf("ApplyMCPAll 未下发到运行时: %+v", fake.LastApplied)
+	}
+	pool.EvictIdle()
+	if fake.Closed == 0 {
+		t.Error("EvictIdle 应 Close 空闲运行时")
+	}
+}
 
 // newTestPool 构造一个用 FakeRuntime 作工厂的池（不 spawn 真进程）。makeRT 把 pool 派生的每用户
 // 配置塞进 FakeRuntime.Cfg，便于断言 MCPURL/SessionRoot 派生。

@@ -24,6 +24,11 @@ type AgentHandler struct {
 	Ctx           *ProfileContext       // 与 orchestrator 同一份：getConfig 据此算 owner 画像头（动态注入预览）
 	Hub           *turnHub              // 每会话轮次广播器（nil 时由 RegisterAgent 惰性初始化）
 	Gen           func(ctx context.Context, uid int64, cid ids.ID) (string, error) // 手动生成标题（nil 时端点 503）
+	// MCPServers 全局 MCP 服务清单（设置页管理）；nil 时 MCP 端点返回 503（管理面未装配的降级）。
+	MCPServers *repo.MCPServerRepo
+	// OnMCPChange 在任一 MCP 写操作成功后调用一次（重生成 cordis + 对在用运行时热插拔下发）；
+	// nil 时只落库不生效（下次进程重启才读新配置）。
+	OnMCPChange func(ctx context.Context)
 }
 
 // RegisterAgent 挂载 /api/agent 路由。
@@ -41,6 +46,11 @@ func RegisterAgent(r chi.Router, h *AgentHandler) {
 	r.Post("/api/agent/conversations/{cid}/title/generate", h.generateTitle)
 	r.Post("/api/agent/conversations/{cid}/messages", h.postMessage)
 	r.Get("/api/agent/conversations/{cid}/ws", h.handleWS) // WS 流式（上行发消息 + 下行流式帧）
+	r.Get("/api/agent/mcp", h.listMCP)                     // MCP 服务清单（全局，设置页管理）
+	r.Post("/api/agent/mcp", h.createMCP)                  // 新增（手动添加；触发生效）
+	r.Put("/api/agent/mcp/{id}", h.updateMCP)              // 编辑（内置行仅 display_name）
+	r.Patch("/api/agent/mcp/{id}", h.patchMCP)             // 启/禁（内置禁用被拒）
+	r.Delete("/api/agent/mcp/{id}", h.deleteMCP)           // 删除（内置拒删）
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

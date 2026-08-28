@@ -2364,6 +2364,7 @@ const app = createApp({
     const agentConvId = ref(null);        // 当前选中的会话 id（string）
     const agentEditConvId = ref(null);    // 正在编辑标题的会话 id（行内 input 态）
     const agentEditTitle = ref('');       // 行内编辑的标题临时值
+    const deletingConvId = ref(null);     // 正待确认删除的会话 id（2 步行内确认，与编辑态互斥）
     const agentMessages = ref([]);        // 当前会话的展示项流（见下 makeToolItem / 文本项结构）
     const agentInput = ref('');           // 输入框内容
     const agentConnected = ref(false);    // WS 是否已连接（连接指示灯）
@@ -2903,6 +2904,45 @@ const app = createApp({
       finally { agentCfgSaving.value = false; }
     }
 
+    // ---------- 设置：MCP 服务（全局，手动管理；增删启禁经 /api/agent/mcp，保存后即时生效） ----------
+    // 后端契约：GET /api/agent/mcp → {servers:[{id,server_key,display_name,transport,url,command,args,enabled,builtin}]}；
+    // POST {server_key,display_name,transport,url|command+args,enabled}；PATCH /{id} {enabled}；DELETE /{id}。
+    // 启用/禁用/增删后端即时生效：重生成 cordis + 对在用 dsh 热插拔（无需重启）。
+    const mcpServers = ref([]);
+    const mcpForm = ref({ server_key: '', display_name: '', transport: 'streamable-http', url: '', command: '', args: '' });
+    const mcpErr = ref('');
+    async function loadMCP() {
+      try { const d = await api('GET', '/api/agent/mcp'); mcpServers.value = (d && d.servers) || []; }
+      catch (e) { showError(e); }
+    }
+    async function addMCP() {
+      mcpErr.value = '';
+      const f = mcpForm.value;
+      const key = (f.server_key || '').trim();
+      if (!/^[A-Za-z0-9_]{1,64}$/.test(key)) { mcpErr.value = 'server_key 需为 1-64 位字母/数字/下划线'; return; }
+      const body = { server_key: key, display_name: (f.display_name || '').trim() || key, transport: f.transport, enabled: true };
+      if (f.transport === 'streamable-http') body.url = (f.url || '').trim();
+      else {
+        body.command = (f.command || '').trim();
+        body.args = (f.args || '').trim() ? f.args.trim().split(/\s+/) : [];
+      }
+      try {
+        await api('POST', '/api/agent/mcp', body);
+        mcpForm.value = { server_key: '', display_name: '', transport: 'streamable-http', url: '', command: '', args: '' };
+        await loadMCP();
+      } catch (e) { mcpErr.value = (e && e.message) || String(e); }
+    }
+    async function toggleMCP(m) {
+      try { await api('PATCH', '/api/agent/mcp/' + m.id, { enabled: !m.enabled }); await loadMCP(); }
+      catch (e) { showError(e); }
+    }
+    async function deleteMCP(m) {
+      if (m.builtin) return;
+      if (!confirm('删除 MCP 服务「' + (m.display_name || m.server_key) + '」？')) return;
+      try { await api('DELETE', '/api/agent/mcp/' + m.id); await loadMCP(); }
+      catch (e) { showError(e); }
+    }
+
     // ---------- 报告（日报/周报 + 话题状态；后端 internal/api/review.go + internal/review/types.go） ----------
     // 契约（读源确认）：
     //   日报  GET  /api/reviews/daily?date=YYYY-MM-DD       → DailyReview 行 {content, status, review_date, created_at}
@@ -3070,7 +3110,7 @@ const app = createApp({
       // 问知微 tab：拉会话列表；若已有选中会话，重拉历史 + 重连 WS（切回时恢复现场）。
       if (name === 'agent') { loadAgentConversations(); if (agentConvId.value) { const cid = agentConvId.value; loadAgentHistory(cid); openAgentWS(cid); } }
       // 设置 tab：拉当前人设（identity/soul）到表单。
-      if (name === 'settings') { loadAgentConfig(); }
+      if (name === 'settings') { loadAgentConfig(); loadMCP(); }
       // 报告 tab：拉主题列表（话题状态选择器数据源）+ 按当前日报/周报类型加载报告。
       if (name === 'reports') { loadTopics(); loadReport(); }
       // 人物 tab：进入时复位详情/删除确认态，拉名册 + 已删除列表 + 确认队列（跨平面 pending 并集，独立刷新）+ 属性目录（受控输入元数据，懒加载缓存）。
@@ -3124,6 +3164,7 @@ const app = createApp({
       agentTurns, turnRunning, agentThinkingGap, turnDuration, fmtDur, isTurnOpen, toggleTurn, streamDraft,
       loadAgentConversations, newAgentConversation, selectAgentConversation, startEditConv, cancelEditConv, saveAgentTitle, deleteAgentConversation, sendAgentMessage, stopAgentMessage,
       agentCfgIdentity, agentCfgSoul, agentCfgSaving, agentCfgSaved, agentCfgPreview, agentCfgSystemPrompt, agentCfgOwnerHead, agentCfgFullPrompt, loadAgentConfig, saveAgentConfig,
+      mcpServers, mcpForm, mcpErr, loadMCP, addMCP, toggleMCP, deleteMCP,
       confirmProposal, dismissProposal,
       renderMarkdown, reportSections, prettyJSON,
       // 报告（日报/周报 + 话题状态）

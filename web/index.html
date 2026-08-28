@@ -986,6 +986,52 @@
         <pre class="chat-code">{{ agentCfgFullPrompt }}</pre>
       </div>
     </div>
+
+    <!-- ============ MCP 服务（全局管理：手动添加/启禁/删除，保存即时生效） ============ -->
+    <div class="card">
+      <h2 style="margin:0 0 4px">MCP 服务</h2>
+      <div class="muted" style="font-size:var(--fs-sm); margin-bottom:16px">
+        管理智微可连接的 MCP 服务（工具来源）。添加/启用/禁用/删除<b>即时生效</b>（热插拔，无需重启）。
+        内置「知微内置工具」为 agent 的记忆/画像数据通道，<b>不可删禁</b>。stdio 服务会在服务器上执行所填命令，请谨慎添加。
+      </div>
+
+      <!-- 服务列表 -->
+      <div style="display:flex; flex-direction:column; gap:8px">
+        <div v-for="m in mcpServers" :key="m.id"
+             style="display:flex; align-items:center; gap:12px; padding:10px 12px; border:1px solid var(--border,#ddd); border-radius:8px">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+            <input type="checkbox" :checked="m.enabled" :disabled="m.builtin" @change="toggleMCP(m)">
+            <span style="font-weight:600">{{ m.display_name || m.server_key }}</span>
+          </label>
+          <code style="font-size:var(--fs-xs); color:var(--muted,#888)">{{ m.server_key }}</code>
+          <span class="muted" style="font-size:var(--fs-xs); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">
+            {{ m.transport }} · {{ m.url || m.command || '—' }}
+          </span>
+          <span v-if="m.builtin" class="muted" style="font-size:var(--fs-xs)">内置</span>
+          <button v-else class="btn" style="padding:4px 10px; font-size:var(--fs-xs)" @click="deleteMCP(m)">删除</button>
+        </div>
+      </div>
+
+      <!-- 新增表单 -->
+      <div style="margin-top:18px; padding-top:14px; border-top:1px solid var(--border,#eee)">
+        <div style="font-size:var(--fs-sm); font-weight:600; margin-bottom:8px">添加 MCP 服务</div>
+        <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center">
+          <input class="txt" v-model="mcpForm.server_key" placeholder="server_key（字母数字下划线）" style="width:200px">
+          <input class="txt" v-model="mcpForm.display_name" placeholder="显示名（可选）" style="width:150px">
+          <select class="txt" v-model="mcpForm.transport" style="width:150px">
+            <option value="streamable-http">streamable-http</option>
+            <option value="stdio">stdio</option>
+          </select>
+          <input v-if="mcpForm.transport==='streamable-http'" class="txt" v-model="mcpForm.url" placeholder="服务 URL（如 https://host/mcp）" style="flex:1; min-width:240px">
+          <template v-else>
+            <input class="txt" v-model="mcpForm.command" placeholder="命令（如 node）" style="width:150px">
+            <input class="txt" v-model="mcpForm.args" placeholder="参数（空格分隔）" style="flex:1; min-width:200px">
+          </template>
+          <button class="btn primary" @click="addMCP">添加</button>
+        </div>
+        <div v-if="mcpErr" class="muted" style="font-size:var(--fs-xs); color:var(--danger,#c33); margin-top:6px">{{ mcpErr }}</div>
+      </div>
+    </div>
   </div>
 
   <!-- ============ 报告（日报/周报 + 话题状态） ============ -->
