@@ -334,14 +334,36 @@ func main() {
 		// 语义检索（可选，nil 则 search_memory 走关键词）
 		Retrieve: retriever,
 	}
+	// MCP 服务管理（全局）：读基模板 + DB 启用服务 → 生成 cordis.generated.yml（dsh spawn 实际读
+	// 的文件）；配置变更时重生成（给将来新 spawn）+ 对在用运行时 mcp/apply 热插拔（给当前进程）。
+	mcpServerRepo := &repo.MCPServerRepo{DB: db}
+	baseCordis, err := os.ReadFile(cfg.AgentCordisConfig)
+	if err != nil {
+		log.Fatalf("读 cordis 基模板 %s: %v", cfg.AgentCordisConfig, err)
+	}
+	regenCordis := func(ctx context.Context) error {
+		servers, err := mcpServerRepo.Enabled(ctx)
+		if err != nil {
+			return err
+		}
+		out, err := agent.GenerateCordis(string(baseCordis), servers)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(cfg.AgentCordisGenerated, []byte(out), 0o644)
+	}
+	if err := regenCordis(context.Background()); err != nil {
+		log.Fatalf("初次生成 cordis 配置: %v", err)
+	}
+
 	// 2B-B：每登录用户一个 dsh 运行时 + 一个 MCP token 的进程池。baseCfg 是模板——
 	// CordisConfig/Model/SystemPrompt 全用户共享；MCPURL 留空、SessionRoot 作父目录，由 pool
 	// 按每用户 token 派生（MCPURL=mcpBaseURL+"/"+token、SessionRoot=base/u<uid>）。cap 超出按 LRU
 	// 关最久未用。pool 始终创建（MCP handler 要用它按 token 反查用户）；AgentEnabled=false 时无人
-	// 调 Get、不会 spawn 任何 dsh。
+	// 调 Get、不会 spawn 任何 dsh。CordisConfig 指向【生成文件】（基模板 + 外部 MCP 块）。
 	mcpBaseURL := "http://127.0.0.1:" + cfg.Port + "/internal/mcp"
 	agentPool := agent.NewRuntimePool(agent.RuntimeConfig{
-		CordisConfig: cfg.AgentCordisConfig,
+		CordisConfig: cfg.AgentCordisGenerated,
 		Model:        agentModel, // 解析后的模型(ZW_AGENT_MODEL 空则回退 LLMStrongModel), 与报告/抽取一致
 		SessionRoot:  cfg.DSHSessionRoot,
 		SystemPrompt: cfg.DSHSystemPrompt,
@@ -394,6 +416,21 @@ func main() {
 			Configs:       agentConfigs,
 			SystemPrompt:  cfg.DSHSystemPrompt, // 只读展示：进程级 persona
 			Ctx:           orch.Ctx,            // 同一份 ProfileContext：算 owner 画像头供整体 prompt 预览
+			MCPServers:    mcpServerRepo,       // 设置页 MCP 服务清单管理
+			// MCP 配置变更生效：重生成 cordis（新 spawn）+ 对在用运行时热插拔 mcp/apply（当前
+			// 进程）；热插拔失败的运行时由 pool 内部空闲兜底摘除（下一轮 respawn 读新配置）。
+			OnMCPChange: func(ctx context.Context) {
+				if err := regenCordis(ctx); err != nil {
+					log.Printf("[agent] 重生成 cordis 失败: %v", err)
+					return
+				}
+				rows, err := mcpServerRepo.Enabled(ctx)
+				if err != nil {
+					log.Printf("[agent] 读 MCP 服务清单失败: %v", err)
+					return
+				}
+				agentPool.ApplyMCPAll(ctx, agent.SpecsFromServers(rows))
+			},
 		})
 		// 预热 owner(id=1) 的 dsh 边车：启动后后台 spawn + initialize 握手，把 node 启动的一次性
 		// 延迟从「首条消息」挪到启动阶段（best-effort：失败仅记日志，首条消息会自行懒启动）。

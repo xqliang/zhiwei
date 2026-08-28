@@ -86,3 +86,30 @@ func yamlScalar(s string) string {
 	q, _ := json.Marshal(s)
 	return string(q)
 }
+
+// SpecsFromServers 把「启用且非 builtin」的 repo 行转成下发给 dsh mcp/apply 的 MCPServerSpec
+// 列表（cordisgen 生成文件与热插拔下发共用同一来源，保证两者一致）。args/env JSON 列解析失败
+// 时跳过该字段（Create 端点已校验过形状，这里是防御性兜底，不让一个坏行打断整体生效）。
+func SpecsFromServers(rows []repo.MCPServer) []MCPServerSpec {
+	out := make([]MCPServerSpec, 0, len(rows))
+	for _, s := range rows {
+		if s.Builtin {
+			continue // 内置 zhiwei 不下发：它的连接由基模板/env 提供
+		}
+		spec := MCPServerSpec{ServerName: s.ServerKey, Transport: s.Transport}
+		if s.URL != nil {
+			spec.URL = *s.URL
+		}
+		if s.Command != nil {
+			spec.Command = *s.Command
+		}
+		if s.Args != nil {
+			_ = json.Unmarshal(*s.Args, &spec.Args)
+		}
+		if s.Env != nil {
+			_ = json.Unmarshal(*s.Env, &spec.Env)
+		}
+		out = append(out, spec)
+	}
+	return out
+}

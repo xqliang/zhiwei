@@ -21,3 +21,6 @@ __pycache__/
 *.pyc
 # git worktree 目录（feature 分支/模型对比隔离工作区），勿提交
 .worktrees/
+
+# MCP 服务管理：启动时由基模板+DB 动态生成（勿提交）
+services/agent-sidecar/cordis.generated.yml
