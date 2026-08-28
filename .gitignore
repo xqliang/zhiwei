@@ -1,4 +1,5 @@
 data/
+testdata/
 bin/
 *.log
 .env
@@ -21,3 +22,6 @@ __pycache__/
 *.pyc
 # git worktree 目录（feature 分支/模型对比隔离工作区），勿提交
 .worktrees/
+.claude/worktrees/
+.workbuddy/
+.DS_Store
