@@ -93,10 +93,15 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		for _, sv := range svs {
 			vecs = append(vecs, sv.vec)
 		}
+		var durMS int64
+		for _, sv := range svs {
+			durMS += sv.seg.EndMS - sv.seg.StartMS
+		}
 		reps = append(reps, groupRep{
 			label: label, rep: aggregateEmbeddings(vecs), vecN: len(vecs),
 			clean:   pickCleanSegVec(svs, segs, label),
 			segVecs: svs,
+			durMS:   durMS,
 		})
 	}
 	if len(reps) == 0 {
@@ -132,16 +137,27 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 			matched[i], matchedID[i] = true, res.SpeakerID
 		}
 	}
-	// 第二趟：未命中的登记新声纹（此时才 Add，故上面的检索全部只见历史库），命中的复用，回填。
-	resolvedID := make([]ids.ID, len(reps)) // 每组最终解析到的 speaker（纠正 pass 用）
+	// 预判是否存在可作「过短并入」目标的组（命中历史库 or 非过短新组）。
+	// 全部组都过短时不缓起——退回照常登记，保证段有归属、库不空。
+	hasTarget := false
 	for i, g := range reps {
+		if matched[i] || g.durMS >= minCleanSegMS {
+			hasTarget = true
+			break
+		}
+	}
+	// 第二趟：命中的复用；非过短未命中的登记新声纹；过短未命中的缓起(deferred)——不登记、段留 NULL，pass3 并入。
+	resolvedID := make([]ids.ID, len(reps)) // 每组最终 speaker（deferred 组留零值，不作目标）
+	deferred := make([]bool, len(reps))
+	for i, g := range reps {
+		if !matched[i] && hasTarget && g.durMS < minCleanSegMS {
+			deferred[i] = true // 过短噪声组：不建 speaker/不入 FAISS，pass3 并入最近在场说话人
+			continue
+		}
 		var speakerID ids.ID
 		if matched[i] {
 			speakerID = matchedID[i]
 		} else {
-			// 自动登记：name=说话人{5位随机串}，向量 BLOB 灾备。
-			// 登记向量优先用干净段（pickCleanSegVec 的结果）：混入他人语音的段会污染
-			// 聚合向量，新声纹「出厂即脏」；无干净段才退回聚合代表。
 			embVec, sampleN := g.rep, g.vecN
 			if g.clean != nil {
 				embVec, sampleN = g.clean, 1
@@ -153,8 +169,6 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 			if err := d.Voiceprint.Add(ctx, embVec, sp.ID); err != nil {
 				return fmt.Errorf("voiceprint add: %w", err)
 			}
-			// 样本行落库（多条声纹模型；nil = 旧装配跳过。失败仅 log 不致命——speaker/FAISS
-			// 已就绪，样本行缺失只影响后续聚合重算来源，可用启动 bootstrap 兜底补齐）
 			if d.SpeakerEmbeddings != nil {
 				e := &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: float32Blob(embVec), SampleCount: sampleN, Source: "auto"}
 				if err := d.SpeakerEmbeddings.Create(ctx, e); err != nil {
@@ -169,12 +183,16 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		}
 	}
 
-	// 3) 幽灵历史声纹纠正 pass（2026-08-27 需求）：见 correctPhantomHistoricalMatches。
+	// 3) 纠正 pass：先幽灵历史声纹纠正，再过短段并入。两者共享「各在场说话人样本向量」。
+	samples := buildGroupSamples(ctx, d, reps, matched, resolvedID)
 	margin := d.VoiceprintCorrectMargin
 	if margin == 0 {
 		margin = defaultCorrectMargin
 	}
-	if err := correctPhantomHistoricalMatches(ctx, d, tr, reps, matched, resolvedID, margin); err != nil {
+	if err := correctPhantomHistoricalMatches(ctx, d, tr, reps, matched, deferred, resolvedID, samples, margin); err != nil {
+		return err
+	}
+	if err := mergeShortGroups(ctx, d, tr, reps, deferred, resolvedID, samples); err != nil {
 		return err
 	}
 	return nil
@@ -200,22 +218,9 @@ const correctScoreEps = 1e-6
 // 从自己段建出来的、天生在自己段上最高，不可能被判幽灵。先算全部判定（基于本趟归属快照）、
 // 再统一应用，避免链式/互换改判抖动。
 func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.Transcript,
-	reps []groupRep, matched []bool, resolvedID []ids.ID, margin float64) error {
+	reps []groupRep, matched []bool, deferred []bool, resolvedID []ids.ID, samples [][][]float32, margin float64) error {
 	if len(reps) < 2 {
 		return nil // 少于两个在场说话人无可比对象
-	}
-	// 每个在场说话人的样本向量集合：历史命中 → 库内多条样本(回退聚合代表)；新登记 → 本趟登记向量。
-	samples := make([][][]float32, len(reps))
-	for i, g := range reps {
-		if matched[i] {
-			samples[i] = loadSpeakerSampleVecs(ctx, d, resolvedID[i])
-		} else {
-			embVec := g.rep
-			if g.clean != nil {
-				embVec = g.clean
-			}
-			samples[i] = [][]float32{embVec}
-		}
 	}
 	type fix struct {
 		label    string
@@ -236,8 +241,8 @@ func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.
 		// 找在场其他说话人里，在本组段上得分最高者
 		bestScore, bestJ := -1.0, -1
 		for j := range reps {
-			if j == i || resolvedID[j] == resolvedID[i] {
-				continue // 跳过自己、跳过解析到同一 speaker 的组
+			if j == i || deferred[j] || resolvedID[j] == resolvedID[i] {
+				continue // 跳过自己、过短缓起组(无有效 speaker)、解析到同一 speaker 的组
 			}
 			sc := 0.0
 			for _, sv := range g.segVecs {
@@ -259,6 +264,67 @@ func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.
 			// 若返回错误让 job 重试，重试时段已 assigned → reps 为空 → 纠正永不重跑，反而是「既失败又丢纠正」
 			// 的最坏情况。与本 stage 样本行落库失败(SpeakerEmbeddings.Create)的 best-effort+log 处理一致。
 			log.Printf("[speaker] 幽灵历史声纹纠正失败 label=%s from=%s to=%s: %v", f.label, f.from, f.to, err)
+		}
+	}
+	return nil
+}
+
+// buildGroupSamples 为每组构造「该说话人的样本向量集合」（详情页同口径打分用）：
+// 命中历史库 → 库内多条样本(回退聚合代表)；其余(新登记/deferred) → 登记向量(clean 优先，否则 rep)。
+// deferred 组的样本不会被用作并入目标（调用方按 deferred 跳过），此处一并构造无害。
+func buildGroupSamples(ctx context.Context, d StageDeps, reps []groupRep, matched []bool, resolvedID []ids.ID) [][][]float32 {
+	samples := make([][][]float32, len(reps))
+	for i, g := range reps {
+		if matched[i] {
+			samples[i] = loadSpeakerSampleVecs(ctx, d, resolvedID[i])
+		} else {
+			embVec := g.rep
+			if g.clean != nil {
+				embVec = g.clean
+			}
+			samples[i] = [][]float32{embVec}
+		}
+	}
+	return samples
+}
+
+// mergeShortGroups 过短噪声段并入（2026-08-28 需求）：把 pass2 缓起(deferred)的过短组
+// 整组并入本录音里最匹配的「非过短在场说话人」（max 余弦，详情页同口径），无阈值——噪声句总要
+// 归给对话中某人。目标候选排除其他 deferred 组。best-effort：失败仅 log（段已在 pass2 留 NULL，
+// 并入失败则维持 NULL，不致命）。hasTarget 已保证存在至少一个非 deferred 候选。
+func mergeShortGroups(ctx context.Context, d StageDeps, tr *repo.Transcript,
+	reps []groupRep, deferred []bool, resolvedID []ids.ID, samples [][][]float32) error {
+	type fix struct {
+		label string
+		to    ids.ID
+	}
+	var fixes []fix
+	for i, g := range reps {
+		if !deferred[i] || len(g.segVecs) == 0 {
+			continue
+		}
+		bestScore, bestJ := -1.0, -1
+		for j := range reps {
+			if j == i || deferred[j] || len(samples[j]) == 0 {
+				continue // 目标须是非过短、有样本的在场说话人
+			}
+			sc := 0.0
+			for _, sv := range g.segVecs {
+				if s := segMaxScore(sv.vec, samples[j]); s > sc {
+					sc = s
+				}
+			}
+			if sc > bestScore {
+				bestScore, bestJ = sc, j
+			}
+		}
+		if bestJ >= 0 {
+			fixes = append(fixes, fix{label: g.label, to: resolvedID[bestJ]})
+		}
+	}
+	for _, f := range fixes {
+		if err := d.Transcripts.MergeShortGroup(ctx, tr.ID, f.label, f.to); err != nil {
+			log.Printf("[speaker] 过短段并入失败 label=%s to=%s: %v", f.label, f.to, err)
 		}
 	}
 	return nil
@@ -340,6 +406,8 @@ type groupRep struct {
 	clean []float32
 	// segVecs 组内各段与其向量（纠正 pass 用：逐段对各在场说话人打分）。
 	segVecs []segVec
+	// durMS 组内 segVecs 段时长之和（ms）——过短并入判定：<minCleanSegMS 视为过短噪声组。
+	durMS int64
 }
 
 // pickCleanSegVec 从组内段向量中挑「干净段」向量：时长 ≥3s 且与本 session **其他标签**的

@@ -66,9 +66,9 @@ func (f *fakeVoiceprint) Remove(_ context.Context, _ ids.ID) error { return nil 
 
 var _ voiceprint.Client = (*fakeVoiceprint)(nil) // 编译期接口符合性
 
-// seedSpeakerStage 准备 session + transcript + 3 段(标签 1/1/2) + DataDir 里的 transcoded wav。
-// 返回 (sid, tr, dataDir, transcripts, speakers)。wav 复用 ../../testdata/speech.wav。
-func seedSpeakerStage(t *testing.T) (ids.ID, *repo.Transcript, string, *repo.TranscriptRepo, *repo.SpeakerRepo) {
+// seedSpeakerStageSegs 建 session+transcript+指定段并复制切片源 wav；返回 (sid, tr, dataDir, transcripts, speakers)。
+// 供需要自定义段时长的测试（如过短并入）复用。
+func seedSpeakerStageSegs(t *testing.T, segs []repo.TranscriptSegment) (ids.ID, *repo.Transcript, string, *repo.TranscriptRepo, *repo.SpeakerRepo) {
 	t.Helper()
 	requireFFmpeg(t)
 	db, err := repo.NewDB(repotest.DSN(t))
@@ -79,7 +79,6 @@ func seedSpeakerStage(t *testing.T) (ids.ID, *repo.Transcript, string, *repo.Tra
 	sessions := &repo.SessionRepo{DB: db}
 	transcripts := &repo.TranscriptRepo{DB: db}
 	speakers := &repo.SpeakerRepo{DB: db}
-
 	sid := ids.New()
 	if err := sessions.Create(ctx, &repo.AudioSession{
 		ID: sid, Source: "web_upload", Filename: "speech.wav",
@@ -91,16 +90,12 @@ func seedSpeakerStage(t *testing.T) (ids.ID, *repo.Transcript, string, *repo.Tra
 	if err := transcripts.Create(ctx, tr); err != nil {
 		t.Fatal(err)
 	}
-	segs := []repo.TranscriptSegment{
-		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "明天发邮件", StartMS: 0, EndMS: 2000},
-		{TranscriptID: tr.ID, SequenceNo: 2, SpeakerLabel: "1", Text: "确认会议", StartMS: 2100, EndMS: 3600},
-		{TranscriptID: tr.ID, SequenceNo: 3, SpeakerLabel: "2", Text: "好的", StartMS: 3800, EndMS: 4200},
+	for i := range segs {
+		segs[i].TranscriptID = tr.ID
 	}
 	if err := transcripts.InsertSegments(ctx, segs); err != nil {
 		t.Fatal(err)
 	}
-
-	// 准备 stage 切片源 wav：{dataDir}/transcoded/{sid}.wav
 	dataDir := t.TempDir()
 	transcodedDir := filepath.Join(dataDir, "transcoded")
 	if err := os.MkdirAll(transcodedDir, 0o755); err != nil {
@@ -120,6 +115,16 @@ func seedSpeakerStage(t *testing.T) (ids.ID, *repo.Transcript, string, *repo.Tra
 	}
 	dst.Close()
 	return sid, tr, dataDir, transcripts, speakers
+}
+
+// seedSpeakerStage 默认三段（seq1,2=label"1" 共 3.5s；seq3=label"2" 3.1s——两组都 ≥3s，
+// 不触发过短并入，保持既有多说话人测试语义）。
+func seedSpeakerStage(t *testing.T) (ids.ID, *repo.Transcript, string, *repo.TranscriptRepo, *repo.SpeakerRepo) {
+	return seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "明天发邮件", StartMS: 0, EndMS: 2000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "确认会议", StartMS: 2100, EndMS: 3600},
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "好的", StartMS: 3800, EndMS: 6900},
+	})
 }
 
 func TestStageSpeakerEnrollsWhenNoMatch(t *testing.T) {
@@ -358,10 +363,14 @@ func seedCleanSegStage(t *testing.T, overlapC bool) (ids.ID, *repo.Transcript, *
 	if overlapC {
 		cStart = 4800 // 与 A [0,5000) 相交 → A 不再「干净」
 	}
+	// C 时长 ≥3s：C 是「另一 ASR 说话人」支撑段（scenario2 用来与 A 交集使 A 不干净），
+	// 需照常登记成第二个说话人。若 <3s 会被 Task2 的过短并入规则缓起并入 label1，令 addVecs 少一个、
+	// 破坏本用例（干净段挑选）无关的登记数断言。cStart 不变，交集关系保持。
+	cEnd := cStart + 3200
 	segs := []repo.TranscriptSegment{
 		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "长干净段", StartMS: 0, EndMS: 5000},
 		{TranscriptID: tr.ID, SequenceNo: 2, SpeakerLabel: "1", Text: "短段", StartMS: 5100, EndMS: 5500},
-		{TranscriptID: tr.ID, SequenceNo: 3, SpeakerLabel: "2", Text: "对方", StartMS: cStart, EndMS: 6500},
+		{TranscriptID: tr.ID, SequenceNo: 3, SpeakerLabel: "2", Text: "对方", StartMS: cStart, EndMS: cEnd},
 	}
 	if err := transcripts.InsertSegments(ctx, segs); err != nil {
 		t.Fatal(err)
@@ -793,5 +802,105 @@ func TestStageSpeakerCorrectionMarginBoundary(t *testing.T) {
 		if s.SequenceNo == 3 && s.CorrectedFromSpeakerID != nil {
 			t.Fatalf("恰好等于 self+margin 不应触发（需严格大于），实际标记 %+v", s.CorrectedFromSpeakerID)
 		}
+	}
+}
+
+// TestStageSpeakerMergesShortGroupIntoNearest 过短噪声组并入最近在场说话人。
+func TestStageSpeakerMergesShortGroupIntoNearest(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "A", Text: "正常说话一", StartMS: 0, EndMS: 2000},
+		{SequenceNo: 2, SpeakerLabel: "A", Text: "正常说话二", StartMS: 2100, EndMS: 4100},
+		{SequenceNo: 3, SpeakerLabel: "B", Text: "嗯。", StartMS: 4200, EndMS: 4600}, // 0.4s 噪声
+	})
+	vReal := make([]float32, 256)
+	vReal[0] = 1
+	vNoise := make([]float32, 256)
+	vNoise[0] = 0.69
+	vNoise[1] = float32(math.Sqrt(1 - 0.69*0.69))
+	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vReal, 2: vReal, 3: vNoise}}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	bySeq := map[int]repo.TranscriptSegment{}
+	for _, s := range segs {
+		bySeq[s.SequenceNo] = s
+	}
+	realID := bySeq[1].SpeakerID
+	if realID == nil {
+		t.Fatal("真人组未回填")
+	}
+	seg3 := bySeq[3]
+	if seg3.SpeakerID == nil || *seg3.SpeakerID != *realID {
+		t.Fatalf("过短段应并入真人 %v，实际 %+v", *realID, seg3.SpeakerID)
+	}
+	if seg3.CorrectedReason == nil || *seg3.CorrectedReason != "short" {
+		t.Fatalf("过短段应 corrected_reason=short，实际 %+v", seg3.CorrectedReason)
+	}
+	if seg3.CorrectedFromSpeakerID != nil {
+		t.Fatalf("过短并入 corrected_from 应为 NULL，实际 %+v", seg3.CorrectedFromSpeakerID)
+	}
+	if len(fv.added) != 1 {
+		t.Fatalf("过短组不应登记声纹，应只登记真人 1 个，实际 %d", len(fv.added))
+	}
+}
+
+// TestStageSpeakerLongNewGroupStillRegisters ≥3s 新组照常登记、不并入、无 corrected_reason。
+func TestStageSpeakerLongNewGroupStillRegisters(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "A", Text: "长段一", StartMS: 0, EndMS: 2000},
+		{SequenceNo: 2, SpeakerLabel: "A", Text: "长段二", StartMS: 2100, EndMS: 4100},
+		{SequenceNo: 3, SpeakerLabel: "B", Text: "也很长的一段独立说话", StartMS: 4200, EndMS: 7500},
+	})
+	vA := make([]float32, 256)
+	vA[0] = 1
+	vB := make([]float32, 256)
+	vB[1] = 1
+	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vA, 2: vA, 3: vB}}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.CorrectedReason != nil {
+			t.Fatalf("非过短组不应有 corrected_reason，seq%d=%+v", s.SequenceNo, s.CorrectedReason)
+		}
+	}
+	if len(fv.added) != 2 {
+		t.Fatalf("两个 ≥3s 新组应各登记 1 个，实际 %d", len(fv.added))
+	}
+}
+
+// TestStageSpeakerAllShortFallbackRegisters 全部组过短 → 无并入目标 → 退回照常登记。
+func TestStageSpeakerAllShortFallbackRegisters(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "A", Text: "嗯", StartMS: 0, EndMS: 500},
+		{SequenceNo: 2, SpeakerLabel: "B", Text: "啊", StartMS: 600, EndMS: 1000},
+	})
+	vA := make([]float32, 256)
+	vA[0] = 1
+	vB := make([]float32, 256)
+	vB[1] = 1
+	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vA, 2: vB}}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SpeakerID == nil {
+			t.Fatalf("全过短退回登记后每段应有归属，seq%d 仍 NULL", s.SequenceNo)
+		}
+		if s.CorrectedReason != nil {
+			t.Fatalf("全过短退回登记不应打 short 标记，seq%d=%+v", s.SequenceNo, s.CorrectedReason)
+		}
+	}
+	if len(fv.added) != 2 {
+		t.Fatalf("全过短退回：两组各登记 1 个，实际 %d", len(fv.added))
 	}
 }
