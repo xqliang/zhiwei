@@ -181,3 +181,21 @@ func GenerateTitle(ctx context.Context, uid int64, cid ids.ID, convs *repo.Agent
 		log.Printf("[agent] 写回自动标题失败(静默) conv=%s: %v", cid, err)
 	}
 }
+
+// GenerateTitleSync 同步版：跑一次生成，返回新标题（已写回 auto）。跳过/失败返回 ("", err)，
+// 供 handler 的 title/generate 端点用（让用户能手动触发并拿到结果）。
+func GenerateTitleSync(ctx context.Context, uid int64, cid ids.ID, convs *repo.AgentConversationRepo,
+	msgs *repo.AgentMessageRepo, llm provider.LLMProvider, model string) (string, error) {
+	d := newTitleDeps(ctx, uid, cid, convs, msgs, llmAdapter{llm}, model)
+	title, err := d.generate(ctx)
+	if err != nil {
+		return "", err
+	}
+	if _, s, e := convs.TitleState(ctx, uid, cid); e == nil && s == titleSourceManual {
+		return "", errTitleSkip
+	}
+	if err := convs.UpdateTitle(ctx, uid, cid, title, titleSourceAuto); err != nil {
+		return "", err
+	}
+	return title, nil
+}
