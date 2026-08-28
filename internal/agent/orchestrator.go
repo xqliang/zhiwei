@@ -26,6 +26,10 @@ type Orchestrator struct {
 	//（在 Ctx 的 owner 画像头之前）。用于「不重启 dsh 动态改人设」——随 session/prompt 一起发过去，
 	// 编辑即时生效。返回 "" 表示本轮不注入（未配置/为空）。同样绝不改落库。
 	Persona func(ctx context.Context) string
+	// OnTurnComplete 可选：每轮 runTurn 收尾（Touch 之后）调用，供主装配挂「自动生成标题」等
+	// 每轮副作用。必须快速返回、不得阻塞 runTurn——耗时工作由实现方自行起 goroutine。
+	// nil → 不调用（既有行为/测试不变）。
+	OnTurnComplete func(ctx context.Context, conv *repo.AgentConversation)
 }
 
 // NewOrchestrator 第一参收「按 userID 选运行时」的函数（生产 = pool.Get，单测 = 返回 fake 的闭包）。
@@ -174,6 +178,10 @@ func (o *Orchestrator) runTurn(ctx context.Context, conv *repo.AgentConversation
 		}
 	}
 	_ = o.Conversations.Touch(ctx, conv.ID)
+	// 每轮收尾钩子（可选）：自动生成标题等副作用。快速返回，耗时工作由回调自行异步。
+	if o.OnTurnComplete != nil {
+		o.OnTurnComplete(ctx, conv)
+	}
 	// 轮次收尾帧：Error 为空表示正常结束（前端据此关闭「正在输入」态）。
 	send(StreamFrame{Type: "turn_end", Error: turnErr})
 	// 上报优先级：模型轮次错误 > 落库错误；两种情况都带回 lastText（可能为 nil）。

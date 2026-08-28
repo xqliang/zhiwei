@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
 
@@ -663,5 +664,45 @@ func TestProfileContextHeadByUser(t *testing.T) {
 	const otherUser = int64(424242)
 	if h := pc.Head(ctx, otherUser, now); h != "" {
 		t.Errorf("无 owner 的用户应得空头(不串用他人画像), got %q", h)
+	}
+}
+
+// TestOrchestratorOnTurnComplete 锁定：每轮 runTurn 收尾会调用 OnTurnComplete（若装配）。
+func TestOrchestratorOnTurnComplete(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convRepo := &repo.AgentConversationRepo{DB: db}
+	msgRepo := &repo.AgentMessageRepo{DB: db}
+	ctx := t.Context()
+	conv := &repo.AgentConversation{Title: "t"}
+	if err := convRepo.Create(ctx, conv); err != nil {
+		t.Fatal(err)
+	}
+	if full, err := convRepo.Get(ctx, 1, conv.ID); err == nil {
+		conv = full
+	}
+
+	msgData, _ := json.Marshal(map[string]any{"message": map[string]any{"content": []map[string]any{
+		{"type": "text", "text": "答复"},
+	}}})
+	fake := &FakeRuntime{Script: [][]Event{{{Type: EvAssistantMessage, Data: msgData}}}}
+	orch := NewOrchestrator(rtFor(fake), convRepo, msgRepo)
+
+	called := 0
+	var gotConvID ids.ID
+	orch.OnTurnComplete = func(_ context.Context, c *repo.AgentConversation) {
+		called++
+		gotConvID = c.ID
+	}
+	if _, err := orch.RunTurn(ctx, conv, "你好"); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if called != 1 {
+		t.Errorf("OnTurnComplete 应被调用 1 次, got %d", called)
+	}
+	if gotConvID != conv.ID {
+		t.Errorf("回调收到的 convID=%s want %s", gotConvID, conv.ID)
 	}
 }
