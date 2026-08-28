@@ -25,6 +25,7 @@ type QueryHandler struct {
 	Transcripts *repo.TranscriptRepo
 	Memories    *repo.MemoryRepo  // Sprint 2：详情附带 memory 卡片
 	Todos       *repo.TodoRepo    // Sprint 2：详情附带 todo 卡片
+	ChangeLogs  *repo.PersonChangeLogRepo // 详情附带该录音触发的 profile 平面变更（entity_kind 覆盖 8 平面）
 	Speakers    *repo.SpeakerRepo // speaker stage：详情附带段说话人 + speakers 列表
 
 	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // speakername stage：详情 speakers 附候选名
@@ -497,6 +498,11 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 	if h.Todos != nil {
 		if todos, err := h.Todos.ListBySession(r.Context(), sid); err == nil {
 			resp["todos"] = todos
+		}
+	}
+	if h.ChangeLogs != nil {
+		if changes, err := h.ChangeLogs.ListBySession(r.Context(), sid); err == nil {
+			resp["profile_changes"] = changes
 		}
 	}
 	if s.JobID != nil {
