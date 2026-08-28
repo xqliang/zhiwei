@@ -358,15 +358,20 @@ func main() {
 
 	// 技能磁盘布局：<AgentSkillRoot>/enabled（dsh skills 插件监听根，经 env 注入）+ /disabled（移出即对模型不可见）。
 	// skills 插件常开（空目录=无技能），技能增删/启禁全部是文件操作，dsh watcher 热生效（spec §3）。
-	skillEnabledDir := filepath.Join(cfg.AgentSkillRoot, "enabled")
-	skillDisabledDir := filepath.Join(cfg.AgentSkillRoot, "disabled")
+	// 必须【绝对路径】：dsh 子进程 cwd=sidecarDir，相对路径会相对它再解析一次而失效（同 CordisConfig 的坑）。
+	skillRoot := cfg.AgentSkillRoot
+	if abs, err := filepath.Abs(skillRoot); err == nil {
+		skillRoot = abs
+	}
+	skillEnabledDir := filepath.Join(skillRoot, "enabled")
+	skillDisabledDir := filepath.Join(skillRoot, "disabled")
 	if err := os.MkdirAll(skillEnabledDir, 0o755); err != nil {
 		log.Fatalf("建技能目录: %v", err)
 	}
 	_ = os.MkdirAll(skillDisabledDir, 0o755)
 
 	// 技能安装器：codeload 拉 tarball + skills.sh 搜索代理（生产地址；测试注入 httptest，见 skillinstall_test）。
-	skillInst := agent.NewSkillInstaller("https://codeload.github.com", "https://www.skills.sh", cfg.AgentSkillRoot)
+	skillInst := agent.NewSkillInstaller("https://codeload.github.com", "https://www.skills.sh", skillRoot)
 
 	// 2B-B：每登录用户一个 dsh 运行时 + 一个 MCP token 的进程池。baseCfg 是模板——
 	// CordisConfig/Model/SystemPrompt 全用户共享；MCPURL 留空、SessionRoot 作父目录，由 pool

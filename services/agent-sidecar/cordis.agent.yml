@@ -32,6 +32,9 @@
     skills:
       enabled: true
       filesystem:
+        # 只从 customSkillDirs（设置页管理的目录）加载：关掉默认 roots，杜绝本机 ~/.agents
+        # 等目录的技能绕过管理界面泄漏给模型（管理的=可见的全集）。
+        includeDefaultRoots: false
         customSkillDirs:
           # 绝对路径由 Go 侧经 env 注入（ZW_AGENT_SKILL_DIR=<skillRoot>/enabled）；
           # 兜底相对路径仅保证无 env 时配置合法（目录不存在=无技能，无害）。
