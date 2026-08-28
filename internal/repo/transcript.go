@@ -208,6 +208,18 @@ func (r *TranscriptRepo) SetSegmentSpeakerByID(ctx context.Context, transcriptID
 	return err
 }
 
+// ReattributeSegmentByVoiceprint 逐段声纹改判（2026-08-28 需求）：某段的段级声纹明显更像另一个
+// 在场说话人（≥SoftMin 且领先当前归属 ≥GapMin）时，把该单段从 fromID 改判给 toID，标记
+// corrected_reason='mismatch' + corrected_from_speaker_id=fromID（前端「已修改」徽章 tooltip「原判定：X」）。
+// `AND speaker_id = fromID` 护栏：仅在段仍归属改判前说话人时生效（防并发/重复改判误写）；带 transcript_id 作用域。
+func (r *TranscriptRepo) ReattributeSegmentByVoiceprint(ctx context.Context, transcriptID, segID, fromID, toID ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_from_speaker_id = ?, corrected_reason = 'mismatch'
+		 WHERE id = ? AND transcript_id = ? AND speaker_id = ?`,
+		toID.Int64(), fromID.Int64(), segID.Int64(), transcriptID.Int64(), fromID.Int64())
+	return err
+}
+
 // CorrectSegmentSpeaker 幽灵历史声纹纠正：把本 transcript 内某 speaker_label 的全部段
 // 从原历史说话人 fromID 改判给 toID，并记录 corrected_from_speaker_id=fromID（前端"已修改"
 // 徽章 + 审计）。纠正 pass 以「组=speaker_label」为单位，故按 label 定位；带 transcript_id
