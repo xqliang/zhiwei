@@ -248,6 +248,14 @@
   .agent-convo-item:hover { background: var(--surface-sunken); }
   .agent-convo-item.active { background: var(--accent-soft); border-color: var(--accent); }
   .agent-convo-item b { display: block; font-size: var(--fs-sm); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 会话列表项：时间 + hover 才显的编辑/删除按钮分列两端 */
+  .agent-convo-meta { font-size: var(--fs-xs); display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+  .agent-convo-ops { display: none; gap: 4px; }
+  .agent-convo-item:hover .agent-convo-ops { display: inline-flex; }
+  .btn.xs { padding: 1px 6px; font-size: var(--fs-xs); line-height: 1.4; }
+  .btn.xs.danger { color: var(--danger); border-color: transparent; }
+  .btn.xs.danger:hover { background: var(--danger-soft); }
+  .agent-convo-edit { width: 100%; box-sizing: border-box; font-size: var(--fs-sm); padding: 4px 6px; }
   .agent-conn { font-size: var(--fs-xs); font-weight: 600; }
 
   /* 消息流：独立滚动区，避让顶部粘性标签栏与底部输入 */
@@ -753,8 +761,23 @@
         <button class="btn primary" style="width:100%; justify-content:center; margin-bottom:10px" @click="newAgentConversation">＋ 新对话</button>
         <div v-if="!agentConversations.length" class="muted" style="padding:8px 4px; font-size:var(--fs-sm)">还没有对话，点上方「新对话」开始。</div>
         <div v-for="c in agentConversations" :key="c.id" class="agent-convo-item" :class="{active: c.id===agentConvId}" @click="selectAgentConversation(c)">
-          <b>{{ c.title || '新对话' }}</b>
-          <span class="muted" style="font-size:var(--fs-xs)">{{ fmtTime(c.last_active_at) }}</span>
+          <template v-if="agentEditConvId !== c.id">
+            <b>{{ c.title || '新对话' }}</b>
+            <span class="muted agent-convo-meta">
+              <span>{{ fmtTime(c.last_active_at) }}</span>
+              <span class="agent-convo-ops" @click.stop>
+                <button class="btn xs" title="编辑标题" @click="startEditConv(c)">✏️</button>
+                <button class="btn xs danger" title="删除会话" @click="deleteAgentConversation(c)">🗑</button>
+              </span>
+            </span>
+          </template>
+          <template v-else>
+            <input class="agent-convo-edit" v-model="agentEditTitle"
+                   @click.stop
+                   @keyup.enter="saveAgentTitle(c)"
+                   @keyup.esc="cancelEditConv"
+                   @blur="saveAgentTitle(c)" />
+          </template>
         </div>
       </div>
 
@@ -2417,6 +2440,6 @@
   </template>
 </div>
 
-<script src="/app/app.a9978f3e.js"></script>
+<script src="/app/app.c8456995.js"></script>
 </body>
 </html>

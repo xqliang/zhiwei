@@ -2362,6 +2362,8 @@ const app = createApp({
     //   才退回 FIFO（填最早一个未填充的卡）。
     const agentConversations = ref([]);   // 左侧会话列表
     const agentConvId = ref(null);        // 当前选中的会话 id（string）
+    const agentEditConvId = ref(null);    // 正在编辑标题的会话 id（行内 input 态）
+    const agentEditTitle = ref('');       // 行内编辑的标题临时值
     const agentMessages = ref([]);        // 当前会话的展示项流（见下 makeToolItem / 文本项结构）
     const agentInput = ref('');           // 输入框内容
     const agentConnected = ref(false);    // WS 是否已连接（连接指示灯）
@@ -2771,6 +2773,45 @@ const app = createApp({
       await loadAgentHistory(c.id);
       openAgentWS(c.id);
     }
+    // 进入行内编辑：记下目标会话 + 临时标题；不触发选中（按钮已 @click.stop）。
+    function startEditConv(c) {
+      agentEditConvId.value = c.id;
+      agentEditTitle.value = c.title || '';
+    }
+    function cancelEditConv() {
+      agentEditConvId.value = null;
+      agentEditTitle.value = '';
+    }
+    // 失焦/回车保存：PATCH 改标题(manual)，成功重拉列表。空标题或未变则取消。
+    // 防重复：blur 与 enter 可能连发——先判 agentEditConvId 再置 null，只生效一次。
+    async function saveAgentTitle(c) {
+      if (agentEditConvId.value !== c.id) return; // 已取消/已保存（重复 blur/enter）
+      agentEditConvId.value = null;
+      const title = agentEditTitle.value.trim();
+      if (!title || title === (c.title || '')) return; // 空标题或未改动：不发请求
+      try {
+        await api('PATCH', '/api/agent/conversations/' + c.id, { title });
+        await loadAgentConversations();
+      } catch (e) {
+        notify(e.message || '保存标题失败', 'error');
+      }
+    }
+    // 软删除：确认后 DELETE，若删的是当前会话则清空主区。
+    async function deleteAgentConversation(c) {
+      if (!confirm('删除会话「' + (c.title || '新对话') + '」？')) return;
+      try {
+        await api('DELETE', '/api/agent/conversations/' + c.id);
+        if (agentConvId.value === c.id) {
+          closeAgentWS();
+          agentConvId.value = null;
+          agentMessages.value = [];
+        }
+        await loadAgentConversations();
+        notify('会话已删除');
+      } catch (e) {
+        notify(e.message || '删除失败', 'error');
+      }
+    }
     // 新对话：POST 建会话 → 刷新列表 → 选中并连 WS。
     async function newAgentConversation() {
       try {
@@ -3079,9 +3120,9 @@ const app = createApp({
       editingTodo, startEditTodo, cancelEditTodo, saveEditTodo, deletingTodoId, askDeleteTodo, cancelDeleteTodo, confirmDeleteTodo, dismissingTodoId, askDismissTodo, cancelDismissTodo, confirmDismissTodo,
       topicChips, availableTopics, addTodoTopic, removeTodoTopic, addMemoryTopic, removeMemoryTopic,
       // 问知微（流式对话）
-      agentConversations, agentConvId, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
+      agentConversations, agentConvId, agentEditConvId, agentEditTitle, agentMessages, agentInput, agentConnected, agentTyping, agentTurnError, agentLoading, agentStreamEl,
       agentTurns, turnRunning, agentThinkingGap, turnDuration, fmtDur, isTurnOpen, toggleTurn, streamDraft,
-      loadAgentConversations, newAgentConversation, selectAgentConversation, sendAgentMessage, stopAgentMessage,
+      loadAgentConversations, newAgentConversation, selectAgentConversation, startEditConv, cancelEditConv, saveAgentTitle, deleteAgentConversation, sendAgentMessage, stopAgentMessage,
       agentCfgIdentity, agentCfgSoul, agentCfgSaving, agentCfgSaved, agentCfgPreview, agentCfgSystemPrompt, agentCfgOwnerHead, agentCfgFullPrompt, loadAgentConfig, saveAgentConfig,
       confirmProposal, dismissProposal,
       renderMarkdown, reportSections, prettyJSON,
