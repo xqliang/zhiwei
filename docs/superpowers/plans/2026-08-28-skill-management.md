@@ -17,7 +17,7 @@
 
 ## File Structure
 
-- Create `migrations/000023_agent_skill.up.sql` / `.down.sql`
+- Create `migrations/000024_agent_skill.up.sql` / `.down.sql`
 - Create `internal/repo/agent_skill.go` + `internal/repo/agent_skill_test.go`
 - Create `internal/agent/skillinstall.go`（tarball 拉取/解压/校验/原子落盘 + skills.sh 搜索代理 + frontmatter 简易解析）+ `skillinstall_test.go`
 - Create `internal/agent/skill_handlers.go`（/api/agent/skills* 端点 + 启禁/删除的磁盘组合）+ `skill_handlers_test.go`
@@ -30,16 +30,16 @@
 
 ---
 
-## Task 1: 迁移 `000023_agent_skill` + `AgentSkillRepo`
+## Task 1: 迁移 `000024_agent_skill` + `AgentSkillRepo`
 
 **Files:**
-- Create: `migrations/000023_agent_skill.up.sql`、`migrations/000023_agent_skill.down.sql`
+- Create: `migrations/000024_agent_skill.up.sql`、`migrations/000024_agent_skill.down.sql`
 - Create: `internal/repo/agent_skill.go`
 - Test: `internal/repo/agent_skill_test.go`
 
 - [ ] **Step 1: up 迁移**
 
-`migrations/000023_agent_skill.up.sql`:
+`migrations/000024_agent_skill.up.sql`:
 ```sql
 -- 全局技能（Agent Skills）清单：dsh skills 插件从 data/agent-skills/enabled/ 热加载 SKILL.md，
 -- 本表记元数据（来源/描述/启禁态/全文预览）。安装/启禁/删除经 /api/agent/skills 管理，
@@ -61,7 +61,7 @@ CREATE TABLE agent_skill (
 
 - [ ] **Step 2: down 迁移**
 
-`migrations/000023_agent_skill.down.sql`:
+`migrations/000024_agent_skill.down.sql`:
 ```sql
 DROP TABLE IF EXISTS agent_skill;
 ```

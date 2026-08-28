@@ -77,7 +77,7 @@ data/agent-skills/
 - 安装原子性：先解到 `.tmp-install-*`，校验通过后 `os.Rename` 进 `enabled/<name>/`；失败清理暂存。
 - 启禁 = `enabled/<name>` ↔ `disabled/<name>` rename；删除 = `os.RemoveAll` + 删 DB 行。
 
-### 5.2 表 `agent_skill`（迁移 `000023_agent_skill`）
+### 5.2 表 `agent_skill`（迁移 `000024_agent_skill`）
 ```sql
 CREATE TABLE agent_skill (
   id          BIGINT UNSIGNED NOT NULL,
