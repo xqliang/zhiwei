@@ -2257,6 +2257,15 @@ const app = createApp({
     const spMergeSelected = ref([]);    // 勾选的 speaker id
     const spMergeConfirming = ref(false); // 已点开始合并→选目标阶段
     const spMergeTarget = ref(null);     // 选作目标(保留)的 speaker id
+    // 选中说话人按创建时间升序（早→晚）：默认保留目标取最早的那个，下拉选项也顺此序展示。
+    const spMergeSelectedSorted = computed(() => {
+      const byId = new Map(allSpeakers.value.map(s => [s.id, s]));
+      return [...spMergeSelected.value].sort((a, b) => {
+        const ta = new Date((byId.get(a) || {}).created_at || 0).getTime();
+        const tb = new Date((byId.get(b) || {}).created_at || 0).getTime();
+        return ta - tb;
+      });
+    });
     function startSpMerge() { spMergeMode.value = true; spMergeSelected.value = []; spMergeConfirming.value = false; spMergeTarget.value = null; }
     function cancelSpMerge() { spMergeMode.value = false; spMergeSelected.value = []; spMergeConfirming.value = false; spMergeTarget.value = null; }
     function toggleSpSelect(sp) {
@@ -2264,10 +2273,11 @@ const app = createApp({
       if (i >= 0) { spMergeSelected.value.splice(i, 1); if (spMergeTarget.value === sp.id) spMergeTarget.value = null; }
       else spMergeSelected.value.push(sp.id);
     }
-    // 开始合并：进入选目标阶段，默认目标=首个选中
+    // 开始合并：进入选目标阶段，默认目标=选中者里**创建最早**的那个（更可能是最初登记的真身，
+    // 后来拆出的自动声纹并进来；用户仍可在下拉里改选）。
     function startSpConfirm() {
       spMergeConfirming.value = true;
-      spMergeTarget.value = spMergeSelected.value[0] || null;
+      spMergeTarget.value = spMergeSelectedSorted.value[0] || spMergeSelected.value[0] || null;
     }
     async function applySpMerge() {
       if (spMergeSelected.value.length < 2) { notify('至少选 2 个说话人'); return; }
@@ -3263,7 +3273,7 @@ const app = createApp({
       switchingSpeaker, switchTarget, switchSegCount, startSwitchSpeaker, cancelSwitchSpeaker, commitSwitchSpeaker,
       hasNameCandidates, acceptNameCandidate, dismissNameCandidate,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
-      spMergeMode, spMergeSelected, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
+      spMergeMode, spMergeSelected, spMergeSelectedSorted, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
       reextractingIds, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
       reidentifyingIds, reidentifyConfirmId, askReidentify, cancelReidentify, confirmReidentify,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,

@@ -1563,7 +1563,7 @@
           <template v-else>
             <span class="muted">保留目标：</span>
             <select class="mini" v-model="spMergeTarget">
-              <option v-for="id in spMergeSelected" :key="id" :value="id">{{ (allSpeakers.find(s => s.id === id) || {}).name || id }}</option>
+              <option v-for="id in spMergeSelectedSorted" :key="id" :value="id">{{ (allSpeakers.find(s => s.id === id) || {}).name || id }}</option>
             </select>
             <button class="btn primary" style="padding:7px 14px" @click="applySpMerge">确认合并</button>
           </template>
@@ -2635,6 +2635,6 @@
   </template>
 </div>
 
-<script src="/app/app.a7a061c8.js"></script>
+<script src="/app/app.a3a38699.js"></script>
 </body>
 </html>
