@@ -188,10 +188,11 @@ const app = createApp({
     function statusText(status, stage) {
       if (status === 'done' || status === 'completed') return '已完成';
       if (status === 'failed') return '失败';
-      // 处理中标注当前阶段（中文）：pipeline 各 stage 的用户可读名
+      // 处理中标注当前阶段（中文）：pipeline 各 stage 的用户可读名（与后端 stagesList 对齐）
       const stageNames = {
         asr: '语音转写', segment: '全文汇总', speaker: '声纹识别',
-        speakername: '名字推断', extract: '记忆抽取',
+        speakername: '名字推断', extract: '记忆抽取', profile: '画像抽取',
+        audioscene: '场景情绪', emotionprofile: '情绪汇总',
       };
       if (status === 'running') return '处理中 · ' + (stageNames[stage] || stage || '');
       return '排队中';
