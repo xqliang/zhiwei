@@ -39,6 +39,11 @@ type TranscriptSegment struct {
 	// 'mismatch'=逐段声纹改判——该段更像另一在场说话人（配 CorrectedFromSpeakerID=改判前说话人）。nil=未纠正。
 	// 与 speaker_id 一同被手动换人/整人改判/重新识别清空。
 	CorrectedReason *string `db:"corrected_reason" json:"corrected_reason,omitempty"`
+	// EntityEdits 该段的实体纠错明细 JSON（000025 迁移加列）：数组
+	// [{orig, corrected, canonical, confidence}]，由 correct stage 应用纠正时写入，
+	// 前端转写详情据此渲染「原文(删除线)→纠正后」对照。未纠正段为 NULL。
+	// json:"-" 不外泄，API 层按需转成明文数组（同 Embedding 的处理方式）。
+	EntityEdits []byte `db:"entity_edits" json:"-"`
 	// Embedding 该段的 256 维声纹向量 BLOB（000007 迁移加列；speaker stage 逐段
 	// 提取后落库，供详情页按段展示与声纹库的相似度 top-N）。json:"-" 不外泄，
 	// API 层按需转成 top-N 明文列表。存量会话（新列前处理）为 NULL。
