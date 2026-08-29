@@ -768,14 +768,22 @@
               <div class="muted" style="margin:2px 0 4px; font-size:var(--fs-xs)">
                 {{ profilePlaneMeta(kind).icon }} {{ profilePlaneMeta(kind).label }}（{{ logs.length }}）
               </div>
-              <div class="card sunken" v-for="log in logs" :key="log.id" style="margin-bottom:6px">
+              <!-- 方案 C（2026-08-29）：审计快照保留抽取时原文（fmtChangeSummary 显示），
+                   人物行另附「现名：X」标注；现名与快照不同时整卡可点击跳人物详情。 -->
+              <div class="card sunken" v-for="log in logs" :key="log.id"
+                   :style="log.entity_kind === 'person' && log.person_current_name ? 'cursor:pointer; margin-bottom:6px' : 'margin-bottom:6px'"
+                   @click="log.entity_kind === 'person' && jumpToPerson(log.person_id)">
                 <div style="display:flex; align-items:center; gap:6px">
                   <div style="min-width:0; flex:1; font-size:var(--fs-sm)">{{ fmtChangeSummary(log) }}</div>
                   <span :style="{background:profileChangeAction(log).color, color:'#fff', padding:'1px 7px', borderRadius:'4px', fontSize:'10px', flexShrink:0}">{{ profileChangeAction(log).label }}</span>
                 </div>
                 <div class="muted" style="font-size:var(--fs-xs); margin-top:3px">
                   {{ log.changed_by === 'llm' ? '🤖 LLM 抽取' : '✋ 手动' }}<template v-if="log.confidence != null"> · 置信 {{ log.confidence.toFixed(2) }}</template> · {{ fmtTime(log.created_at) }}
-                  <button v-if="profileChangeAction(log).label === '待确认'" class="btn mini" @click="goProfilePending" style="margin-left:6px">去确认</button>
+                  <!-- 现名标注：仅人物行且现名与审计快照原文不同时显示（快照去 JSON 引号后比对） -->
+                  <template v-if="log.entity_kind === 'person' && log.person_current_name && snapText(log.new_value) !== log.person_current_name">
+                    · 现名：<b style="color:var(--accent)">{{ log.person_current_name }}</b>
+                  </template>
+                  <button v-if="profileChangeAction(log).label === '待确认'" class="btn mini" @click.stop="goProfilePending" style="margin-left:6px">去确认</button>
                 </div>
               </div>
             </div>
@@ -2587,6 +2595,6 @@
   </template>
 </div>
 
-<script src="/app/app.eb37531e.js"></script>
+<script src="/app/app.da4bee44.js"></script>
 </body>
 </html>

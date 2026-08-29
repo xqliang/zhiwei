@@ -30,6 +30,10 @@ type PersonChangeLog struct {
 	TranscriptSegmentIDs ids.List  `db:"transcript_segment_ids" json:"transcript_segment_ids"`
 	Note                 *string   `db:"note" json:"note,omitempty"`
 	CreatedAt            time.Time `db:"created_at" json:"created_at"`
+	// PersonCurrentName 仅 API 响应富化用（timeline「涉及的画像变更」方案 C，2026-08-29）：
+	// entity_kind='person' 行携带 person 表现名，供前端在审计快照旁标注「现名：X」+跳转链接。
+	// db:"-" → 不入库（审计只存当时的快照，现名随查随填）。
+	PersonCurrentName *string `db:"-" json:"person_current_name,omitempty"`
 }
 
 type PersonChangeLogRepo struct{ DB *sqlx.DB }

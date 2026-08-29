@@ -1342,6 +1342,14 @@ const app = createApp({
       }
       catch (e) { showError(e); }
     }
+    // 从 timeline「涉及的画像变更」跳人物详情：先切 persons tab（其分支会 closePersonDetail+
+    // loadPersons，名册数据就绪），再展开该人物详情。detail 抽屉保持打开——返回 timeline 时
+    // expandedId 仍在，用户可继续看原录音（切换 tab 不清 detail，符合既有行为）。
+    async function jumpToPerson(id) {
+      switchTab('persons');
+      await loadPersons();
+      await togglePerson(id);
+    }
     function closePersonDetail() {
       personDetail.value = null;
       renamingPerson.value = null;
@@ -2521,8 +2529,8 @@ const app = createApp({
         const ol = line.match(/^\s*\d+\.\s+(.*)$/);
         if (ul) { flushPara(); if (listType !== 'ul') { closeList(); html += '<ul>'; listType = 'ul'; } html += '<li>' + inlineMd(ul[1]) + '</li>'; }
         else if (ol) { flushPara(); if (listType !== 'ol') { closeList(); html += '<ol>'; listType = 'ol'; } html += '<li>' + inlineMd(ol[1]) + '</li>'; }
-        else if (t === '') { flushPara(); closeList(); }        // 空行=段落分隔
-        else { closeList(); para.push(inlineMd(line)); }         // 普通文本行
+        else if (t === '') { flushPara(); }                     // 空行=段落分隔；注意「不断列表」——列表项之间的空行只是排版间距，若在此 closeList 会把一个 <ol>/<ul> 拆成多个单项列表，有序列表序号便全部重置为 1（表现为每项都显示 1.）。列表改由其后首个非列表行（普通段落/标题/代码块/异型列表）或文末统一收尾。
+        else { closeList(); para.push(inlineMd(line)); }         // 真正的非列表、非空行：先收尾可能开着的列表，再并入段落
       }
       flushPara(); closeList();
       // 3) 回填代码块
@@ -3280,7 +3288,7 @@ const app = createApp({
       statusTopicId, topicStatusRow, topicStatusLoading, topicStatusError, topicStatusContent, topicStatusFailed,
       loadTopicStatus, onPickStatusTopic,
       // 人物 / 画像
-      persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, deletingPersonId, askDeletePerson, cancelDeletePerson, confirmDeletePerson, deletedPersons, deletedCollapsed, loadDeletedPersons, restorePerson,
+      persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, jumpToPerson, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, deletingPersonId, askDeletePerson, cancelDeletePerson, confirmDeletePerson, deletedPersons, deletedCollapsed, loadDeletedPersons, restorePerson,
       bindingSpeaker, bindingSaving, bindableSpeakers, startBindingSpeaker, commitBindingSpeaker,
       jumpToPerson, spPersonEdit, spPersonSaving, unboundPersons, startSpPersonEdit, commitSpPersonEdit,
       epiText, personNameOf,

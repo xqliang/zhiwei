@@ -33,6 +33,10 @@ type QueryHandler struct {
 	// VoiceprintThreshold 1:N 强命中阈值（timeline 列表「整段声纹」判定用；0→兜底 0.8）。
 	VoiceprintThreshold float64
 
+	// Persons 人物只读（可选）：GetSession 的「涉及的画像变更」对人物审计行富化现名
+	// （PersonCurrentName，方案 C 标注用）；nil = 不富化，只返回审计快照。
+	Persons *repo.PersonRepo
+
 	// SpeakerEmbeddings 多条声纹样本 repo（多向量匹配：每人任意一条样本命中即命中；
 	// nil = 未装配，回退聚合代表单向量，兼容旧装配/测试）
 	SpeakerEmbeddings *repo.SpeakerEmbeddingRepo
@@ -502,6 +506,19 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.ChangeLogs != nil {
 		if changes, err := h.ChangeLogs.ListBySession(r.Context(), sid); err == nil {
+			// 方案 C（2026-08-29）：审计快照保留抽取时原文（如「老保一家」），另对人物行
+			// 富化 PersonCurrentName（person 表现名）——前端据此在卡片上标注「现名：X」
+			// 并做跳转人物详情的链接。非人物行不富化（nil → JSON null）。
+			if h.Persons != nil {
+				for i := range changes {
+					if changes[i].EntityKind != "person" {
+						continue
+					}
+					if p, err := h.Persons.Get(r.Context(), s.UserID, changes[i].PersonID); err == nil && p != nil {
+						changes[i].PersonCurrentName = &p.DisplayName
+					}
+				}
+			}
 			resp["profile_changes"] = changes
 		}
 	}

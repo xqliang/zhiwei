@@ -345,6 +345,106 @@ func TestGetSessionNameCandidates(t *testing.T) {
 	}
 }
 
+// TestGetSessionProfileChangeCurrentName 验证 timeline「涉及的画像变更」对人物变更行
+// 富化现名（方案 C：审计快照保留原文「老保一家」、另附 person_current_name 供前端标注
+// 「现名：X」并做跳转链接）。人物行 person_current_name 始终反映 person 表现名；
+// 非人物行（attribute/event 等）不富化（null）。
+func TestGetSessionProfileChangeCurrentName(t *testing.T) {
+	_ = ids.InitForTest()
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	jobs := &repo.JobRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	memories := &repo.MemoryRepo{DB: db}
+	todos := &repo.TodoRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+	persons := &repo.PersonRepo{DB: db}
+	changeLogs := &repo.PersonChangeLogRepo{DB: db}
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "pc.wav",
+		StoragePath: "/tmp/pc.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 人物：先以「老保一家」建 pending（模拟 LLM 抽取粘连名），再改名「老保」
+	p := &repo.Person{DisplayName: "老保一家", Source: "llm", Status: "pending"}
+	if err := persons.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec("DELETE FROM person WHERE id = ?", p.ID.Int64()) })
+	if err := persons.Update(ctx, p.ID, "老保", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// 该录音触发的审计：person create（快照旧名）+ attribute create（非人物行）
+	_ = changeLogs.Create(ctx, &repo.PersonChangeLog{
+		PersonID: p.ID, EntityKind: "person", ChangeType: "create", ChangedBy: "llm",
+		NewValue: strPtr(`"老保一家"`), SessionID: &sid, Note: strPtr("LLM 抽取自动新建人物，待确认"),
+	})
+	_ = changeLogs.Create(ctx, &repo.PersonChangeLog{
+		PersonID: p.ID, EntityKind: "attribute", ChangeType: "create", ChangedBy: "llm",
+		AttrKey: strPtr("city"), NewValue: strPtr(`"上海"`), SessionID: &sid,
+	})
+
+	r := newAuthedRouter()
+	RegisterQuery(r, &QueryHandler{
+		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
+		Memories: memories, Todos: todos, Speakers: speakers,
+		ChangeLogs: changeLogs, Persons: persons,
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		ProfileChanges []struct {
+			EntityKind       string  `json:"entity_kind"`
+			NewValue         *string `json:"new_value"`
+			PersonCurrentName *string `json:"person_current_name"`
+		} `json:"profile_changes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("json: %v %s", err, rec.Body.String())
+	}
+	var personRow, attrRow *struct {
+		EntityKind       string  `json:"entity_kind"`
+		NewValue         *string `json:"new_value"`
+		PersonCurrentName *string `json:"person_current_name"`
+	}
+	for i := range detail.ProfileChanges {
+		switch detail.ProfileChanges[i].EntityKind {
+		case "person":
+			personRow = &detail.ProfileChanges[i]
+		case "attribute":
+			attrRow = &detail.ProfileChanges[i]
+		}
+	}
+	if personRow == nil || attrRow == nil {
+		t.Fatalf("profile_changes 缺 person/attribute 行: %+v", detail.ProfileChanges)
+	}
+	// 审计快照保留原文
+	if personRow.NewValue == nil || !strings.Contains(*personRow.NewValue, "老保一家") {
+		t.Errorf("审计快照应保留抽取时原名，实际 %v", personRow.NewValue)
+	}
+	// 人物行富化现名
+	if personRow.PersonCurrentName == nil || *personRow.PersonCurrentName != "老保" {
+		t.Errorf("人物行应富化现名「老保」，实际 %v", personRow.PersonCurrentName)
+	}
+	// 非人物行不富化
+	if attrRow.PersonCurrentName != nil {
+		t.Errorf("非人物行不应富化现名，实际 %v", *attrRow.PersonCurrentName)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
 // ServeAudio 流式返回原始音频文件，支持点击播放
 func TestServeAudio(t *testing.T) {
 	db, err := repo.NewDB(repotest.DSN(t))

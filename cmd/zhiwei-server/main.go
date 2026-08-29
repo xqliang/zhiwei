@@ -259,6 +259,7 @@ func main() {
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,
 		ChangeLogs:            personLogs, // 详情附带该录音触发的 profile 平面变更
+		Persons:               persons,    // 人物审计行富化现名（timeline「涉及的画像变更」方案 C 标注用）
 		SpeakerNameCandidates: nameCandidates,
 		VoiceprintThreshold:   cfg.VoiceprintThreshold, // timeline 列表「整段声纹」两级判定用
 		SpeakerEmbeddings:     speakerEmbeddings,       // 多向量匹配（每人任意样本命中即命中）
