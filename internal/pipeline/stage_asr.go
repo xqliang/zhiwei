@@ -59,6 +59,12 @@ type StageDeps struct {
 
 	// ---- profile stage（用户画像 P1）----
 	Profile *profile.Service // 画像编排服务（ExtractSession / 手动 CRUD / 确认队列）
+
+	// ---- audioscene stage（P1 音频场景与情绪）----
+	AudioInsight         provider.AudioInsightProvider // nil = no-op（开关/未装配时跳过）
+	SpeakerStates        *repo.SpeakerSessionStateRepo
+	AudioInsightEnabled  bool
+	AudioInsightChunkSec int // 0 = 默认 600（>此长度分块识别）
 }
 
 // BuildStages 返回 stage 名 -> handler 的映射，供 Pool 装配。
@@ -68,6 +74,7 @@ func BuildStages(d StageDeps) map[string]Handler {
 		"segment":     stageSegment(d),
 		"speaker":     stageSpeaker(d),
 		"speakername": stageSpeakerName(d),
+		"audioscene":  stageAudioScene(d),
 		"extract":     stageExtract(d),
 		"profile":     stageProfile(d),
 	}

@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -18,7 +19,15 @@ type Transcript struct {
 	Language   string    `db:"language" json:"language"`
 	FullText   *string   `db:"full_text" json:"full_text"`
 	Confidence *float64  `db:"confidence" json:"confidence"`
-	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+	// 以下 4 列为会话级声学环境（000025 迁移加列，audioscene stage 落库；spec §2）。
+	// NewDB 走 sqlx safe 模式，SELECT * 要求列有对应字段，故结构体同步声明。
+	// AcousticScene 声学场景（如"室内"/"室外"/"车内"）；WeatherCues 天气线索；OverallMood 整体氛围。
+	AcousticScene string `db:"acoustic_scene" json:"acoustic_scene"`
+	// BackgroundSounds 背景音列表 JSON（如 ["键盘","车流"]），列可空故用指针（对齐 job.go 惯例）。
+	BackgroundSounds *json.RawMessage `db:"background_sounds" json:"background_sounds,omitempty"`
+	WeatherCues      string           `db:"weather_cues" json:"weather_cues"`
+	OverallMood      string           `db:"overall_mood" json:"overall_mood"`
+	CreatedAt        time.Time        `db:"created_at" json:"created_at"`
 }
 
 type TranscriptSegment struct {
@@ -101,6 +110,14 @@ func (r *TranscriptRepo) GetSegment(ctx context.Context, segID ids.ID) (*Transcr
 func (r *TranscriptRepo) SetFullText(ctx context.Context, id ids.ID, full string, conf float64) error {
 	_, err := r.DB.ExecContext(ctx,
 		`UPDATE transcript SET full_text = ?, confidence = ? WHERE id = ?`, full, conf, id.Int64())
+	return err
+}
+
+// SetAcoustic 写会话级声学环境（audioscene stage 用）。bg 可空。
+func (r *TranscriptRepo) SetAcoustic(ctx context.Context, id ids.ID, scene string, bg *json.RawMessage, weather, mood string) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript SET acoustic_scene=?, background_sounds=?, weather_cues=?, overall_mood=? WHERE id=?`,
+		scene, bg, weather, mood, id.Int64())
 	return err
 }
 

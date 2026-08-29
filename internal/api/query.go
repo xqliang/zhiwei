@@ -28,6 +28,8 @@ type QueryHandler struct {
 	ChangeLogs  *repo.PersonChangeLogRepo // 详情附带该录音触发的 profile 平面变更（entity_kind 覆盖 8 平面）
 	Speakers    *repo.SpeakerRepo // speaker stage：详情附带段说话人 + speakers 列表
 
+	SpeakerStates *repo.SpeakerSessionStateRepo // 说话人情绪状态（audioscene stage 落库；nil=不返回该字段）
+
 	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // speakername stage：详情 speakers 附候选名
 
 	// VoiceprintThreshold 1:N 强命中阈值（timeline 列表「整段声纹」判定用；0→兜底 0.8）。
@@ -492,6 +494,16 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 		resp["transcript"] = tr
 		resp["segments"] = views
 		resp["speakers"] = sisView
+		// audioscene stage：会话级声学环境（4 字段来自 transcript） + 说话人整体情绪状态
+		resp["acoustic_scene"] = tr.AcousticScene
+		resp["background_sounds"] = tr.BackgroundSounds
+		resp["weather_cues"] = tr.WeatherCues
+		resp["overall_mood"] = tr.OverallMood
+		if h.SpeakerStates != nil {
+			// 行级 user_id 过滤（IDOR 防护）；未装配则不返回该字段
+			states, _ := h.SpeakerStates.ListBySession(r.Context(), uid.Int64(), sid)
+			resp["speaker_states"] = states
+		}
 	}
 	// Sprint 2：详情附带 memory/todo 卡片（repo 为空则跳过，兼容旧装配）
 	if h.Memories != nil {

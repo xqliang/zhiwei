@@ -50,6 +50,13 @@ const app = createApp({
 
     // ---------- 通用 ----------
     function fmtTime(iso) { return iso ? new Date(iso).toLocaleString('zh-CN') : ''; }
+    // envSounds：把详情里的 background_sounds（可能是 JSON 字符串或数组）归一成 string[]，过滤"无"/空。
+    function envSounds(v) {
+      let arr = v;
+      if (typeof v === 'string') { try { arr = JSON.parse(v); } catch (e) { arr = []; } }
+      if (!Array.isArray(arr)) return [];
+      return arr.filter(s => s && s !== '无');
+    }
     function fmtDue(iso) {
       if (!iso) return '';
       const d = new Date(iso);
@@ -3239,7 +3246,7 @@ const app = createApp({
       tab, toast, switchTab,
       // 登录门（cookie + session 鉴权）
       authed, currentUser, loginForm, loginError, loggingIn, submitLogin, logout,
-      fmtTime, fmtDue, typeMeta, statusText, todoStatusText, spClass,
+      fmtTime, fmtDue, typeMeta, statusText, todoStatusText, spClass, envSounds,
       profilePlaneMeta, profileChangeAction, fmtChangeSummary, profileChangeGroups, goProfilePending,
       sessions, detail, expandedId, loadSessions, toggleSession, reloadSession, audioUrl, dismissingMemId, askDismissMem, cancelDismissMem, confirmDismissMem, retryJob, editingMem, startEditMemory, cancelEditMemory, saveEditMemory, deletingSessionId, askDeleteSession, cancelDeleteSession, confirmDeleteSession,
       tlSearch, tlDateFrom, tlDateTo, tlPreset, clearTlFilter, applyPreset, filteredSessions, sessionsByDay, detailInsights,

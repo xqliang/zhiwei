@@ -210,6 +210,8 @@
   /* 溯源跳转药丸：点击跳到来源录音时间线（自动提取物才有 session_id） */
   .chip-ro.src-link { cursor: pointer; background: var(--surface-sunken); color: var(--accent); }
   .chip-ro.src-link:hover { background: var(--accent-soft); text-decoration: underline; }
+  /* 声学环境徽章行：场景/背景音/天气/氛围 chip 自动换行排列 */
+  .agent-env-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .chip-x { background: none; border: none; color: inherit; opacity: .45; cursor: pointer; font-size: 11px; padding: 0 4px; line-height: 1; }
   .chip-x:hover { opacity: 1; }
   .chip-add { position: relative; display: inline-flex; align-items: center; padding: 3px 12px; border-radius: 99px; border: 1px dashed var(--border-strong); color: var(--muted); font-size: var(--fs-xs); cursor: pointer; background: var(--surface); white-space: nowrap; }
@@ -520,6 +522,21 @@
         <!-- 就地展开的转写详情 -->
         <div v-if="expandedId===s.id" class="card detail" style="margin-top:-2px">
           <audio ref="sessionAudioEl" :src="audioUrl(s.id)" controls preload="none" style="width:100%; margin:6px 0 10px" @timeupdate="onTimelineAudioTimeUpdate"></audio>
+          <!-- 声学环境徽章（audioscene stage 产出；有值才显）：场景/背景音/天气/整体氛围 -->
+          <div v-if="detail && (detail.acoustic_scene || (envSounds(detail.background_sounds).length) || detail.overall_mood)" class="agent-env-bar" style="margin-bottom:8px">
+            <span v-if="detail.acoustic_scene" class="chip chip-ro">📍 {{ detail.acoustic_scene }}</span>
+            <span v-for="(bg, bi) in envSounds(detail.background_sounds)" :key="'bg'+bi" class="chip chip-ro">🔊 {{ bg }}</span>
+            <span v-if="detail.weather_cues && detail.weather_cues !== '无'" class="chip chip-ro">🌦 {{ detail.weather_cues }}</span>
+            <span v-if="detail.overall_mood" class="chip chip-ro" :title="detail.overall_mood">💭 {{ detail.overall_mood }}</span>
+          </div>
+          <!-- 说话人在场情绪（audioscene stage 落库；按 speaker_label 归属）：emotion chip，hover 显微情绪/精神状态/置信 -->
+          <div v-if="detail && detail.speaker_states && detail.speaker_states.length" style="margin-bottom:8px">
+            <span class="muted" style="font-size:var(--fs-xs); margin-right:6px">在场情绪:</span>
+            <span v-for="st in detail.speaker_states" :key="'es'+st.id" class="chip chip-ro" style="cursor:help"
+                  :title="'微情绪: ' + (st.micro_emotion||'—') + ' / 状态: ' + (st.mental_state||'—') + ' / 置信: ' + Math.round((st.confidence||0)*100) + '%'">
+              😐 说话人{{ st.speaker_label }}: {{ st.emotion }}
+            </span>
+          </div>
           <!-- 说话人面板：chip 可点=按该说话人过滤转写段；✎ 改名，✕ 删除；「+ 新加说话人」开录入表单 -->
           <div class="speaker-row" style="margin:6px 0 10px; display:flex; flex-wrap:wrap; gap:6px; align-items:center">
             <span class="muted" style="margin-right:4px">说话人</span>
@@ -2595,6 +2612,6 @@
   </template>
 </div>
 
-<script src="/app/app.da4bee44.js"></script>
+<script src="/app/app.7c4745d6.js"></script>
 </body>
 </html>
