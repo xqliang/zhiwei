@@ -306,6 +306,95 @@ func TestGetSessionAcousticFields(t *testing.T) {
 	}
 }
 
+// TestGetSessionSpeakerStateName 验证「在场情绪」按已解析 speaker_id 回显正式名：
+// 声纹匹配把说话人解析成登记名（如 Allen）后，speaker_session_state 仍只存原始 label
+// （speaker_0），API 必须像 segments 那样用 spMap 把 speaker_id 解析成 name 一并返回，
+// 前端才能显示「Allen: 困惑」而非「speaker_0」。speaker_id 为空的情绪行回退到 label 名。
+func TestGetSessionSpeakerStateName(t *testing.T) {
+	_ = ids.InitForTest()
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+	speakerStates := &repo.SpeakerSessionStateRepo{DB: db}
+
+	// 登记一个已解析说话人 Allen
+	allen := &repo.Speaker{Name: "Allen", Source: "enrolled"}
+	if err := speakers.Create(ctx, allen); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), allen.ID) })
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "emo.wav",
+		StoragePath: "/tmp/emo.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	// 两段：段1归属 Allen（speaker_id 已解析），段2未解析（speaker_label=2，无 speaker_id）
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "今天开会", StartMS: 0, EndMS: 1000},
+		{TranscriptID: tr.ID, SequenceNo: 2, SpeakerLabel: "2", Text: "在的", StartMS: 1000, EndMS: 2000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 段1 归属到 Allen（模拟 speaker stage 声纹匹配后 SetSegmentSpeaker）
+	if err := transcripts.SetSegmentSpeaker(ctx, tr.ID, "1", allen.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 写两行情绪：行1 speaker_id=Allen（解析后回填），行2 无 speaker_id（未解析）
+	if err := speakerStates.InsertBatch(ctx, []repo.SpeakerSessionState{
+		{UserID: 1, TranscriptID: tr.ID, SessionID: sid, SpeakerLabel: "1", SpeakerID: &allen.ID,
+			Emotion: "困惑", Confidence: 0.8},
+		{UserID: 1, TranscriptID: tr.ID, SessionID: sid, SpeakerLabel: "2",
+			Emotion: "平静", Confidence: 0.7},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newAuthedRouter()
+	RegisterQuery(r, &QueryHandler{
+		Sessions: sessions, Transcripts: transcripts, Speakers: speakers,
+		SpeakerStates: speakerStates,
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		SpeakerStates []struct {
+			SpeakerLabel string `json:"speaker_label"`
+			SpeakerName  string `json:"speaker_name"`
+			Emotion      string `json:"emotion"`
+		} `json:"speaker_states"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(detail.SpeakerStates) != 2 {
+		t.Fatalf("speaker_states 应 2 行, got %d: %+v", len(detail.SpeakerStates), detail.SpeakerStates)
+	}
+	// 关键断言：speaker_id 解析过的行须回显正式名 Allen，而非原始 label
+	if detail.SpeakerStates[0].SpeakerName != "Allen" {
+		t.Errorf("speaker_states[0].speaker_name=%q, want Allen（已解析 speaker_id 须回显正式名）", detail.SpeakerStates[0].SpeakerName)
+	}
+	// 未解析行回退到「说话人 2」
+	if detail.SpeakerStates[1].SpeakerName != "说话人 2" {
+		t.Errorf("speaker_states[1].speaker_name=%q, want 说话人 2（speaker_id 为空回退 label）", detail.SpeakerStates[1].SpeakerName)
+	}
+}
+
 // TestGetSessionNameCandidates 验证详情接口 speakers[] 富化名字候选：
 // 随机名说话人带倒序候选（张总 0.82 在首、evidence 透传），真名说话人为空数组。
 // speakers[] 由 ListSpeakersForTranscript 按本 transcript 段归属聚合，天然作用域到本会话，

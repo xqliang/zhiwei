@@ -361,6 +361,15 @@ func aggregateVecsAPI(vecs [][]float32) []float32 {
 	return rep
 }
 
+// speakerStateView 是「在场情绪」的展示行：内嵌 SpeakerSessionState（含已解析 speaker_id、
+// 但只存原始 label），外加 SpeakerName 显示名——按 speaker_id 走 segments 同一套 spMap 解析成
+// 正式名（声纹匹配后），前端据此显示「Allen: 困惑」而非原始「speaker_0」；speaker_id 为空时
+// SpeakerName 回退为「说话人 <label>」。
+type speakerStateView struct {
+	repo.SpeakerSessionState
+	SpeakerName string `json:"speaker_name"`
+}
+
 type segmentView struct {
 	ID           string `json:"id"`
 	Speaker      string `json:"speaker"`                 // 显示名：解析到用登记名，否则 "说话人 N"
@@ -502,7 +511,21 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 		if h.SpeakerStates != nil {
 			// 行级 user_id 过滤（IDOR 防护）；未装配则不返回该字段
 			states, _ := h.SpeakerStates.ListBySession(r.Context(), uid.Int64(), sid)
-			resp["speaker_states"] = states
+			// 解析 speaker_id → 正式名（与 segments 同一套 spMap）：speaker stage 声纹匹配后
+			// speaker_id 已回填，但情绪行只存原始 label（speaker_0…），前端「在场情绪」须显示
+			// 正式名（如「Allen: 困惑」）才能对上下方说话人面板。speaker_id 为空回退「说话人 N」。
+			views := make([]speakerStateView, len(states))
+			for i := range states {
+				views[i] = speakerStateView{SpeakerSessionState: states[i]}
+				name := speakerLabelName(states[i].SpeakerLabel) // 未解析：回退「说话人 <label>」
+				if states[i].SpeakerID != nil {
+					if n, ok := spMap[*states[i].SpeakerID]; ok {
+						name = n // 已解析到登记名
+					}
+				}
+				views[i].SpeakerName = name
+			}
+			resp["speaker_states"] = views
 		}
 	}
 	// Sprint 2：详情附带 memory/todo 卡片（repo 为空则跳过，兼容旧装配）
