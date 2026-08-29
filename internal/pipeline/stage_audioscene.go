@@ -103,9 +103,11 @@ func stageAudioScene(d StageDeps) Handler {
 				SpeakerLabel: sp.Label, Emotion: clipRunes(sp.Emotion, 32),
 				MicroEmotion: clipRunes(sp.MicroEmotion, 64), MentalState: clipRunes(sp.MentalState, 64), Confidence: sp.Confidence,
 			}
-			if sid, ok := labelToSpeaker[sp.Label]; ok {
+			if sid, ok := labelToSpeaker[sp.Label]; ok && speakerExists(ctx, d, sid) {
 				row.SpeakerID = &sid
 			}
+			// 映射到的 speaker 不存在（如幽灵纠正 pass 创建又弃用的孤儿声纹，段曾短暂指向它）→ 留空
+			// speaker_id，避免把脏 id 写进库导致前端按 id 关联名字失败、只能回退显示原始 label。
 			rows = append(rows, row)
 		}
 		if err := d.SpeakerStates.InsertBatch(ctx, rows); err != nil {
@@ -113,6 +115,18 @@ func stageAudioScene(d StageDeps) Handler {
 		}
 		return nil
 	}
+}
+
+// speakerExists 校验 speaker_id 是否在 speaker 表真实存在。Speakers 未装配（旧装配/测试）时
+// 返回 true（跳过校验，保持旧行为，避免破坏未注入该 repo 的调用方）。用于 audioscene 回填
+// speaker_id 前挡掉「孤儿 id」——幽灵纠正 pass 创建又弃用的声纹，段曾短暂指向它，若直接落库
+// 会让前端按 id 关联名字失败、只能回退显示原始 label。
+func speakerExists(ctx context.Context, d StageDeps, id ids.ID) bool {
+	if d.Speakers == nil {
+		return true // 未装配：不校验，保持旧行为
+	}
+	_, err := d.Speakers.Get(ctx, id)
+	return err == nil
 }
 
 // collectSpeakerLabels 从段收集去重 label（保序）+ label→speaker_id 映射（首个非空 speaker_id）。

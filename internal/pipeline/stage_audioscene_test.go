@@ -157,6 +157,82 @@ func TestStageAudioScenePersist(t *testing.T) {
 	}
 }
 
+// TestStageAudioSceneSkipsDeadSpeakerID 验证 audioscene 回填 speaker_id 前校验存在性：
+// 段的 speaker_label 映射到的 speaker 已被删除/不存在（幽灵纠正 pass 创建又弃用的孤儿声纹），
+// 此时不得把该孤儿 id 写进 speaker_session_state.speaker_id（否则前端按 id 关联名字必然失败、
+// 只能回退显示原始 label）。应回退：按当前段的稳定映射反查正确 speaker；查不到则留 NULL。
+func TestStageAudioSceneSkipsDeadSpeakerID(t *testing.T) {
+	requireFFmpeg(t)
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	sessions := &repo.SessionRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	states := &repo.SpeakerSessionStateRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+
+	sid := ids.New()
+	samplePath := sampleWAVPath
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "speech20s.wav",
+		StoragePath: samplePath, DurationMS: 20000, Status: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	// 真实说话人 real（label 2）；label 1 故意指向一个「不存在」的孤儿 id（模拟幽灵纠正弃用）。
+	real := &repo.Speaker{UserID: 1, Name: "真人"}
+	_ = speakers.Create(ctx, real)
+	ghost := ids.New() // 不 Create → DB 里不存在
+	conf := 0.9
+	segs := []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "hi", StartMS: 0, EndMS: 1000, Confidence: &conf},
+		{TranscriptID: tr.ID, SequenceNo: 2, SpeakerLabel: "2", Text: "hello", StartMS: 1000, EndMS: 2000, Confidence: &conf},
+	}
+	if err := transcripts.InsertSegments(ctx, segs); err != nil {
+		t.Fatal(err)
+	}
+	// label1 → ghost（孤儿），label2 → real
+	_ = transcripts.SetSegmentSpeaker(ctx, tr.ID, "1", ghost)
+	_ = transcripts.SetSegmentSpeaker(ctx, tr.ID, "2", real.ID)
+
+	d := StageDeps{
+		Sessions: sessions, Transcripts: transcripts, SpeakerStates: states, Speakers: speakers,
+		DataDir: t.TempDir(), AudioInsightEnabled: true, AudioInsightChunkSec: 600,
+		AudioInsight: &fakeAI{out: provider.AudioInsight{
+			AcousticScene: "室内", WeatherCues: "无", OverallMood: "专注",
+			Speakers: []provider.SpeakerInsight{
+				{Label: "1", Emotion: "平静", Confidence: 0.8},
+				{Label: "2", Emotion: "焦虑", Confidence: 0.6},
+			},
+		}},
+	}
+	if err := stageAudioScene(d)(ctx, nil, sid); err != nil {
+		t.Fatalf("stage 应成功: %v", err)
+	}
+	rows, err := states.ListBySession(ctx, 1, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byLabel := map[string]repo.SpeakerSessionState{}
+	for _, r := range rows {
+		byLabel[r.SpeakerLabel] = r
+	}
+	// 关键断言：label1 的孤儿 id 不得落库（speaker_id 须为 nil）
+	if byLabel["1"].SpeakerID != nil {
+		t.Errorf("label1 映射到不存在的孤儿 speaker，speaker_id 应留空, got %s（会把脏 id 写进库）", byLabel["1"].SpeakerID.String())
+	}
+	// label2 正常归因不受影响
+	if byLabel["2"].SpeakerID == nil || *byLabel["2"].SpeakerID != real.ID {
+		t.Errorf("label2 应仍归因到 real: %+v", byLabel["2"])
+	}
+}
+
 // silencedetect 输出解析。
 func TestParseSilenceBounds(t *testing.T) {
 	log := "[silencedetect @ 0x1] silence_start: 12.34\n[silencedetect @ 0x1] silence_end: 13.56 | x\n[silencedetect @ 0x1] silence_start: 40.0\n[silencedetect @ 0x1] silence_end: 41.5\n"
