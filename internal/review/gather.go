@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"zhiwei/internal/ids"
+	"zhiwei/internal/profile"
 	"zhiwei/internal/repo"
 )
 
@@ -26,6 +27,48 @@ func dayRange(date time.Time) (start, end time.Time) {
 // inRange 判断 t 是否落在 [start, end)。
 func inRange(t, start, end time.Time) bool {
 	return !t.Before(start) && t.Before(end)
+}
+
+// gatherSessionSignals 从单个 session 的 transcript + 说话人情绪汇聚 P3 报告洞察信号：
+//   - 声学场景/整体氛围（transcript.acoustic_scene / overall_mood）拼成一行带时刻前缀的描述；
+//   - 每个说话人的情绪点（speaker_session_state），情绪类别经 profile.EmotionToValence 映射为效价，
+//     并把 speaker_id 回显为 person 显示名（未绑定则退回 speaker_label）。
+//
+// when 为该会话的展示时刻（如 "15:04"）。SpeakerStates / Persons 未注入（旧装配）时静默降级：
+// 情绪点为空、说话人退回 label。日报/周报共用，避免逻辑重复。
+func (g *Generator) gatherSessionSignals(ctx context.Context, when string, sessionID ids.ID, tr *repo.Transcript) (acoustic string, emotions []EmotionLine) {
+	// 声学场景 + 整体氛围：任一非空即产出一行 "时刻 场景·氛围"。
+	if tr.AcousticScene != "" || tr.OverallMood != "" {
+		note := tr.AcousticScene
+		if tr.OverallMood != "" {
+			if note != "" {
+				note += "·" // 场景与氛围都在时用间隔符连接
+			}
+			note += tr.OverallMood
+		}
+		acoustic = fmt.Sprintf("%s %s", when, note)
+	}
+	// 说话人情绪点：仅当 SpeakerStates 已注入时汇聚（nil 守卫兼容旧装配）。
+	if g.SpeakerStates != nil {
+		states, err := g.SpeakerStates.ListBySession(ctx, reviewUserID, sessionID)
+		if err == nil { // best-effort：查询失败不阻断整体汇聚
+			for _, st := range states {
+				speaker := st.SpeakerLabel
+				// speaker_id → person 显示名（Persons 已注入且该声纹已绑定人物时）。
+				if st.SpeakerID != nil && g.Persons != nil {
+					if p, err := g.Persons.GetBySpeaker(ctx, *st.SpeakerID); err == nil && p != nil {
+						speaker = p.DisplayName
+					}
+				}
+				emotions = append(emotions, EmotionLine{
+					When: when, Speaker: speaker,
+					Emotion: st.Emotion, Valence: profile.EmotionToValence(st.Emotion),
+					MicroMood: st.MicroEmotion, MentalState: st.MentalState,
+				})
+			}
+		}
+	}
+	return acoustic, emotions
 }
 
 // gatherDaily 汇聚当天数据为 DailyInput（现有 repo + Go 内切窗）。
@@ -98,6 +141,12 @@ func (g *Generator) gatherDaily(ctx context.Context, date time.Time) (DailyInput
 		if err != nil {
 			continue // 无转写不阻断统计
 		}
+		// P3：汇聚当天声学环境（transcript）+ 说话人情绪（speaker_session_state）。
+		note, ems := g.gatherSessionSignals(ctx, s.CreatedAt.Format("15:04"), s.ID, tr)
+		if note != "" {
+			in.AcousticNotes = append(in.AcousticNotes, note)
+		}
+		in.EmotionLines = append(in.EmotionLines, ems...)
 		segs, err := g.Transcripts.ListSegments(ctx, tr.ID)
 		if err != nil {
 			continue
@@ -213,6 +262,27 @@ func (g *Generator) gatherWeekly(ctx context.Context, weekStart time.Time) (Week
 		if td.Status == "confirmed" {
 			in.TodosOpen = append(in.TodosOpen, td.Title)
 		}
+	}
+
+	// P3：汇聚本周声学环境 + 说话人情绪（按周窗过滤 session，逐会话取 transcript/情绪）。
+	// 与 gatherDaily 复用 gatherSessionSignals；Sessions 有界 200，Go 内按 [ws, rangeEnd) 切窗。
+	sessions, err := g.Sessions.List(ctx, reviewUserID, 200, 0)
+	if err != nil {
+		return in, fmt.Errorf("汇聚 session: %w", err)
+	}
+	for _, s := range sessions {
+		if !inRange(s.CreatedAt, ws, rangeEnd) {
+			continue
+		}
+		tr, err := g.Transcripts.GetBySession(ctx, s.ID)
+		if err != nil {
+			continue // 无转写不阻断
+		}
+		note, ems := g.gatherSessionSignals(ctx, s.CreatedAt.Format("01-02 15:04"), s.ID, tr)
+		if note != "" {
+			in.AcousticNotes = append(in.AcousticNotes, note)
+		}
+		in.EmotionLines = append(in.EmotionLines, ems...)
 	}
 	return in, nil
 }

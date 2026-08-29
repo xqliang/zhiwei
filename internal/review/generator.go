@@ -32,6 +32,9 @@ type Generator struct {
 	Topics      *repo.TopicRepo
 	Sessions    *repo.SessionRepo
 	Transcripts *repo.TranscriptRepo
+	// P3：情绪/环境汇聚（供报告洞察）。旧装配可能不注入，gather 侧有 nil 守卫。
+	SpeakerStates *repo.SpeakerSessionStateRepo // 说话人整体情绪（gather 汇聚用）
+	Persons       *repo.PersonRepo              // speaker_id → person 名（情绪行显示说话人名）
 }
 
 // NewGenerator 构造 Generator（参数与字段对应；main 装配时注入）。

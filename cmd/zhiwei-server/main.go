@@ -206,6 +206,9 @@ func main() {
 		string(reviewWeeklyBytes), "review_weekly_v1",
 		string(topicStatusBytes), "topic_status_v1",
 		reviews, topicStatuses, memories, todos, topics, sessions, transcripts)
+	// P3：情绪/环境汇聚依赖（NewGenerator 形参不扩，按字段注入；gather 侧有 nil 守卫）。
+	reviewer.SpeakerStates = &repo.SpeakerSessionStateRepo{DB: db}
+	reviewer.Persons = persons
 	profileSvc := &profile.Service{
 		DB: db, Sessions: sessions, Transcripts: transcripts, Memories: memories,
 		Speakers: speakers, Persons: persons, Attributes: personAttrs,

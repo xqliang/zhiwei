@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,7 @@ func newGenWithFake(t *testing.T, f *fakeLLM) *Generator {
 		Reviews: &repo.ReviewRepo{DB: db}, TopicStatuses: &repo.TopicStatusRepo{DB: db},
 		Memories: &repo.MemoryRepo{DB: db}, Todos: &repo.TodoRepo{DB: db}, Topics: &repo.TopicRepo{DB: db},
 		Sessions: &repo.SessionRepo{DB: db}, Transcripts: &repo.TranscriptRepo{DB: db},
+		SpeakerStates: &repo.SpeakerSessionStateRepo{DB: db}, Persons: &repo.PersonRepo{DB: db},
 	}
 }
 
@@ -224,6 +226,85 @@ func TestDayRangeStable(t *testing.T) {
 	}
 	if s2, e2 := dayRange(s); !s2.Equal(s) || !e2.Equal(e) {
 		t.Errorf("dayRange 应稳定/幂等, got start=%s end=%s", s2, e2)
+	}
+}
+
+// TestGatherDailyEmotionEnv 验证 P3：gatherDaily 汇聚当天声学环境（transcript）+
+// 说话人情绪（speaker_session_state），效价经 EmotionToValence 映射，speaker_id 回显 person 名。
+// 造一条当天 session + transcript（SetAcoustic 写场景/氛围）+ 一条情绪状态（绑 person）。
+// 需要独立库（无 DSN 自动跳过）。用当天日期——session.created_at 由 DB 取 now，须落在日窗内。
+func TestGatherDailyEmotionEnv(t *testing.T) {
+	g := newGenWithFake(t, &fakeLLM{}) // gatherDaily 不调 LLM
+	ctx := context.Background()
+	day := time.Now() // session.created_at=now，dayRange(now) 窗口必含之
+
+	// 说话人 → person：person.speaker_id 与情绪行的 speaker_id 一致，走 GetBySpeaker 回显名。
+	speakerID := ids.New()
+	person := &repo.Person{DisplayName: "张三", SpeakerID: &speakerID, Status: "active", Source: "manual"}
+	if err := g.Persons.Create(ctx, person); err != nil {
+		t.Fatal(err)
+	}
+
+	sess := &repo.AudioSession{ID: ids.New(), Source: "test", Filename: "emo.wav", Mime: "audio/wav", Status: "done", DurationMS: 1000}
+	if err := g.Sessions.Create(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sess.ID, Language: "zh"}
+	if err := g.Transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Transcripts.SetAcoustic(ctx, tr.ID, "室内", nil, "", "轻松"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SpeakerStates.InsertBatch(ctx, []repo.SpeakerSessionState{{
+		UserID: reviewUserID, TranscriptID: tr.ID, SessionID: sess.ID,
+		SpeakerLabel: "1", SpeakerID: &speakerID,
+		Emotion: "喜悦", MicroEmotion: "微笑", MentalState: "放松", Confidence: 0.9,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = g.Sessions.DB.ExecContext(bg, `DELETE FROM speaker_session_state WHERE session_id=?`, sess.ID.Int64())
+		_, _ = g.Sessions.DB.ExecContext(bg, `DELETE FROM transcript WHERE session_id=?`, sess.ID.Int64())
+		_, _ = g.Sessions.DB.ExecContext(bg, `DELETE FROM audio_session WHERE id=?`, sess.ID.Int64())
+		_, _ = g.Sessions.DB.ExecContext(bg, `DELETE FROM person WHERE id=?`, person.ID.Int64())
+	})
+
+	in, err := g.gatherDaily(ctx, day)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 声学环境：应含一行同时带场景"室内"与氛围"轻松"（"室内·轻松"）。
+	var envHit bool
+	for _, n := range in.AcousticNotes {
+		if strings.Contains(n, "室内") && strings.Contains(n, "轻松") {
+			envHit = true
+		}
+	}
+	if !envHit {
+		t.Errorf("AcousticNotes 应含场景/氛围行(室内·轻松), 实际 = %v", in.AcousticNotes)
+	}
+
+	// 情绪点：应含 speaker=张三、Emotion=喜悦、Valence>0、When 为 HH:MM。
+	var emoHit bool
+	for _, e := range in.EmotionLines {
+		if e.Speaker == "张三" && e.Emotion == "喜悦" {
+			emoHit = true
+			if e.Valence <= 0 {
+				t.Errorf("喜悦效价应>0, got %v", e.Valence)
+			}
+			if e.MicroMood != "微笑" || e.MentalState != "放松" {
+				t.Errorf("微情绪/精神状态未透传: %+v", e)
+			}
+			if m, _ := regexp.MatchString(`^\d{2}:\d{2}$`, e.When); !m {
+				t.Errorf("When 应为 HH:MM, got %q", e.When)
+			}
+		}
+	}
+	if !emoHit {
+		t.Errorf("EmotionLines 应含张三的喜悦情绪点, 实际 = %+v", in.EmotionLines)
 	}
 }
 
