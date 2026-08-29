@@ -76,19 +76,26 @@ type AudioInsightProvider interface {
 2. `d.AudioInsight == nil`（未装配）→ 返回 nil（兼容旧装配/测试）。
 3. 取 session + transcript；`wav := transcodeToWAV(d.DataDir, sessionID, s.StoragePath)`（**幂等复用** ASR 已转码产物）。
 4. 从 segments 收集去重的 `speaker_label` 列表 + `label→speaker_id` 映射。
-5. `insight, err := d.AudioInsight.Analyze(ctx, wav, labels)`；**err → 记日志 return nil（降级，不阻断流水线）**。
+5. 分析（分块编排在 stage 层，provider 保持"一个音频文件 → 一个 insight"）：时长 ≤ `ChunkSec` → 单次 `Analyze(wav,labels)`；否则按 §5 切成多块 WAV、逐块 `Analyze`、按 §5 合并策略合并成会话级 + 每说话人结果。**任一块或整体失败 → 记日志 return nil（降级，不阻断流水线）**（部分块成功则用已成功块的合并结果）。
 6. 落库：`Transcripts.SetAcoustic(...)` 写会话级环境；`SpeakerSessionStateRepo.InsertBatch(...)` 写每人情绪（`speaker_id` 用第 4 步映射回填，未识别为 NULL）。
 7. user_id：后台流水线暂 user-1（对齐现有各 stage 的 `Get(ctx,1,...)` 现状）。
 
 **降级契约**：本 stage 任何失败（音频取不到/模型报错/解析失败）都只记日志、返回 nil，**绝不让 job 失败**——转写与其余 stage 照常完成，富化信号缺失即空。
 
-## 5. 音频入参与长录音约束
+## 5. 音频入参与长录音分块
 
 - 默认复用本地转码 WAV（16k mono s16）base64 送模型（spike 已证 base64 可行）。
-- **长录音约束**：整段 base64 对几十分钟录音会过大/超模型时长限制。P1 处理：
-  - 设时长上限 `ZW_AUDIO_INSIGHT_MAX_SEC`（默认如 600s）；超限则**截取前 N 秒**分析并在结果标注（或压缩为低码率 mono 再送）。
-  - **plan 阶段须验证**：`stepaudio-2.5-chat` 是否接受 `input_audio` 传 URL（若接受，则用 TOS URL 免 base64 体积问题，需把 TOS uploader 引入 StageDeps 或持久化 ASR 上传的 URL）。spike 只验了 base64；URL 待验。
-  - 决策优先级：URL 可行 → 用 URL；否则压缩 base64 + 时长上限。
+- **≤10 分钟**：整段单次调用。
+- **>10 分钟：分块识别（用户定）**——按 ~10 分钟切成多块，逐块各调一次 `Analyze`，再合并结果：
+  1. **切点选择**：在每个 10 分钟边界的**前后 1 分钟窗口内找静音段**（`ffmpeg silencedetect`，如 `-30dB / ≥0.3s`），在静音中点下刀，避免切断正在说的话。
+  2. **无静音兜底**：该窗口内一直在说话、找不到静音 → 在固定 10 分钟处切，但**下一块起点前移 2s**（与上一块尾部 2s 重叠），避免边界字词/情绪丢失。
+  3. 每块导出为独立 WAV（ffmpeg `-ss/-t` 切片），逐块 base64 送模型。
+  4. **合并策略**（多块 → 落库的每会话每说话人一条 + 会话级一条）：
+     - 会话级环境：`acoustic_scene`/`weather_cues`/`overall_mood` 取跨块**最高置信/众数**；`background_sounds` 取**并集去重**。
+     - 每说话人情绪：跨块按说话人聚合——`emotion`/`mental_state` 取该人最高置信块的值，`micro_emotion` 并集去重（限长），`confidence` 取均值。
+  - 分块是**长度约束的技术处理**（适配模型时长/体积上限），落库粒度仍为每会话每说话人（不改数据模型）；chunk 级时间分辨率留作后续（C/D）增强。
+- **配置**：`ZW_AUDIO_INSIGHT_CHUNK_SEC`（默认 600=10min）、静音搜索窗口 ±60s、重叠 2s、静音阈值（内置默认，可后续外提）。
+- **plan 阶段须验证**：`stepaudio-2.5-chat` 是否接受 `input_audio` 传 URL（接受则每块上传 TOS 用 URL、免 base64 体积；需把 TOS uploader 引入 StageDeps）。spike 只验了 base64；URL 待验。优先级：URL 可行 → 用 URL；否则 base64（分块后每块 ≤10min 已受控）。
 
 ## 6. 配置（`internal/config`）
 
@@ -96,7 +103,7 @@ type AudioInsightProvider interface {
 - `AudioInsightModel string`（`ZW_AUDIO_INSIGHT_MODEL`，默认 `stepaudio-2.5-chat`）。
 - `AudioInsightBase string`（`ZW_AUDIO_INSIGHT_BASE`，默认 `https://api.c.ibasemind.com/v1`）。
 - `AudioInsightAPIKey string`（默认取 `STEPFUN_ASR_FILE_API_KEY`；为空则不装配 provider → stage no-op）。
-- `AudioInsightMaxSec int`（`ZW_AUDIO_INSIGHT_MAX_SEC`，默认 600）。
+- `AudioInsightChunkSec int`（`ZW_AUDIO_INSIGHT_CHUNK_SEC`，默认 600=10min；超此长度分块，见 §5）。
 - main.go 装配：仅当 enabled 且 key 非空时构造 `StepAudioInsight` 注入 StageDeps；并把 `audioscene` 加进 `stagesList`（`speakername` 之后、`extract` 之前）。
 
 ## 7. API + 前端（最小可视化）
@@ -119,7 +126,8 @@ type AudioInsightProvider interface {
 
 | 项 | 决策 |
 |----|------|
-| 情绪粒度 | 整段一次调用、**按说话人归因**（用户已确认） |
+| 情绪粒度 | 整段一次调用、**按说话人归因**（用户已确认）；>10min 分块识别后合并回每说话人 |
+| 长录音 | >10min 按 ~10min 分块（切点在 ±1min 窗口找静音；无静音则固定切+下块前移 2s 重叠），逐块识别再合并（用户定） |
 | 触发 | 随管线自动跑，`ZW_AUDIO_INSIGHT_ENABLED` 默认开可关 |
 | 通道 | 代理 key `STEPFUN_ASR_FILE_API_KEY` + ibasemind base（主账号欠费） |
 | stage 位置 | `speakername` 之后（情绪能归因到已识别说话人） |
@@ -132,12 +140,12 @@ type AudioInsightProvider interface {
 ## 10. 待 plan 阶段验证/决定（非阻塞，但需在 plan 里落实）
 
 - `stepaudio-2.5-chat` 是否接受 `input_audio` URL（决定 URL vs 压缩 base64）。
-- 长录音的截取/压缩具体实现（ffmpeg 截前 N 秒 or 转低码率）。
+- 长录音分块的具体实现（`ffmpeg silencedetect` 在 ±1min 窗口找静音切点、无静音则固定切+2s 重叠、`-ss/-t` 切片导出各块 WAV）。
 - 真实录音（非合成）上的情绪/环境质量抽验（spike 用的是 TTS 样本）。
 
 ## 11. 风险
 
-- **成本/时延**：每会话多一次音频大模型调用——已由开关 + 降级 + 单次（非逐段）控制。
+- **成本/时延**：每会话 1~N 次音频大模型调用（N=按 10min 分块数，短录音=1）——由开关 + 降级 + 按说话人（非逐段）+ 10min 分块上限控制。
 - **质量未真验**：合成样本验证过链路，真录音质量待抽验（plan）。
 - **长音频**：base64 体积——靠 URL 或压缩 + 上限兜底。
 - **迁移撞号**：000025，合并前复查 main。
