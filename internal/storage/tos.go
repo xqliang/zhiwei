@@ -6,7 +6,9 @@ package storage
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/volcengine/ve-tos-golang-sdk/v2/tos"
@@ -56,6 +58,46 @@ func (t *TOSClient) UploadWAV(ctx context.Context, localPath, key string) (strin
 		return "", fmt.Errorf("tos presign: %w", err)
 	}
 	return out.SignedUrl, nil
+}
+
+// persistentObjectURL 拼 TOS 持久 URL（公共读对象，非签名、不过期）。
+// Endpoint 可能带 scheme 也可能只是 host；Bucket 做子域（TOS 标准 virtual-hosted 风格）。
+func (t *TOSClient) persistentObjectURL(key string) string {
+	host := t.cfg.Endpoint
+	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
+		return strings.TrimRight(host, "/") + "/" + key
+	}
+	return "https://" + t.cfg.Bucket + "." + host + "/" + key
+}
+
+// UploadImage 上传图片（base64 → 临时文件 → 公共读 ACL），返回持久 URL（不过期）。
+// 与 UploadWAV 平行，不动 UploadWAV（ASR 音频保持私有 + 1h presign）。
+func (t *TOSClient) UploadImage(ctx context.Context, b64Data, key string) (string, error) {
+	key = t.prefixed(key)
+	data, err := base64.StdEncoding.DecodeString(b64Data)
+	if err != nil {
+		return "", fmt.Errorf("base64 解码: %w", err)
+	}
+	tmp, err := os.CreateTemp("", "comic-*.jpeg")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	tmp.Close()
+	if _, err := t.client.PutObjectFromFile(ctx, &tos.PutObjectFromFileInput{
+		PutObjectBasicInput: tos.PutObjectBasicInput{
+			Bucket: t.cfg.Bucket, Key: key, ContentType: "image/jpeg",
+			ACL: enum.ACLPublicRead,
+		},
+		FilePath: tmp.Name(),
+	}); err != nil {
+		return "", fmt.Errorf("tos put image: %w", err)
+	}
+	return t.persistentObjectURL(key), nil
 }
 
 // Delete 删除对象（识别完成后清理，best-effort）。key 未带前缀会自动补。
