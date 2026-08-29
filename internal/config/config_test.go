@@ -218,6 +218,28 @@ func TestEmbedConfigOverride(t *testing.T) {
 	}
 }
 
+// TestAudioInsightDefaults 验证 audioscene stage（P1 音频场景与情绪）默认值。
+// AudioInsightAPIKey 依赖 env（默认回退 STEPFUN_ASR_FILE_API_KEY），不断言默认值。
+func TestAudioInsightDefaults(t *testing.T) {
+	t.Setenv("ARK_API_KEY", "test-key")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.AudioInsightEnabled != true {
+		t.Errorf("AudioInsightEnabled 默认应 true")
+	}
+	if c.AudioInsightModel != "stepaudio-2.5-chat" {
+		t.Errorf("AudioInsightModel 默认错: %q", c.AudioInsightModel)
+	}
+	if c.AudioInsightBase != "https://api.c.ibasemind.com/v1" {
+		t.Errorf("AudioInsightBase 默认错: %q", c.AudioInsightBase)
+	}
+	if c.AudioInsightChunkSec != 600 {
+		t.Errorf("AudioInsightChunkSec 默认应 600, got %d", c.AudioInsightChunkSec)
+	}
+}
+
 func TestGetenvBool(t *testing.T) {
 	t.Run("unset_returns_default", func(t *testing.T) {
 		os.Unsetenv("ZW_TEST_BOOL")

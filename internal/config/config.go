@@ -67,6 +67,13 @@ type Config struct {
 	NameInferWindowMin   int // 名字推断上下文回看窗口（分钟，ZW_NAME_INFER_WINDOW_MIN，默认 10）
 	NameInferMaxSegments int // 名字推断上下文段数上限（ZW_NAME_INFER_MAX_SEGMENTS，默认 400）
 
+	// ---- audioscene stage（P1 音频场景与情绪理解）----
+	AudioInsightEnabled  bool   // ZW_AUDIO_INSIGHT_ENABLED：是否启用音频洞察阶段（默认 true）
+	AudioInsightModel    string // ZW_AUDIO_INSIGHT_MODEL：音频理解模型（默认 stepaudio-2.5-chat）
+	AudioInsightBase     string // ZW_AUDIO_INSIGHT_BASE：接口基址（默认代理 https://api.c.ibasemind.com/v1）
+	AudioInsightAPIKey   string // ZW_AUDIO_INSIGHT_API_KEY：API Key（默认回退 STEPFUN_ASR_FILE_API_KEY；为空则不装配 provider→stage no-op）
+	AudioInsightChunkSec int    // ZW_AUDIO_INSIGHT_CHUNK_SEC：分块识别的时长阈值（秒，默认 600）
+
 	// ---- profile stage（用户画像 P1）----
 	ProfileAutoConfidence float64 // ZW_PROFILE_AUTO_CONFIDENCE：LLM 抽取自动写入 active 的置信阈值（默认 0.75）
 	ProfileExtractEnabled bool    // ZW_PROFILE_EXTRACT_ENABLED：是否启用 profile 流水线阶段（默认 true）
@@ -149,6 +156,14 @@ func Load() (*Config, error) {
 		// ---- speakername stage ----
 		NameInferWindowMin:   getenvInt("ZW_NAME_INFER_WINDOW_MIN", 10),
 		NameInferMaxSegments: getenvInt("ZW_NAME_INFER_MAX_SEGMENTS", 400),
+
+		// ---- audioscene stage（P1 音频场景与情绪理解）----
+		// key 默认回退 STEPFUN_ASR_FILE_API_KEY（StepFun 主账号欠费，走代理）；为空则上层不装配 provider→stage no-op。
+		AudioInsightEnabled:  getenvBool("ZW_AUDIO_INSIGHT_ENABLED", true),
+		AudioInsightModel:    getenv("ZW_AUDIO_INSIGHT_MODEL", "stepaudio-2.5-chat"),
+		AudioInsightBase:     getenv("ZW_AUDIO_INSIGHT_BASE", "https://api.c.ibasemind.com/v1"),
+		AudioInsightAPIKey:   getenv("ZW_AUDIO_INSIGHT_API_KEY", os.Getenv("STEPFUN_ASR_FILE_API_KEY")),
+		AudioInsightChunkSec: getenvInt("ZW_AUDIO_INSIGHT_CHUNK_SEC", 600),
 
 		// ---- profile stage ----
 		ProfileAutoConfidence: getenvFloat("ZW_PROFILE_AUTO_CONFIDENCE", 0.75),

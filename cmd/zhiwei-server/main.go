@@ -186,6 +186,12 @@ func main() {
 		asr = provider.NewStepFunFileASR(cfg.StepFunASRBase, cfg.StepFunASRFileAPIKey, cfg.StepFunASRModel, tosClient, nil)
 	}
 	voiceprintCli := voiceprint.NewClient(cfg.VoiceprintSidecarURL)
+	// audioscene stage（P1 音频场景与情绪）：仅启用且 key 非空才构造 provider；
+	// 否则留 nil → stageAudioScene 走 no-op（key 默认回退 STEPFUN_ASR_FILE_API_KEY，走代理）。
+	var audioInsight provider.AudioInsightProvider
+	if cfg.AudioInsightEnabled && cfg.AudioInsightAPIKey != "" {
+		audioInsight = provider.NewStepAudioInsight(cfg.AudioInsightBase, cfg.AudioInsightAPIKey, cfg.AudioInsightModel)
+	}
 	llm := provider.NewArkLLM(cfg.ARKBaseURL, cfg.ARKAPIKey)
 	// Agent / 报告共用模型：ZW_AGENT_MODEL 优先，未配则回退强模型（见 config §14）。
 	agentModel := cfg.AgentModel
@@ -226,9 +232,14 @@ func main() {
 		NameInferWindowMin:      cfg.NameInferWindowMin,
 		NameInferMaxSegments:    cfg.NameInferMaxSegments,
 		Profile:                 profileSvc,
+		// ---- audioscene stage（P1 音频场景与情绪）----
+		SpeakerStates:        &repo.SpeakerSessionStateRepo{DB: db},
+		AudioInsight:         audioInsight,
+		AudioInsightEnabled:  cfg.AudioInsightEnabled,
+		AudioInsightChunkSec: cfg.AudioInsightChunkSec,
 	})
 	// profile stage 按开关追加（ZW_PROFILE_EXTRACT_ENABLED=false 时仅手动+回填端点）
-	stagesList := []string{"asr", "segment", "speaker", "speakername", "extract"}
+	stagesList := []string{"asr", "segment", "speaker", "speakername", "audioscene", "extract"}
 	if cfg.ProfileExtractEnabled {
 		stagesList = append(stagesList, "profile")
 	}
