@@ -146,6 +146,15 @@ func normalizeDaily(c *DailyContent) {
 	if c.TopicDistribution == nil {
 		c.TopicDistribution = []TopicCount{}
 	}
+	if c.MoodJourney == nil {
+		c.MoodJourney = []MoodPoint{}
+	}
+	if c.Patterns == nil {
+		c.Patterns = []string{}
+	}
+	if c.Scenes == nil {
+		c.Scenes = []SceneCount{}
+	}
 }
 
 // normalizeWeekly 兜底周报顶层切片，以及每个 by_topic / trends 元素的内部切片。
@@ -177,6 +186,12 @@ func normalizeWeekly(c *WeeklyContent) {
 	}
 	if c.NextWeek == nil {
 		c.NextWeek = []string{}
+	}
+	if c.Patterns == nil {
+		c.Patterns = []string{}
+	}
+	if c.Scenes == nil {
+		c.Scenes = []SceneCount{}
 	}
 }
 
