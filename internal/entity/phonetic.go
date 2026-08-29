@@ -17,6 +17,9 @@ func init() { pinyinArgs.Style = pinyin.Normal }
 // NormalizePinyin 把任意串转「发音键」：中文字符逐字转无声调拼音（音节空格分隔），
 // 连续 ASCII 字母/数字归并为一个小写词（混合名「Tom猫」→「tom mao」），其余（标点、
 // 空白、其它符号）丢弃。该键用于召回阶段的 CJK 发音相似度比对。
+//
+// 局限（可接受）：多音字按 go-pinyin 默认读音归一（如「重庆」→zhong qing），因 KB 实体与
+// 查询子串两侧对称归一，自匹配不受影响；仅当 ASR 错字恰好是另一读音的同音字时损失召回。
 func NormalizePinyin(s string) string {
 	var parts []string
 	var latin strings.Builder
