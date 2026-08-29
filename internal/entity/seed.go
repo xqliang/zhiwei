@@ -76,7 +76,10 @@ func RefreshAuto(ctx context.Context, d SeedDeps, userID int64, kinds []string) 
 		if err := d.KB.ReplaceAuto(ctx, userID, repo.EntityKindPerson, dedupeSeed(persons)); err != nil {
 			return err
 		}
-		if enabled[repo.EntityKindProject] {
+		// 捎带落 project 须判 Attributes 装配（与下方 fallback 分支同一守卫）：
+		// Attributes 为 nil 时 projects 恒为空，若仍 ReplaceAuto 会把该 kind 的
+		// auto 实体整体清空——违背「来源 repo 缺失 → 该 kind 跳过不动」的契约。
+		if enabled[repo.EntityKindProject] && d.Attributes != nil {
 			if err := d.KB.ReplaceAuto(ctx, userID, repo.EntityKindProject, dedupeSeed(projects)); err != nil {
 				return err
 			}
