@@ -155,6 +155,18 @@ func (r *TranscriptRepo) RecomputeFullText(ctx context.Context, transcriptID ids
 	return r.SetFullText(ctx, transcriptID, sb.String(), conf)
 }
 
+// ApplyEntityCorrections 实体纠错落库（correct stage 用）：单条 UPDATE 原子写
+// text + corrected_reason='entity' + entity_edits 明细。带 transcript_id 作用域
+// 防跨会话误写；edits 为 nil 时 entity_edits 置 NULL（语义：无明细）。
+// 与声纹纠正共用 corrected_reason 列（前端按值区分 tooltip），corrected_from_speaker_id
+// 不动（实体纠错与说话人归属无关）。单行 UPDATE 原子、并发安全。
+func (r *TranscriptRepo) ApplyEntityCorrections(ctx context.Context, transcriptID, segID ids.ID, newText string, edits []byte) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET text = ?, corrected_reason = 'entity', entity_edits = ? WHERE id = ? AND transcript_id = ?`,
+		newText, edits, segID.Int64(), transcriptID.Int64())
+	return err
+}
+
 // MergeSegments 把若干连续段合并成一条：保留 keeper，其 text=各段按序拼接、
 // start_ms=min、end_ms=max、speaker_id=target；其余段删除。单事务原子（中途失败不留半合并）。
 // 用于 timeline「合并连续同人段成一条」（纠正 ASR 把同人连续发言拆成多段）。调用方负责

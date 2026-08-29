@@ -2,6 +2,9 @@ package repo
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -755,5 +758,70 @@ func TestReattributeSegmentByVoiceprint(t *testing.T) {
 	got = mustSeg(t, tr, tc.ID, 1)
 	if got.CorrectedReason != nil || got.CorrectedFromSpeakerID != nil {
 		t.Fatalf("手动换人后应清 mismatch 标记，实际 reason=%+v from=%+v", got.CorrectedReason, got.CorrectedFromSpeakerID)
+	}
+}
+
+// TestApplyEntityCorrections 验证实体纠错落库：text 改写 + corrected_reason='entity' +
+// entity_edits JSON + 不动 speaker 归属；RecomputeFullText 后 full_text 反映纠正结果。
+func TestApplyEntityCorrections(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	r := &TranscriptRepo{DB: db}
+	const uid int64 = 1
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE tr, seg FROM transcript tr JOIN transcript_segment seg ON seg.transcript_id = tr.id WHERE tr.user_id = ?`, uid) })
+
+	tr := &Transcript{UserID: uid, SessionID: ids.New(), Language: "zh-CN"}
+	if err := r.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	segs := []TranscriptSegment{{
+		TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1",
+		Text: "长梦鱼你看到我的邮件了吗", StartMS: 0, EndMS: 3000,
+	}}
+	if err := r.InsertSegments(ctx, segs); err != nil {
+		t.Fatal(err)
+	}
+	segID := segs[0].ID
+
+	edits := `[{"orig":"长梦鱼","corrected":"张梦瑜","canonical":"张梦瑜","confidence":0.92}]`
+	if err := r.ApplyEntityCorrections(ctx, tr.ID, segID, "张梦瑜你看到我的邮件了吗", []byte(edits)); err != nil {
+		t.Fatalf("ApplyEntityCorrections: %v", err)
+	}
+	after, err := r.GetSegment(ctx, segID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Text != "张梦瑜你看到我的邮件了吗" {
+		t.Fatalf("text 未改写: %q", after.Text)
+	}
+	if after.CorrectedReason == nil || *after.CorrectedReason != "entity" {
+		t.Fatalf("corrected_reason 应为 entity: %v", after.CorrectedReason)
+	}
+	// entity_edits 列为 MySQL JSON 类型，落库会规范化（键重排、加空格），
+	// 无法字节级比对；改比对语义 JSON 相等（明细内容如实保存）。
+	var wantJSON, gotJSON any
+	if err := json.Unmarshal([]byte(edits), &wantJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(after.EntityEdits, &gotJSON); err != nil {
+		t.Fatalf("entity_edits 非合法 JSON: %s (%v)", after.EntityEdits, err)
+	}
+	if !reflect.DeepEqual(wantJSON, gotJSON) {
+		t.Fatalf("entity_edits 不符: %s", after.EntityEdits)
+	}
+	if after.SpeakerID != nil {
+		t.Fatal("实体纠错不应动 speaker_id")
+	}
+
+	// RecomputeFullText 反映纠正后的文本。
+	if err := r.RecomputeFullText(ctx, tr.ID); err != nil {
+		t.Fatal(err)
+	}
+	full, err := r.GetBySession(ctx, tr.SessionID)
+	if err != nil || full.FullText == nil || !strings.Contains(*full.FullText, "张梦瑜") {
+		t.Fatalf("full_text 应含纠正后文本: %v %v", err, full.FullText)
 	}
 }
