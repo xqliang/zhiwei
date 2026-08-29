@@ -181,6 +181,16 @@ func (g *Generator) Daily(ctx context.Context, date time.Time) (*repo.DailyRevie
 		}
 		return nil, genErr
 	}
+	// 挂漫画（失败静默 → Comic 为 nil，报告照常）
+	var dailyContent DailyContent
+	if json.Unmarshal(raw, &dailyContent) == nil {
+		if comic := g.tryAttachComic(ctx, dailyContent.Narrative, dailyContent.MoodJourney, dailyContent.Scenes); comic != nil {
+			dailyContent.Comic = comic
+			if nb, err := json.Marshal(dailyContent); err == nil {
+				raw = nb
+			}
+		}
+	}
 	if err := g.Reviews.UpsertDaily(ctx, reviewUserID, date, json.RawMessage(raw), "ready"); err != nil {
 		return nil, fmt.Errorf("落库日报: %w", err)
 	}
@@ -301,6 +311,16 @@ func (g *Generator) Weekly(ctx context.Context, weekStart time.Time) (*repo.Week
 			return nil, fmt.Errorf("落库 failed 状态: %w (原始错误: %v)", perr, genErr)
 		}
 		return nil, genErr
+	}
+	// 挂漫画（失败静默 → Comic 为 nil，报告照常）。Weekly 无 MoodJourney 传 nil。
+	var weeklyContent WeeklyContent
+	if json.Unmarshal(raw, &weeklyContent) == nil {
+		if comic := g.tryAttachComic(ctx, weeklyContent.Narrative, nil, weeklyContent.Scenes); comic != nil {
+			weeklyContent.Comic = comic
+			if nb, err := json.Marshal(weeklyContent); err == nil {
+				raw = nb
+			}
+		}
 	}
 	if err := g.Reviews.UpsertWeekly(ctx, reviewUserID, ws, weekEnd, json.RawMessage(raw), "ready"); err != nil {
 		return nil, fmt.Errorf("落库周报: %w", err)

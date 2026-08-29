@@ -63,6 +63,10 @@ type Config struct {
 	AgentMaxUsers     int    // ZW_AGENT_MAX_USERS：每用户 dsh 进程池上限（超出按 LRU 关最久未用，默认 8）
 	ReviewDailyCron   string // ZW_REVIEW_DAILY_CRON：日报定时
 
+	// ---- 报告漫画（P4）----
+	ComicEnabled bool   // ZW_COMIC_ENABLED：是否启用报告漫画（默认 false）
+	ComicModel   string // ZW_COMIC_MODEL：文生图模型（默认 doubao-seedream-4-0-250828）
+
 	// ---- speakername stage（名字推断，main 合入）----
 	NameInferWindowMin   int // 名字推断上下文回看窗口（分钟，ZW_NAME_INFER_WINDOW_MIN，默认 10）
 	NameInferMaxSegments int // 名字推断上下文段数上限（ZW_NAME_INFER_MAX_SEGMENTS，默认 400）
@@ -155,6 +159,10 @@ func Load() (*Config, error) {
 		AgentRetrieveTopK: getenvInt("ZW_AGENT_RETRIEVE_TOPK", 10),
 		AgentMaxUsers:     getenvInt("ZW_AGENT_MAX_USERS", 8),
 		ReviewDailyCron:   getenv("ZW_REVIEW_DAILY_CRON", "0 22 * * *"),
+
+		// ---- 报告漫画（P4）----
+		ComicEnabled: getenvBool("ZW_COMIC_ENABLED", false),
+		ComicModel:   getenv("ZW_COMIC_MODEL", "doubao-seedream-4-0-250828"),
 
 		// ---- speakername stage ----
 		NameInferWindowMin:   getenvInt("ZW_NAME_INFER_WINDOW_MIN", 10),
