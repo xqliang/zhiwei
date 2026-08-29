@@ -155,6 +155,18 @@ func TestStageAudioScenePersist(t *testing.T) {
 	if byLabel["2"].Emotion != "焦虑" {
 		t.Errorf("label2 情绪=焦虑, got %q", byLabel["2"].Emotion)
 	}
+
+	// 幂等重跑：再跑一次 stage（模拟重新识别），speaker_session_state 不应重复（仍 2 行）。
+	if err := stageAudioScene(d)(ctx, nil, sid); err != nil {
+		t.Fatalf("重跑 stage: %v", err)
+	}
+	rows2, err := states.ListBySession(ctx, 1, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows2) != 2 {
+		t.Errorf("重跑后应仍 2 行(不重复), got %d", len(rows2))
+	}
 }
 
 // TestStageAudioSceneSkipsDeadSpeakerID 验证 audioscene 回填 speaker_id 前校验存在性：

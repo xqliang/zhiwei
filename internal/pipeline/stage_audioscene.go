@@ -110,6 +110,10 @@ func stageAudioScene(d StageDeps) Handler {
 			// speaker_id，避免把脏 id 写进库导致前端按 id 关联名字失败、只能回退显示原始 label。
 			rows = append(rows, row)
 		}
+		// 幂等重跑：先删该 transcript 旧的说话人情绪，再插入本轮结果（避免重新识别/重跑 stage 时重复）
+		if err := d.SpeakerStates.DeleteByTranscript(ctx, 1, tr.ID); err != nil {
+			log.Printf("[audioscene] 清理旧情绪失败(降级继续): %v", err)
+		}
 		if err := d.SpeakerStates.InsertBatch(ctx, rows); err != nil {
 			log.Printf("[audioscene] 写说话人情绪失败: %v", err)
 		}

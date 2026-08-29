@@ -52,3 +52,11 @@ func (r *SpeakerSessionStateRepo) ListBySession(ctx context.Context, userID int6
 		`SELECT * FROM speaker_session_state WHERE session_id=? AND user_id=? ORDER BY id ASC`, sessionID.Int64(), userID)
 	return rows, err
 }
+
+// DeleteByTranscript 删除某 transcript 的全部说话人情绪行（audioscene stage 重跑前调用，
+// 幂等——避免重新识别/重新跑 stage 时 InsertBatch 追加致重复）。带 user_id 过滤。
+func (r *SpeakerSessionStateRepo) DeleteByTranscript(ctx context.Context, userID int64, transcriptID ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`DELETE FROM speaker_session_state WHERE transcript_id=? AND user_id=?`, transcriptID.Int64(), userID)
+	return err
+}
