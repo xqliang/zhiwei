@@ -7,6 +7,20 @@ import "encoding/json"
 
 // ---- §11.1 日报 ----
 
+// MoodPoint 是一个情绪点（P3 情绪走向）。
+type MoodPoint struct {
+	When    string  `json:"when"`    // 时段/会话标识
+	Mood    string  `json:"mood"`    // 情绪类别
+	Valence float64 `json:"valence"` // 效价 −1..1
+	Note    string  `json:"note"`    // 微情绪/状态一句话
+}
+
+// SceneCount 是「场景→计数」（P3 场景分布，图表就绪）。
+type SceneCount struct {
+	Scene string `json:"scene"`
+	Count int    `json:"count"`
+}
+
 // DailyContent 是日报的结构化输出（落 daily_review.content）。
 // 字段对齐 spec §11.1：headline / highlights / decisions / todos{new,done,open}
 // / insights / tomorrow / topic_distribution。
@@ -18,6 +32,11 @@ type DailyContent struct {
 	Insights          []string     `json:"insights"`           // 归纳/洞察
 	Tomorrow          []string     `json:"tomorrow"`           // 明日计划（只引当天 confirmed 未完成 todo，见 §11.1 约束）
 	TopicDistribution []TopicCount `json:"topic_distribution"` // 当天记忆的话题分布（图表就绪）
+	// ---- P3 深度增强（spec §3）----
+	Narrative   string       `json:"narrative"`    // 叙事总结：一段话概括当天状态/情绪/场景走向（有温度，不罗列）
+	MoodJourney []MoodPoint  `json:"mood_journey"` // 当天情绪走向（情绪点序列）
+	Patterns    []string     `json:"patterns"`     // 跨记忆/时段发现的细微规律/微情绪/状态推断
+	Scenes      []SceneCount `json:"scenes"`       // 当天声学场景分布（图表就绪）
 }
 
 // DailyTodos 是日报里的待办三分组（spec §11.1 todos{new,done,open}）。
@@ -43,6 +62,10 @@ type WeeklyContent struct {
 	Trends   []Trend       `json:"trends"`    // 曲线就绪数据（每日记忆数、todo 完成数…）
 	Risks    []string      `json:"risks"`     // 全局风险
 	NextWeek []string      `json:"next_week"` // 下周计划
+	// ---- P3 深度增强（spec §3）----
+	Narrative string       `json:"narrative"` // 本周叙事总结
+	Patterns  []string     `json:"patterns"`  // 本周规律
+	Scenes    []SceneCount `json:"scenes"`    // 本周场景分布
 }
 
 // WeeklyTopic 是周报里单个话题的进展块（spec §11.2 by_topic[]）。
