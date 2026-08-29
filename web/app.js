@@ -1501,6 +1501,8 @@ const app = createApp({
     }
     // attrDefOf：按 key 查目录定义；目录外 key（自造）或目录未加载时返回 null → 前端回退自由文本输入。
     function attrDefOf(key) { return attrCatalog.value.find(d => d.key === key) || null; }
+    // attrLabel：属性 key → 中文 label（目录含则用其中文 label，目录外自造 key/目录未加载时回退原 key）。
+    function attrLabel(key) { const d = attrDefOf(key); return d && d.label ? d.label : key; }
 
     const showAddAttr = ref(false);          // 加属性表单开合
     const addAttrForm = reactive({ attr_key: '', value: '' });
@@ -3282,7 +3284,7 @@ const app = createApp({
       bindingSpeaker, bindingSaving, bindableSpeakers, startBindingSpeaker, commitBindingSpeaker,
       jumpToPerson, spPersonEdit, spPersonSaving, unboundPersons, startSpPersonEdit, commitSpPersonEdit,
       epiText, personNameOf,
-      attrCatalog, attrDefOf, addAttrDef, editAttrDef, onAddAttrKeyChange, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
+      attrCatalog, attrDefOf, attrLabel, addAttrDef, editAttrDef, onAddAttrKeyChange, showAddAttr, addAttrForm, addingAttr, submitAddAttr, toggleAddAttr, editingAttr, startEditAttr, commitEditAttr, deletingAttrId, askDeleteAttr, confirmDeleteAttr, attrHistory, attrHistoryLoading, showAttrHistory, changeText, snapText,
       RELATION_TYPES, DIRECTIONS, showAddRel, addRelForm, addingRel, submitAddRel, toggleAddRel, resetAddRelForm, deletingRelId, askDeleteRel, confirmDeleteRel,
       EVENT_TYPES, EVENT_IMPORTANCE_LEVELS, eventRowStyle, showAddEvent, addEventForm, addingEvent, toggleAddEvent, submitAddEvent, eventsByYear, fmtEventDate, deletingEventId, askDeleteEvent, confirmDeleteEvent,
       METRIC_CATALOG, showAddMetric, addMetricForm, addingMetric, addMetricDef, onPickMetricKey, toggleAddMetric, submitAddMetric, metricCharts, metricPointValue, deletingMetricId, askDeleteMetric, confirmDeleteMetric,
