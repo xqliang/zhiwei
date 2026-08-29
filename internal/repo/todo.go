@@ -226,6 +226,12 @@ func (r *TodoRepo) ListBySession(ctx context.Context, sessionID ids.ID) ([]TodoR
 	return rows, nil
 }
 
+// ListOpenTitles 返回未关闭 todo 标题的事务外便捷包装：委托 ListOpenTitlesExt 用 r.DB
+// 执行。给实体种子刷新（entity.RefreshAuto，非事务上下文）等调用方免去手传执行器。
+func (r *TodoRepo) ListOpenTitles(ctx context.Context, userID int64) ([]string, error) {
+	return r.ListOpenTitlesExt(ctx, r.DB, userID)
+}
+
 // ListOpenTitlesExt 返回未关闭（suggested+confirmed）todo 的标题，落库去重比对用。
 // 事务内调用传 tx（能看到本事务内 DeleteBySessionExt 已删的本 session todo，
 // 避免重跑时旧 todo 自去重导致幂等失败），事务外调用传 r.DB。

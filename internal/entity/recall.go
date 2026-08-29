@@ -90,7 +90,24 @@ func RecallCandidates(text string, entities []repo.Entity, topK int, minSim floa
 		return nil
 	}
 
-	// 2) 逐实体取最佳子串相似度（实体几十~几百 × 子串几十 = 万级 Similarity 调用，毫秒级）。
+	// 2) 预归一化子串（评审 T6：把 NormalizePinyin/NormalizeLatin 与 containsCJK 判定
+	//    从「每实体 × 每子串」的内层循环提到实体循环之前——每个子串只归一化一次，
+	//    而非每个实体重算一遍）。含汉字子串归入拼音键，纯拉丁子串归入拉丁键。
+	pyKeys := make([]string, 0, len(subs)) // CJK 子串的拼音键
+	ltKeys := make([]string, 0, len(subs)) // 纯拉丁子串的拉丁键
+	for _, s := range subs {
+		if containsCJK(s) {
+			if k := NormalizePinyin(s); k != "" {
+				pyKeys = append(pyKeys, k)
+			}
+		} else {
+			if k := NormalizeLatin(s); k != "" {
+				ltKeys = append(ltKeys, k)
+			}
+		}
+	}
+
+	// 3) 逐实体取最佳子串相似度（实体几十~几百 × 子串几十 = 万级 Similarity 调用，毫秒级）。
 	var out []Candidate
 	for _, e := range entities {
 		var ep, em string
@@ -104,22 +121,25 @@ func RecallCandidates(text string, entities []repo.Entity, topK int, minSim floa
 			continue // 无发音键（脏数据）不参与
 		}
 		var top float64
-		for _, s := range subs {
-			var sim float64
-			if containsCJK(s) && ep != "" {
-				sim = Similarity(NormalizePinyin(s), ep)
-			} else if !containsCJK(s) && em != "" {
-				sim = Similarity(NormalizeLatin(s), em)
+		if ep != "" {
+			for _, k := range pyKeys {
+				if sim := Similarity(k, ep); sim > top {
+					top = sim
+				}
 			}
-			if sim > top {
-				top = sim
+		}
+		if em != "" {
+			for _, k := range ltKeys {
+				if sim := Similarity(k, em); sim > top {
+					top = sim
+				}
 			}
 		}
 		if top >= minSim {
 			out = append(out, Candidate{EntityID: e.ID, Canonical: e.Canonical, Kind: e.Kind, Similarity: top})
 		}
 	}
-	// 3) 排序 + Top-K（每实体至多一条，天然无重复）。
+	// 4) 排序 + Top-K（每实体至多一条，天然无重复）。
 	sort.Slice(out, func(i, j int) bool { return out[i].Similarity > out[j].Similarity })
 	if len(out) > topK {
 		out = out[:topK]
