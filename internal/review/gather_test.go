@@ -81,6 +81,32 @@ func TestDailyPersistReady(t *testing.T) {
 	}
 }
 
+// TestDailyPersistWithComic：注入 Comic + ComicStorage 后，落库 content 应含漫画 URL。
+func TestDailyPersistWithComic(t *testing.T) {
+	f := &fakeLLM{Reply: `{"headline":"当天要点","highlights":["h1"],"narrative":"平静的一天"}`}
+	g := newGenWithFake(t, f)
+	g.Comic = &fakeComic{B64: "ZmFrZQ=="}
+	g.ComicStorage = &fakeTOS{URL: "https://tos/comic.jpeg"}
+	ctx := context.Background()
+	day := time.Date(2030, 2, 5, 0, 0, 0, 0, time.UTC)
+	t.Cleanup(func() { _ = g.Reviews.UpsertDaily(ctx, reviewUserID, day, nil, "pending") })
+
+	row, err := g.Daily(ctx, day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row == nil || row.Content == nil {
+		t.Fatalf("日报应有 content: %+v", row)
+	}
+	var dc DailyContent
+	if err := json.Unmarshal(*row.Content, &dc); err != nil {
+		t.Fatal(err)
+	}
+	if dc.Comic == nil || dc.Comic.ImageURL != "https://tos/comic.jpeg" {
+		t.Errorf("落库 content 应含漫画 URL，实际 Comic=%+v", dc.Comic)
+	}
+}
+
 func TestDailyLLMFailMarksFailed(t *testing.T) {
 	g := newGenWithFake(t, &fakeLLM{Reply: "模型没给 JSON"}) // 解析失败
 	ctx := context.Background()

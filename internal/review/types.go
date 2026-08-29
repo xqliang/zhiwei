@@ -21,6 +21,12 @@ type SceneCount struct {
 	Count int    `json:"count"`
 }
 
+// ComicImage 报告漫画（一张多格连环画，P4）。
+type ComicImage struct {
+	Caption  string `json:"caption"`   // 整体小标题（可选）
+	ImageURL string `json:"image_url"` // TOS 长期 URL
+}
+
 // DailyContent 是日报的结构化输出（落 daily_review.content）。
 // 字段对齐 spec §11.1：headline / highlights / decisions / todos{new,done,open}
 // / insights / tomorrow / topic_distribution。
@@ -37,6 +43,7 @@ type DailyContent struct {
 	MoodJourney []MoodPoint  `json:"mood_journey"` // 当天情绪走向（情绪点序列）
 	Patterns    []string     `json:"patterns"`     // 跨记忆/时段发现的细微规律/微情绪/状态推断
 	Scenes      []SceneCount `json:"scenes"`       // 当天声学场景分布（图表就绪）
+	Comic       *ComicImage  `json:"comic,omitempty"` // 报告漫画（P4；未生成时省略，守 no-null 契约）
 }
 
 // DailyTodos 是日报里的待办三分组（spec §11.1 todos{new,done,open}）。
@@ -66,6 +73,7 @@ type WeeklyContent struct {
 	Narrative string       `json:"narrative"` // 本周叙事总结
 	Patterns  []string     `json:"patterns"`  // 本周规律
 	Scenes    []SceneCount `json:"scenes"`    // 本周场景分布
+	Comic     *ComicImage  `json:"comic,omitempty"` // 报告漫画（P4；未生成时省略，守 no-null 契约）
 }
 
 // WeeklyTopic 是周报里单个话题的进展块（spec §11.2 by_topic[]）。

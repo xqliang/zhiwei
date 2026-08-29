@@ -209,6 +209,22 @@ func main() {
 	// P3：情绪/环境汇聚依赖（NewGenerator 形参不扩，按字段注入；gather 侧有 nil 守卫）。
 	reviewer.SpeakerStates = &repo.SpeakerSessionStateRepo{DB: db}
 	reviewer.Persons = persons
+	// P4 报告漫画：开关开启才装配。Comic provider 直连 Ark Seedream；
+	// 存图用独立 TOS 客户端（tosClient 作用域限于 ASR switch，此处按同一 TOS 配置重建）。
+	// TOS 凭据缺失/构造失败时 ComicStorage 留 nil → storeComicImage 退回 data URL。
+	if cfg.ComicEnabled {
+		reviewer.Comic = provider.NewSeedreamComic(cfg.ARKBaseURL, cfg.ARKAPIKey, cfg.ComicModel)
+		if cfg.TOSAccessKey != "" && cfg.TOSSecretKey != "" {
+			if comicTOS, err := storage.NewTOSClient(storage.TOSConfig{
+				AccessKey: cfg.TOSAccessKey, SecretKey: cfg.TOSSecretKey,
+				Region: cfg.TOSRegion, Bucket: cfg.TOSBucket, Endpoint: cfg.TOSEndpoint, KeyPrefix: cfg.TOSKeyPrefix,
+			}); err == nil {
+				reviewer.ComicStorage = comicTOS // *storage.TOSClient 实现 UploadImage
+			} else {
+				log.Printf("[review] 漫画 TOS 客户端构造失败(降级 data URL): %v", err)
+			}
+		}
+	}
 	profileSvc := &profile.Service{
 		DB: db, Sessions: sessions, Transcripts: transcripts, Memories: memories,
 		Speakers: speakers, Persons: persons, Attributes: personAttrs,

@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"strings"
 
+	"zhiwei/internal/ids"
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
 )
@@ -35,6 +38,15 @@ type Generator struct {
 	// P3：情绪/环境汇聚（供报告洞察）。旧装配可能不注入，gather 侧有 nil 守卫。
 	SpeakerStates *repo.SpeakerSessionStateRepo // 说话人整体情绪（gather 汇聚用）
 	Persons       *repo.PersonRepo              // speaker_id → person 名（情绪行显示说话人名）
+
+	// P4：报告漫画（可选）。Comic 为 nil 时不生成漫画；ComicStorage 为 nil 时退回 data URL。
+	Comic        provider.ComicProvider // nil = 不生成漫画
+	ComicStorage TOSImageUploader       // 存漫画图（nil 时 data URL 兜底）
+}
+
+// TOSImageUploader 存图接口（*storage.TOSClient 实现之）。
+type TOSImageUploader interface {
+	UploadImage(ctx context.Context, b64Data, key string) (string, error)
 }
 
 // NewGenerator 构造 Generator（参数与字段对应；main 装配时注入）。
@@ -94,4 +106,48 @@ func (g *Generator) generateTopicStatus(ctx context.Context, in TopicStatusInput
 	}
 	normalizeTopicStatus(c) // 兜底 nil 切片 → []，避免序列化成 null（M5）
 	return c, mustJSON(c), nil
+}
+
+// ---- P4 报告漫画：派生分镜 → 出图 → 存图 ----
+
+// buildComicPrompt 用 LLM 从报告叙事派生 Seedream 多格漫画 prompt。
+func (g *Generator) buildComicPrompt(ctx context.Context, narrative string, mood []MoodPoint, scenes []SceneCount) (string, error) {
+	sys := "你是漫画分镜师。根据用户的一天总结，写一个文生图 prompt：画成 6-12 格连环画（网格或横条），统一扁平插画风、暖色调、同一主角、每格一个场景、整体风格一致。只输出 prompt 本身（中文画面描述），不要解释。"
+	usr := "一天总结：\n" + narrative + "\n\n情绪点：" + fmt.Sprintf("%v", mood) + "\n场景：" + fmt.Sprintf("%v", scenes)
+	resp, err := g.LLM.Chat(ctx, provider.ChatRequest{Model: g.Model, System: sys, User: usr})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Content), nil
+}
+
+// storeComicImage 存漫画图返回可访问 URL：优先 TOS 长期 URL；无 TOS 退回 data URL。
+func (g *Generator) storeComicImage(ctx context.Context, b64 string) (string, error) {
+	if g.ComicStorage != nil {
+		return g.ComicStorage.UploadImage(ctx, b64, "comics/"+ids.New().String()+".jpeg")
+	}
+	return "data:image/jpeg;base64," + b64, nil
+}
+
+// tryAttachComic 生成漫画（派生→出图→存图），失败静默返回 nil。
+func (g *Generator) tryAttachComic(ctx context.Context, narrative string, mood []MoodPoint, scenes []SceneCount) *ComicImage {
+	if g.Comic == nil {
+		return nil
+	}
+	prompt, err := g.buildComicPrompt(ctx, narrative, mood, scenes)
+	if err != nil {
+		log.Printf("[review] 漫画分镜派生失败(降级): %v", err)
+		return nil
+	}
+	b64, err := g.Comic.Generate(ctx, prompt)
+	if err != nil {
+		log.Printf("[review] 漫画出图失败(降级): %v", err)
+		return nil
+	}
+	url, err := g.storeComicImage(ctx, b64)
+	if err != nil {
+		log.Printf("[review] 漫画存图失败(降级): %v", err)
+		return nil
+	}
+	return &ComicImage{ImageURL: url}
 }

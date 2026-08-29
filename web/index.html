@@ -363,6 +363,8 @@
   /* 分节：小标题 + 列表；空数组回退「（无）」 */
   .report-sec { margin-top: 14px; }
   .report-sec-title { font-size: var(--fs-xs); font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+  /* 报告漫画图：自适应宽度、圆角+阴影（复用主题变量），懒加载 */
+  .comic-img { max-width: 100%; height: auto; border-radius: var(--radius); box-shadow: var(--shadow); display: block; margin-top: 8px; }
   .report-ul { margin: 0; padding-left: 20px; }
   .report-ul li { margin: 3px 0; line-height: 1.6; }
   /* 进度条（0..1）：概略进展 / 按话题进展 */
@@ -1232,6 +1234,11 @@
           <div class="report-sec-title">场景分布</div>
           <span v-for="(s, i) in reportContent.scenes" :key="i" class="chip chip-ro" style="margin-left:6px">{{ s.scene }} ×{{ s.count }}</span>
         </div>
+        <!-- 今日漫画：后端产出一张多格漫画图 URL；omitempty 下无漫画时 comic 字段省略 → 不渲染 -->
+        <div class="report-sec" v-if="reportContent.comic && reportContent.comic.image_url">
+          <div class="report-sec-title">今日漫画</div>
+          <img :src="reportContent.comic.image_url" :alt="reportContent.comic.caption || '报告漫画'" loading="lazy" class="comic-img" />
+        </div>
       </template>
 
       <!-- ===== 周报 ===== -->
@@ -1286,6 +1293,11 @@
         <div class="report-sec" v-if="reportContent.scenes && reportContent.scenes.length">
           <div class="report-sec-title">场景分布</div>
           <span v-for="(s, i) in reportContent.scenes" :key="i" class="chip chip-ro" style="margin-left:6px">{{ s.scene }} ×{{ s.count }}</span>
+        </div>
+        <!-- 本周漫画：后端产出一张多格漫画图 URL；omitempty 下无漫画时 comic 字段省略 → 不渲染 -->
+        <div class="report-sec" v-if="reportContent.comic && reportContent.comic.image_url">
+          <div class="report-sec-title">本周漫画</div>
+          <img :src="reportContent.comic.image_url" :alt="reportContent.comic.caption || '报告漫画'" loading="lazy" class="comic-img" />
         </div>
       </template>
       <div class="muted" style="margin-top:14px; font-size:var(--fs-xs)" v-if="reportRow && reportRow.created_at">生成于 {{ fmtTime(reportRow.created_at) }}</div>
