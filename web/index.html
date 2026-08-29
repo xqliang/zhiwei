@@ -207,6 +207,9 @@
   .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: var(--fs-xs); font-weight: 500; line-height: 1.4; cursor: default; }
   /* 只读状态药丸（AI/置信度/直述/待确认等，无删除×）：右侧对称内边距 + 左外边距分隔，避免贴太近 */
   .chip.chip-ro { padding: 3px 10px; margin-left: 6px; }
+  /* 溯源跳转药丸：点击跳到来源录音时间线（自动提取物才有 session_id） */
+  .chip-ro.src-link { cursor: pointer; background: var(--surface-sunken); color: var(--accent); }
+  .chip-ro.src-link:hover { background: var(--accent-soft); text-decoration: underline; }
   .chip-x { background: none; border: none; color: inherit; opacity: .45; cursor: pointer; font-size: 11px; padding: 0 4px; line-height: 1; }
   .chip-x:hover { opacity: 1; }
   .chip-add { position: relative; display: inline-flex; align-items: center; padding: 3px 12px; border-radius: 99px; border: 1px dashed var(--border-strong); color: var(--muted); font-size: var(--fs-xs); cursor: pointer; background: var(--surface); white-space: nowrap; }
@@ -1685,6 +1688,7 @@
               <span class="chip chip-ro">{{ (a.confidence * 100).toFixed(0) }}%</span>
               <span class="chip chip-ro" style="background:var(--surface-sunken); color:var(--text-2)">{{ epiText(a.epistemic_type) }}</span>
               <span v-if="a.status === 'pending'" class="chip chip-ro" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+              <span v-if="a.session_id" class="chip chip-ro src-link" @click.stop="jumpToSession(a.session_id)" title="跳到来源录音时间线">↪ 来源</span>
             </div>
           </div>
           <div style="display:flex; gap:4px; flex-shrink:0">
@@ -1827,8 +1831,9 @@
                 <span v-if="ev.end_at" class="muted"> 至 {{ fmtEventDate(ev.end_at, g.year === '时间未知') }}</span>
                 <span v-if="ev.location" class="muted"> · {{ ev.location }}</span>
                 <span v-if="ev.related_person_ids && ev.related_person_ids.length" class="muted"> · 与 {{ ev.related_person_ids.map(id => personNameOf(id)).join('、') }} 同行/同场</span>
-                <span class="chip" :style="ev.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ ev.source === 'llm' ? 'AI' : '人工' }}</span>
-                <span v-if="ev.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+                <span class="chip chip-ro" :style="ev.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ ev.source === 'llm' ? 'AI' : '人工' }}</span>
+                <span v-if="ev.status === 'pending'" class="chip chip-ro" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+                <span v-if="ev.session_id" class="chip chip-ro src-link" @click.stop="jumpToSession(ev.session_id)" title="跳到来源录音时间线">↪ 来源</span>
               </div>
               <div v-if="ev.description" class="muted" style="font-size:var(--fs-xs)">{{ ev.description }}</div>
             </div>
@@ -1965,8 +1970,9 @@
             <div class="seg-text">
               <div>
                 <b>{{ a.activity }}</b>
-                <span class="chip" :style="a.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ a.source === 'llm' ? 'AI' : '人工' }}</span>
-                <span v-if="a.status === 'pending'" class="chip" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+                <span class="chip chip-ro" :style="a.source === 'llm' ? { background:'var(--accent-soft)', color:'var(--accent)' } : { background:'var(--ok-soft)', color:'var(--ok)' }">{{ a.source === 'llm' ? 'AI' : '人工' }}</span>
+                <span v-if="a.status === 'pending'" class="chip chip-ro" style="background:var(--warn-soft); color:var(--warn)">待确认</span>
+                <span v-if="a.session_id" class="chip chip-ro src-link" @click.stop="jumpToSession(a.session_id)" title="跳到来源录音时间线">↪ 来源</span>
               </div>
               <div class="muted" style="font-size:var(--fs-xs)">
                 {{ fmtEventDate(a.started_at, true) }}
