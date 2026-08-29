@@ -237,9 +237,13 @@ func main() {
 		AudioInsight:         audioInsight,
 		AudioInsightEnabled:  cfg.AudioInsightEnabled,
 		AudioInsightChunkSec: cfg.AudioInsightChunkSec,
+		// ---- emotionprofile stage（P2 人物情绪汇总）----
+		PersonMetrics:         &repo.PersonMetricRepo{DB: db},
+		Persons:               persons,
+		EmotionProfileEnabled: cfg.EmotionProfileEnabled,
 	})
 	// profile stage 按开关追加（ZW_PROFILE_EXTRACT_ENABLED=false 时仅手动+回填端点）
-	stagesList := []string{"asr", "segment", "speaker", "speakername", "audioscene", "extract"}
+	stagesList := []string{"asr", "segment", "speaker", "speakername", "audioscene", "emotionprofile", "extract"}
 	if cfg.ProfileExtractEnabled {
 		stagesList = append(stagesList, "profile")
 	}

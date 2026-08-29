@@ -74,6 +74,9 @@ type Config struct {
 	AudioInsightAPIKey   string // ZW_AUDIO_INSIGHT_API_KEY：API Key（默认回退 STEPFUN_ASR_FILE_API_KEY；为空则不装配 provider→stage no-op）
 	AudioInsightChunkSec int    // ZW_AUDIO_INSIGHT_CHUNK_SEC：分块识别的时长阈值（秒，默认 600）
 
+	// ---- emotionprofile stage（P2 人物情绪汇总）----
+	EmotionProfileEnabled bool // ZW_EMOTION_PROFILE_ENABLED：是否启用人物情绪汇总阶段（默认 true）
+
 	// ---- profile stage（用户画像 P1）----
 	ProfileAutoConfidence float64 // ZW_PROFILE_AUTO_CONFIDENCE：LLM 抽取自动写入 active 的置信阈值（默认 0.75）
 	ProfileExtractEnabled bool    // ZW_PROFILE_EXTRACT_ENABLED：是否启用 profile 流水线阶段（默认 true）
@@ -164,6 +167,9 @@ func Load() (*Config, error) {
 		AudioInsightBase:     getenv("ZW_AUDIO_INSIGHT_BASE", "https://api.c.ibasemind.com/v1"),
 		AudioInsightAPIKey:   getenv("ZW_AUDIO_INSIGHT_API_KEY", os.Getenv("STEPFUN_ASR_FILE_API_KEY")),
 		AudioInsightChunkSec: getenvInt("ZW_AUDIO_INSIGHT_CHUNK_SEC", 600),
+
+		// ---- emotionprofile stage（P2 人物情绪汇总）----
+		EmotionProfileEnabled: getenvBool("ZW_EMOTION_PROFILE_ENABLED", true),
 
 		// ---- profile stage ----
 		ProfileAutoConfidence: getenvFloat("ZW_PROFILE_AUTO_CONFIDENCE", 0.75),

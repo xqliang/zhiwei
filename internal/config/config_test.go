@@ -229,6 +229,9 @@ func TestAudioInsightDefaults(t *testing.T) {
 	if c.AudioInsightEnabled != true {
 		t.Errorf("AudioInsightEnabled 默认应 true")
 	}
+	if c.EmotionProfileEnabled != true {
+		t.Errorf("EmotionProfileEnabled 默认应 true")
+	}
 	if c.AudioInsightModel != "stepaudio-2.5-chat" {
 		t.Errorf("AudioInsightModel 默认错: %q", c.AudioInsightModel)
 	}
