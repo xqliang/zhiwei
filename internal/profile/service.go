@@ -946,8 +946,11 @@ func (s *Service) personByOwnerRelation(ctx context.Context, tx *sqlx.Tx, userID
 
 // resolveOrCreateByName 按显示名找 active/pending 人物；找不到新建
 // source=llm status=pending 的人物并记审计（spec §2 决策 2：自动建档走确认）。
+// 名字经 NormalizePersonName 硬校验兜底（prompt「人物名字规则」已要求 LLM 只给单人名，
+// 这里是防「老保一家」类口语粘连的第二道防线）：空名/代词/纯集合名词/超长（>8 rune）
+// → 拒绝新建（返回 0，调用方跳过该事实）。
 func (s *Service) resolveOrCreateByName(ctx context.Context, tx *sqlx.Tx, userID int64, name string, prov Provenance) (ids.ID, error) {
-	name = strings.TrimSpace(name)
+	name = NormalizePersonName(name)
 	if name == "" {
 		return 0, nil
 	}

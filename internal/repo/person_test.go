@@ -172,3 +172,58 @@ func TestPersonListWithPendingAndRecentSessions(t *testing.T) {
 		t.Fatalf("RecentSessionIDs 错误: %v", sids)
 	}
 }
+
+// TestPersonRosterExcludesPending 锁定 spec「避免抽取噪声污染名册」（person-profile spec §86）：
+// 名册查询（ListWithPending）只返回 active 人物——LLM 抽取新建的 pending 人物只在确认
+// 队列出现，确认（pending→active）后才进名册。List（确认队列的人名映射用）不受此约束。
+func TestPersonRosterExcludesPending(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec("DELETE FROM person WHERE display_name LIKE '名册过滤测试%'") })
+	ctx := context.Background()
+	persons := &PersonRepo{DB: db}
+
+	active := &Person{DisplayName: "名册过滤测试已确认"}
+	if err := persons.Create(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	pending := &Person{DisplayName: "名册过滤测试待确认", Source: "llm", Status: "pending"}
+	if err := persons.Create(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+
+	// 名册：只有 active 的
+	roster, err := persons.ListWithPending(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawActive, sawPending bool
+	for _, p := range roster {
+		if p.ID == active.ID {
+			sawActive = true
+		}
+		if p.ID == pending.ID {
+			sawPending = true
+		}
+	}
+	if !sawActive || sawPending {
+		t.Errorf("名册应含 active、不含 pending: sawActive=%v sawPending=%v", sawActive, sawPending)
+	}
+
+	// 确认队列人名映射（List）：pending 仍在（要给待确认的人物条目显示名字）
+	all, err := persons.List(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawPendingInList bool
+	for _, p := range all {
+		if p.ID == pending.ID {
+			sawPendingInList = true
+		}
+	}
+	if !sawPendingInList {
+		t.Error("List 应仍含 pending（确认队列人名映射用）")
+	}
+}

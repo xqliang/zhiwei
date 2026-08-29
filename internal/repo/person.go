@@ -72,7 +72,9 @@ func (r *PersonRepo) Get(ctx context.Context, userID int64, id ids.ID) (*Person,
 	return &p, nil
 }
 
-// List 返回非 dismissed 人物（含 pending，名册要展示），is_owner 优先 + 更新时间倒序。
+// List 返回非 dismissed 人物（含 pending）——供 /api/profile/pending 建「pending 条目→人名」
+// 映射（确认队列里的人物条目要显示名字，故必须含 pending 人物）。名册展示用 ListWithPending
+// （只 active，避免抽取噪声污染名册，见其注释与 spec §86）。is_owner 优先 + 更新时间倒序。
 func (r *PersonRepo) List(ctx context.Context, userID int64) ([]Person, error) {
 	var list []Person
 	err := r.DB.SelectContext(ctx, &list, `
@@ -83,6 +85,9 @@ ORDER BY is_owner DESC, updated_at DESC`, userID)
 
 // ListWithPending 名册 + 每人 pending 计数（全六平面：属性/关系/大事记/指标/周期/生活轨迹），
 // 供名册角标——须与 /api/profile/pending 队列的并集口径一致，漏平面会少计。
+// 只返回 active 人物（spec §86：LLM 抽取自动新建的 pending 人物「避免抽取噪声污染名册」，
+// 只在确认队列出现，确认 pending→active 后才进名册）；pending_count 是 plane 条目级
+// 待确认数（active 人物也可能有），与人物自身 status 无关。
 func (r *PersonRepo) ListWithPending(ctx context.Context, userID int64) ([]PersonWithPending, error) {
 	var list []PersonWithPending
 	err := r.DB.SelectContext(ctx, &list, `
@@ -94,7 +99,7 @@ SELECT p.*,
 + (SELECT COUNT(*) FROM person_cycle c WHERE c.person_id = p.id AND c.status = 'pending')
 + (SELECT COUNT(*) FROM person_activity act WHERE act.person_id = p.id AND act.status = 'pending') AS pending_count
 FROM person p
-WHERE p.user_id = ? AND p.status != 'dismissed'
+WHERE p.user_id = ? AND p.status = 'active'
 ORDER BY p.is_owner DESC, p.updated_at DESC`, userID)
 	return list, err
 }
