@@ -1224,7 +1224,7 @@
         <div class="report-sec" v-if="reportContent.mood_journey && reportContent.mood_journey.length">
           <div class="report-sec-title">情绪走向</div>
           <ul class="report-ul"><li v-for="(m, i) in reportContent.mood_journey" :key="i">
-            {{ m.when }} <b>{{ m.mood }}</b><span v-if="m.valence !== undefined">（{{ m.valence > 0 ? '+' : '' }}{{ m.valence.toFixed(1) }}）</span><span v-if="m.note"> · {{ m.note }}</span>
+            {{ m.when }} <b>{{ m.mood }}</b><span v-if="typeof m.valence === 'number'">（{{ m.valence > 0 ? '+' : '' }}{{ m.valence.toFixed(1) }}）</span><span v-if="m.note"> · {{ m.note }}</span>
           </li></ul>
         </div>
         <!-- 场景分布：chip 胶囊（场景 ×次数），复用 chip-ro 只读样式 -->
