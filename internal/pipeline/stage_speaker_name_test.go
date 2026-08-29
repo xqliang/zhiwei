@@ -259,6 +259,19 @@ func TestStageSpeakerNameContextAssembly(t *testing.T) {
 	db := transcripts.DB
 	sessions := &repo.SessionRepo{DB: db}
 
+	// 预清理（脏库重跑，对齐 extract fixture 的 dismiss 惯例）：删除近 20 分钟内 session 的
+	// 残留段。本测试断言「前置 session 段出现在 prompt」依赖墙钟窗口查询（DESC+LIMIT 400
+	// 保留最新），连跑两轮全量测试时上一轮的段（created_at 几分钟前、wall_time 晚于本测试
+	// 回拨 5min 的前置段）会占满 LIMIT 把前置段顶出结果——先清掉干扰再 seed 前置数据。
+	if _, err := db.ExecContext(ctx, `
+DELETE FROM transcript_segment
+WHERE transcript_id IN (
+  SELECT tr.id FROM transcript tr JOIN audio_session s ON s.id = tr.session_id
+  WHERE s.created_at > DATE_SUB(NOW(3), INTERVAL 20 MINUTE) AND tr.id != ?
+)`, tr.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	// 取当前 session 的 created_at，前置 session 定时到它前 5 分钟（落在 10min 回看窗口内）。
 	cur, err := sessions.Get(ctx, 1, sid)
 	if err != nil {

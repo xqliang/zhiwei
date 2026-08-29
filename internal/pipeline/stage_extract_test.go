@@ -128,6 +128,14 @@ WHERE user_id = 1 AND title IN (?, ?, ?) AND status = 'active'`,
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// 清理本 fixture 的段（除根，防脏库）：段插在共享测试库且不随测试结束清理，会跨运行
+	// 累积残留——speakername 的墙钟窗口查询（DESC+LIMIT 保留最新）在两轮全量测试连跑时
+	// 会被这些残留占满 LIMIT、把 ContextAssembly 的前置 session 段顶出（曾致其断言失败）。
+	// transcript/audio_session 保留（其余测试按自己的 sid/tr 隔离，不互读）。
+	t.Cleanup(func() {
+		_, _ = d.Transcripts.DB.ExecContext(context.Background(),
+			`DELETE FROM transcript_segment WHERE transcript_id = ?`, tr.ID)
+	})
 	return sid, rustTopic
 }
 
