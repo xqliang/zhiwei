@@ -65,18 +65,24 @@ type StageDeps struct {
 	SpeakerStates        *repo.SpeakerSessionStateRepo
 	AudioInsightEnabled  bool
 	AudioInsightChunkSec int // 0 = 默认 600（>此长度分块识别）
+
+	// ---- emotionprofile stage（P2 人物情绪汇总）----
+	PersonMetrics         *repo.PersonMetricRepo
+	Persons               *repo.PersonRepo
+	EmotionProfileEnabled bool
 }
 
 // BuildStages 返回 stage 名 -> handler 的映射，供 Pool 装配。
 func BuildStages(d StageDeps) map[string]Handler {
 	return map[string]Handler{
-		"asr":         stageASR(d),
-		"segment":     stageSegment(d),
-		"speaker":     stageSpeaker(d),
-		"speakername": stageSpeakerName(d),
-		"audioscene":  stageAudioScene(d),
-		"extract":     stageExtract(d),
-		"profile":     stageProfile(d),
+		"asr":            stageASR(d),
+		"segment":        stageSegment(d),
+		"speaker":        stageSpeaker(d),
+		"speakername":    stageSpeakerName(d),
+		"audioscene":     stageAudioScene(d),
+		"emotionprofile": stageEmotionProfile(d),
+		"extract":        stageExtract(d),
+		"profile":        stageProfile(d),
 	}
 }
 
