@@ -36,6 +36,16 @@ func TestMergeInsights(t *testing.T) {
 	}
 }
 
+// 单块也过滤背景音的"无"/空串（与多块一致）。
+func TestMergeInsightsSingleFiltersBackground(t *testing.T) {
+	m := mergeInsights([]provider.AudioInsight{
+		{AcousticScene: "室内", BackgroundSounds: []string{"无", "键盘", ""}},
+	})
+	if len(m.BackgroundSounds) != 1 || m.BackgroundSounds[0] != "键盘" {
+		t.Errorf("单块背景应过滤为[键盘], got %v", m.BackgroundSounds)
+	}
+}
+
 // planChunks：按 chunkSec 计算切点数（纯计算，不切文件）。
 func TestPlanChunks(t *testing.T) {
 	if n := len(planChunks(25*60*1000, 10*60)); n != 3 {

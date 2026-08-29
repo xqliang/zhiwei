@@ -34,23 +34,17 @@ func mergeInsights(chunks []provider.AudioInsight) provider.AudioInsight {
 	if len(chunks) == 0 {
 		return provider.AudioInsight{}
 	}
+	// 单块也走背景音过滤（去"无"/空），保证与多块一致；其余字段原样返回。
 	if len(chunks) == 1 {
-		return chunks[0]
+		single := chunks[0]
+		single.BackgroundSounds = mergeBackground(chunks)
+		return single
 	}
 	out := provider.AudioInsight{
 		AcousticScene: modeStr(pluckStr(chunks, func(a provider.AudioInsight) string { return a.AcousticScene })),
 		WeatherCues:   modeStr(pluckStr(chunks, func(a provider.AudioInsight) string { return a.WeatherCues })),
 		OverallMood:   modeStr(pluckStr(chunks, func(a provider.AudioInsight) string { return a.OverallMood })),
-	}
-	// background_sounds 并集去重（保序）
-	seen := map[string]bool{}
-	for _, c := range chunks {
-		for _, b := range c.BackgroundSounds {
-			if b != "" && b != "无" && !seen[b] {
-				seen[b] = true
-				out.BackgroundSounds = append(out.BackgroundSounds, b)
-			}
-		}
+		BackgroundSounds: mergeBackground(chunks),
 	}
 	// 每说话人聚合
 	type agg struct {
@@ -98,6 +92,21 @@ func pluckStr(cs []provider.AudioInsight, f func(provider.AudioInsight) string) 
 	for _, c := range cs {
 		if v := f(c); v != "" {
 			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// mergeBackground 背景音并集去重（保序），过滤空串与"无"（模型常把无背景声填"无"）。
+func mergeBackground(chunks []provider.AudioInsight) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, c := range chunks {
+		for _, b := range c.BackgroundSounds {
+			if b != "" && b != "无" && !seen[b] {
+				seen[b] = true
+				out = append(out, b)
+			}
 		}
 	}
 	return out
