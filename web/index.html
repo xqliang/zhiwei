@@ -501,7 +501,7 @@
                   {{ mi > 0 ? '·' : '' }} {{ m.name }} {{ m.similarity.toFixed(2) }}
                 </span>
                 <span v-if="s.voice_top.matched" :style="{ color: 'var(--ok)', fontWeight: 600 }"
-                      title="两级规则判定命中：这个人">→ {{ s.voice_top.speaker_name }}{{ s.voice_top.rule === 'gap' ? '(弱)' : '' }}</span>
+                      title="三级规则判定命中：这个人">→ {{ s.voice_top.speaker_name }}{{ s.voice_top.rule === 'gap' ? '(弱)' : s.voice_top.rule === 'loose' ? '(宽)' : '' }}</span>
               </div>
             </div>
             <div style="display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap" @click.stop>

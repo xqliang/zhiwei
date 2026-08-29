@@ -16,6 +16,12 @@ const (
 	// 2026-08-26 修正：初值 0.6 在余弦域（[-1,1]）几乎不可达——top1≥0.72 且领先 0.6 意味着
 	// top2≤0.12，等于弱命中分支实际永不触发。按需求方明确的规则改为 0.06。
 	GapMin = 0.06
+
+	// LooseMin / LooseGap 宽松命中（2026-08-29 需求）：分数明显偏低（0.4~0.72）但相对
+	// 第二名区分度足够（领先 ≥ 0.1）时也算命中——说明虽整体音色不够接近，但明确偏向
+	// 某一位既有说话人而非两人模糊之间，避免这类段被误登记成新声纹。
+	LooseMin = 0.4
+	LooseGap = 0.1
 )
 
 // Matched 判定一次 1:N 检索是否命中既有声纹。
@@ -26,5 +32,8 @@ func Matched(top1, top2, threshold float64) bool {
 	if top1 >= threshold {
 		return true // ① 强命中：只看分数，不要求区分度
 	}
-	return top1 >= SoftMin && top1-top2 >= GapMin // ② 区分性弱命中
+	if top1 >= SoftMin && top1-top2 >= GapMin {
+		return true // ② 区分性弱命中
+	}
+	return top1 >= LooseMin && top1-top2 >= LooseGap // ③ 宽松命中（低分但区分度够）
 }

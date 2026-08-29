@@ -130,8 +130,8 @@ type voiceTopView struct {
 	Basis string       `json:"basis"`           // whole=整段（单人）/ longest=最长段（多人）
 	// Matches 与全库声纹的 top-3 余弦相似（降序；声纹库不足 3 人则更少）
 	Matches []voiceMatch `json:"matches"`
-	// Matched 两级规则（voiceprint.Matched）是否判定命中；Rule 给出命中依据
-	// （strong=强命中过阈值 / gap=区分性弱命中），未命中为空
+	// Matched 三级规则（voiceprint.Matched）是否判定命中；Rule 给出命中依据
+	// （strong=强命中过阈值 / gap=区分性弱命中 / loose=宽松命中），未命中为空
 	Matched bool   `json:"matched"`
 	Rule    string `json:"rule,omitempty"`
 	// SpeakerID/SpeakerName 命中时的说话人（=Matches[0]）
@@ -271,10 +271,13 @@ func (h *QueryHandler) enrichVoiceTops(ctx context.Context, sids []ids.ID) map[i
 		if voiceprint.Matched(ms[0].Similarity, second, threshold) {
 			vt.Matched = true
 			vt.SpeakerID, vt.SpeakerName = ms[0].SpeakerID, ms[0].Name
-			if ms[0].Similarity >= threshold {
+			switch {
+			case ms[0].Similarity >= threshold:
 				vt.Rule = "strong" // 强命中：过阈值
-			} else {
+			case ms[0].Similarity >= voiceprint.SoftMin && ms[0].Similarity-second >= voiceprint.GapMin:
 				vt.Rule = "gap" // 区分性弱命中：≥0.72 且领先第二名 ≥0.06
+			default:
+				vt.Rule = "loose" // 宽松命中：≥0.4 且领先第二名 ≥0.1（2026-08-29）
 			}
 		}
 		out[sid] = vt
