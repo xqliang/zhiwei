@@ -784,3 +784,44 @@ func TestSpeakerReassignAll(t *testing.T) {
 		t.Fatalf("缺 to_speaker_id 应 400，实际 %d", rec3.Code)
 	}
 }
+
+// TestSpeakerDeleteUnbindsPerson 验证删声纹会解绑关联人物（person 是独立实体，仅清 speaker_id 外键）：
+// 此前删声纹只清 transcript_segment.speaker_id，漏了 person.speaker_id，致人物详情仍显示
+// 「已关联声纹 / 换绑」指向已删声纹（用户反馈）。
+func TestSpeakerDeleteUnbindsPerson(t *testing.T) {
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ids.InitForTest(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	speakers := &repo.SpeakerRepo{DB: db}
+	persons := &repo.PersonRepo{DB: db}
+	sp := &repo.Speaker{Name: "说话人xx", Source: "auto"}
+	if err := speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	p := &repo.Person{UserID: 1, DisplayName: "说话人xx", SpeakerID: &sp.ID, Source: "auto"}
+	if err := persons.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+
+	r := chi.NewRouter()
+	RegisterSpeaker(r, &SpeakerHandler{Speakers: speakers, Voiceprint: fakeVoiceprintAPI{}, Persons: persons})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/speakers/"+sp.ID.String(), nil))
+	if rec.Code != 204 {
+		t.Fatalf("delete code %d", rec.Code)
+	}
+
+	// 人物仍在，但 speaker_id 已解绑（nil）
+	got, err := persons.Get(ctx, 1, p.ID)
+	if err != nil {
+		t.Fatalf("人物应仍在: %v", err)
+	}
+	if got.SpeakerID != nil {
+		t.Errorf("删声纹后人物应解绑 speaker_id=nil, got %v", *got.SpeakerID)
+	}
+}

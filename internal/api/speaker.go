@@ -498,6 +498,15 @@ func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = h.Speakers.DB.ExecContext(r.Context(),
 		`UPDATE transcript_segment SET speaker_id = NULL WHERE speaker_id = ?`, id.Int64())
+	// 解绑关联到该声纹的人物（person 是独立实体、不随声纹删除，仅清 speaker_id 外键）——
+	// 否则人物详情仍显示「已关联声纹 / 换绑」，指向一个已不存在的声纹（用户反馈）。
+	// best-effort：Persons 未装配（旧装配/测试）则跳过。
+	if h.Persons != nil {
+		if _, err := h.Persons.DB.ExecContext(r.Context(),
+			`UPDATE person SET speaker_id = NULL WHERE speaker_id = ?`, id.Int64()); err != nil {
+			log.Printf("[speaker] 删说话人后解绑人物失败 speaker=%s: %v", id, err)
+		}
+	}
 	// 删说话人后清其候选：孤儿候选永不外显（说话人已没了）但会在表里累积，顺手清掉。
 	// best-effort，失败仅 log 不阻断删除（与 Rename 清候选一致；候选残留无副作用）。
 	if h.SpeakerNameCandidates != nil {
