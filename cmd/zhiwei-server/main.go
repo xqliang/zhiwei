@@ -269,7 +269,8 @@ func main() {
 	api.RegisterQuery(r, &api.QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,
-		ChangeLogs:            personLogs, // 详情附带该录音触发的 profile 平面变更
+		SpeakerStates:         &repo.SpeakerSessionStateRepo{DB: db}, // 详情附带说话人情绪状态（audioscene stage）
+		ChangeLogs:            personLogs,                            // 详情附带该录音触发的 profile 平面变更
 		SpeakerNameCandidates: nameCandidates,
 		VoiceprintThreshold:   cfg.VoiceprintThreshold, // timeline 列表「整段声纹」两级判定用
 		SpeakerEmbeddings:     speakerEmbeddings,       // 多向量匹配（每人任意样本命中即命中）

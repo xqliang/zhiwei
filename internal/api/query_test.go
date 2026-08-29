@@ -216,6 +216,96 @@ func TestGetSessionSpeakerEnrichment(t *testing.T) {
 	}
 }
 
+// TestGetSessionAcousticFields 验证详情接口返回 audioscene stage 落库的声学环境
+// （transcript 的 4 个环境列）+ 说话人整体情绪状态（speaker_session_state，行级 user_id 过滤）。
+func TestGetSessionAcousticFields(t *testing.T) {
+	_ = ids.InitForTest()
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	jobs := &repo.JobRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	speakerStates := &repo.SpeakerSessionStateRepo{DB: db}
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "scene.wav",
+		StoragePath: "/tmp/scene.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	conf := 0.9
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1",
+			Text: "今天开会", StartMS: 0, EndMS: 1000, Confidence: &conf},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 写会话级声学环境（audioscene stage 用 SetAcoustic 落库）
+	bg := json.RawMessage(`["键盘","空调"]`)
+	if err := transcripts.SetAcoustic(ctx, tr.ID, "室内会议室", &bg, "无", "专注讨论"); err != nil {
+		t.Fatal(err)
+	}
+	// 写说话人整体情绪（user_id=1 与测试登录态一致；另写 user_id=2 一行验证行级过滤）
+	if err := speakerStates.InsertBatch(ctx, []repo.SpeakerSessionState{
+		{UserID: 1, TranscriptID: tr.ID, SessionID: sid, SpeakerLabel: "1",
+			Emotion: "平静", MicroEmotion: "专注", MentalState: "投入", Confidence: 0.85},
+		{UserID: 2, TranscriptID: tr.ID, SessionID: sid, SpeakerLabel: "2",
+			Emotion: "焦虑", Confidence: 0.6},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newAuthedRouter()
+	RegisterQuery(r, &QueryHandler{
+		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
+		SpeakerStates: speakerStates,
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var detail struct {
+		AcousticScene    string          `json:"acoustic_scene"`
+		BackgroundSounds json.RawMessage `json:"background_sounds"`
+		WeatherCues      string          `json:"weather_cues"`
+		OverallMood      string          `json:"overall_mood"`
+		SpeakerStates    []struct {
+			SpeakerLabel string `json:"speaker_label"`
+			Emotion      string `json:"emotion"`
+		} `json:"speaker_states"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if detail.AcousticScene != "室内会议室" {
+		t.Errorf("acoustic_scene=%q, want 室内会议室", detail.AcousticScene)
+	}
+	if detail.WeatherCues != "无" || detail.OverallMood != "专注讨论" {
+		t.Errorf("weather/mood 未返回: %+v", detail)
+	}
+	if len(detail.BackgroundSounds) == 0 || !strings.Contains(string(detail.BackgroundSounds), "键盘") {
+		t.Errorf("background_sounds 未返回: %s", string(detail.BackgroundSounds))
+	}
+	// 行级过滤：登录用户 1 只应看到自己的 1 行（user_id=2 的不返回）
+	if len(detail.SpeakerStates) != 1 {
+		t.Fatalf("speaker_states 应 1 行（行级 user_id 过滤）, got %d: %+v", len(detail.SpeakerStates), detail.SpeakerStates)
+	}
+	if detail.SpeakerStates[0].Emotion != "平静" {
+		t.Errorf("speaker_states[0].emotion=%q, want 平静", detail.SpeakerStates[0].Emotion)
+	}
+}
+
 // TestGetSessionNameCandidates 验证详情接口 speakers[] 富化名字候选：
 // 随机名说话人带倒序候选（张总 0.82 在首、evidence 透传），真名说话人为空数组。
 // speakers[] 由 ListSpeakersForTranscript 按本 transcript 段归属聚合，天然作用域到本会话，
