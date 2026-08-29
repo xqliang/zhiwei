@@ -1217,6 +1217,21 @@
           </template>
           <div v-else class="muted">（无）</div>
         </div>
+        <!-- ===== 深度字段（Task 5）：叙事 / 规律 / 情绪走向 / 场景分布 ===== -->
+        <report-text label="叙事" :text="reportContent.narrative"></report-text>
+        <report-list label="规律" :items="reportContent.patterns || []"></report-list>
+        <!-- 情绪走向：逐点渲染「时段 情绪（valence±） · 微情绪」 -->
+        <div class="report-sec" v-if="reportContent.mood_journey && reportContent.mood_journey.length">
+          <div class="report-sec-title">情绪走向</div>
+          <ul class="report-ul"><li v-for="(m, i) in reportContent.mood_journey" :key="i">
+            {{ m.when }} <b>{{ m.mood }}</b><span v-if="m.valence !== undefined">（{{ m.valence > 0 ? '+' : '' }}{{ m.valence.toFixed(1) }}）</span><span v-if="m.note"> · {{ m.note }}</span>
+          </li></ul>
+        </div>
+        <!-- 场景分布：chip 胶囊（场景 ×次数），复用 chip-ro 只读样式 -->
+        <div class="report-sec" v-if="reportContent.scenes && reportContent.scenes.length">
+          <div class="report-sec-title">场景分布</div>
+          <span v-for="(s, i) in reportContent.scenes" :key="i" class="chip chip-ro" style="margin-left:6px">{{ s.scene }} ×{{ s.count }}</span>
+        </div>
       </template>
 
       <!-- ===== 周报 ===== -->
@@ -1264,6 +1279,14 @@
         </div>
         <report-list label="全局风险" :items="reportContent.risks || []"></report-list>
         <report-list label="下周计划" :items="reportContent.next_week || []"></report-list>
+        <!-- ===== 深度字段（Task 5）：叙事 / 规律 / 场景分布（周报无 mood_journey） ===== -->
+        <report-text label="叙事" :text="reportContent.narrative"></report-text>
+        <report-list label="规律" :items="reportContent.patterns || []"></report-list>
+        <!-- 场景分布：chip 胶囊（场景 ×次数） -->
+        <div class="report-sec" v-if="reportContent.scenes && reportContent.scenes.length">
+          <div class="report-sec-title">场景分布</div>
+          <span v-for="(s, i) in reportContent.scenes" :key="i" class="chip chip-ro" style="margin-left:6px">{{ s.scene }} ×{{ s.count }}</span>
+        </div>
       </template>
       <div class="muted" style="margin-top:14px; font-size:var(--fs-xs)" v-if="reportRow && reportRow.created_at">生成于 {{ fmtTime(reportRow.created_at) }}</div>
     </div>
@@ -2612,6 +2635,6 @@
   </template>
 </div>
 
-<script src="/app/app.7c4745d6.js"></script>
+<script src="/app/app.a7a061c8.js"></script>
 </body>
 </html>

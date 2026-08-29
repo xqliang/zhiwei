@@ -3324,4 +3324,10 @@ app.component('report-list', {
     <div v-else class="muted">（无）</div>
   </div>`,
 });
+// report-text：报告分节单段文本（小标题 + 一段叙事文字；空文本回退「（无）」）。
+// 与 report-list 配套，用于 narrative 这类「单段字符串」深度字段（report-list 只接数组，不适用）。
+app.component('report-text', {
+  props: { label: { type: String, default: '' }, text: { type: String, default: '' } },
+  template: `<div class="report-sec"><div class="report-sec-title">{{ label }}</div><p v-if="text" style="margin:0; line-height:1.7">{{ text }}</p><div v-else class="muted">（无）</div></div>`,
+});
 app.mount('#app');
