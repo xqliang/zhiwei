@@ -92,13 +92,24 @@ func (r *EntityKBRepo) Get(ctx context.Context, userID int64, id ids.ID) (*Entit
 }
 
 // entityInsertSQL 落库语句（ReplaceAuto/CreateManual 共用）。
+// 用 INSERT IGNORE：撞唯一键 uk_entity_kb (user_id, canonical, kind) 时静默跳过而非报错。
+// 语义要点见 ReplaceAuto——与同名 manual 条目冲突时保留 manual（用户显式录入优先）。
 const entityInsertSQL = `
-INSERT INTO entity_kb (id, user_id, canonical, kind, pinyin, metaphone, source, source_ref, enabled, note)
+INSERT IGNORE INTO entity_kb (id, user_id, canonical, kind, pinyin, metaphone, source, source_ref, enabled, note)
 VALUES (:id, :user_id, :canonical, :kind, :pinyin, :metaphone, :source, :source_ref, :enabled, :note)`
 
 // ReplaceAuto 原子重建某用户某 kind 的全部 auto 实体：事务内删旧 auto（该 kind）→ 落新。
 // manual 条目（任何 kind）不动。len(list)==0 也执行删除（来源行已清空时同步清掉残留）。
 // 入参实体的 ID/UserID/Kind/Source/Enabled 在此统一回填；pinyin/metaphone 由调用方（种子层）算好。
+//
+// 两条关键不变量：
+//  1. 与 manual 条目同名时保留 manual：DELETE 只删该 kind 的 auto 行，同名 manual 幸存；
+//     随后 INSERT IGNORE 撞唯一键（user_id, canonical, kind）→ 该 auto 行被静默跳过，
+//     用户显式录入的 manual 优先（source/note 不被覆盖）。批内 canonical 重复也一并去重。
+//  2. auto 条目的禁用状态跨刷新保留：刷新前先收集本 kind 中 enabled=0 的 canonical，
+//     重插时对同名 canonical 回放 enabled=0——用户用 SetEnabled 禁掉的 auto 实体不会被
+//     刷新静默重新启用。注意：删除（Delete）仍是一次性的——auto 删除后下次刷新会回来，
+//     想让某 auto 实体持久不参与纠错请用禁用（SetEnabled false）而非删除。
 func (r *EntityKBRepo) ReplaceAuto(ctx context.Context, userID int64, kind string, list []Entity) error {
 	if !validEntityKind(kind) {
 		return fmt.Errorf("非法实体 kind: %q", kind)
@@ -108,16 +119,35 @@ func (r *EntityKBRepo) ReplaceAuto(ctx context.Context, userID int64, kind strin
 		return err
 	}
 	defer tx.Rollback()
+
+	// 刷新前收集本 kind 中被手动禁用（enabled=0）的 auto canonical，重插时回放禁用态。
+	var disabledNames []string
+	if err := tx.SelectContext(ctx, &disabledNames,
+		`SELECT canonical FROM entity_kb WHERE user_id = ? AND kind = ? AND source = 'auto' AND enabled = 0`,
+		userID, kind); err != nil {
+		return err
+	}
+	disabled := make(map[string]bool, len(disabledNames))
+	for _, n := range disabledNames {
+		disabled[n] = true
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM entity_kb WHERE user_id = ? AND kind = ? AND source = 'auto'`, userID, kind); err != nil {
 		return err
 	}
+	seen := make(map[string]bool, len(list)) // 批内 canonical 去重（种子层去重的兜底）
 	for i := range list {
+		if seen[list[i].Canonical] {
+			continue
+		}
+		seen[list[i].Canonical] = true
 		list[i].ID = ids.New()
 		list[i].UserID = userID
 		list[i].Kind = kind
 		list[i].Source = EntitySourceAuto
-		list[i].Enabled = true // auto 实体默认启用（临时禁用走 SetEnabled，但刷新不覆盖历史 enabled——见 SetEnabled 说明）
+		// 默认启用；若刷新前该 canonical 被手动禁用过，则回放 enabled=0（跨刷新保留禁用态）。
+		list[i].Enabled = !disabled[list[i].Canonical]
 		if _, err := tx.NamedExecContext(ctx, entityInsertSQL, list[i]); err != nil {
 			return err
 		}
@@ -126,6 +156,7 @@ func (r *EntityKBRepo) ReplaceAuto(ctx context.Context, userID int64, kind strin
 }
 
 // CreateManual 设置页手动新增专有名词（kind=custom 或指定 kind）。回填 ID/Source=manual/Enabled=true。
+// 撞唯一键（同名同 kind 已存在）时因 INSERT IGNORE 静默不插入、不报错。
 func (r *EntityKBRepo) CreateManual(ctx context.Context, e *Entity) error {
 	if !validEntityKind(e.Kind) {
 		return fmt.Errorf("非法实体 kind: %q", e.Kind)
@@ -137,12 +168,14 @@ func (r *EntityKBRepo) CreateManual(ctx context.Context, e *Entity) error {
 	return err
 }
 
-// UpdateManual 改手动实体的规范名/备注。只能改 manual 条目；auto 条目（刷新重建）
+// UpdateManual 改手动实体的规范名/备注/匹配键。只能改 manual 条目；auto 条目（刷新重建）
 // 返回 sql.ErrNoRows（RowsAffected=0 判定）。enabled 字段不经此方法（走 SetEnabled）。
-func (r *EntityKBRepo) UpdateManual(ctx context.Context, userID int64, id ids.ID, canonical, note string) error {
+// canonical 变更时调用方（handler 层）须用 entity.NormalizePinyin/NormalizeLatin 重算匹配键
+// （pinyin/metaphone）一并写入，否则召回仍按旧键比对导致改名后失配。
+func (r *EntityKBRepo) UpdateManual(ctx context.Context, userID int64, id ids.ID, canonical, note string, pinyin, metaphone *string) error {
 	res, err := r.DB.ExecContext(ctx,
-		`UPDATE entity_kb SET canonical = ?, note = ? WHERE user_id = ? AND id = ? AND source = 'manual'`,
-		canonical, entityNullStr(note), userID, id.Int64())
+		`UPDATE entity_kb SET canonical = ?, note = ?, pinyin = ?, metaphone = ? WHERE user_id = ? AND id = ? AND source = 'manual'`,
+		canonical, entityNullStr(note), pinyin, metaphone, userID, id.Int64())
 	if err != nil {
 		return err
 	}
@@ -152,7 +185,8 @@ func (r *EntityKBRepo) UpdateManual(ctx context.Context, userID int64, id ids.ID
 	return nil
 }
 
-// SetEnabled 单条启禁（manual/auto 均可——auto 也可临时禁掉不参与纠错，刷新不覆盖 enabled）。
+// SetEnabled 单条启禁（manual/auto 均可）。auto 条目被禁用后，其禁用态会在下次
+// ReplaceAuto 刷新时按 canonical 回放保留（见 ReplaceAuto 不变量 2），不会被静默重启。
 func (r *EntityKBRepo) SetEnabled(ctx context.Context, userID int64, id ids.ID, enabled bool) error {
 	res, err := r.DB.ExecContext(ctx,
 		`UPDATE entity_kb SET enabled = ? WHERE user_id = ? AND id = ?`, enabled, userID, id.Int64())
@@ -165,7 +199,9 @@ func (r *EntityKBRepo) SetEnabled(ctx context.Context, userID int64, id ids.ID, 
 	return nil
 }
 
-// Delete 删除实体（manual 删除后消失；auto 删除后下次刷新会回来——想禁用用 SetEnabled）。
+// Delete 删除实体：manual 删除后永久消失；auto 删除是一次性的——下次 ReplaceAuto 刷新会
+// 把它重新落回（且因删除后无 enabled=0 记录可回放，会以启用态回来）。想让某 auto 实体
+// 持久不参与纠错，用禁用（SetEnabled false）而非删除。
 func (r *EntityKBRepo) Delete(ctx context.Context, userID int64, id ids.ID) error {
 	res, err := r.DB.ExecContext(ctx,
 		`DELETE FROM entity_kb WHERE user_id = ? AND id = ?`, userID, id.Int64())
