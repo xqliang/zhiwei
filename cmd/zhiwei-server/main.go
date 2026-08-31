@@ -492,6 +492,9 @@ func main() {
 			// 技能管理（二期）：安装/启禁/删除都是磁盘操作（skillInst 持根目录），dsh skills 插件热加载。
 			Skills:    agentSkills,
 			SkillInst: skillInst,
+			// 设置页「专有名词」：实体纠错配置 + 手动实体 CRUD（entityKB/entitySettings 于 BuildStages 前构造，此处复用）。
+			EntityKB:       entityKB,
+			EntitySettings: entitySettings,
 		})
 		// 预热 owner(id=1) 的 dsh 边车：启动后后台 spawn + initialize 握手，把 node 启动的一次性
 		// 延迟从「首条消息」挪到启动阶段（best-effort：失败仅记日志，首条消息会自行懒启动）。
