@@ -489,10 +489,13 @@ func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	// 待确认人物的提示（编辑过 / 手动创建的关联人物）。声纹照常删除，
+	// 这些提示随最终成功响应带回前端，由用户确认后再决定人物去留。
+	var cascadePrompts []agent.CascadePrompt
 	// 级联处理关联人物：删声纹前先查它绑定的人物——
 	//   · 未编辑过的 LLM 自动人物 → 随声纹一并软删（status=dismissed），继续删声纹；
-	//   · 手动创建 / 编辑过的人物 → 不自动删，打包成确认提示返回，并**中止本次删除**，
-	//     交由用户确认后再决定人物去留（前端确认后可重发删除或单独处理人物）。
+	//   · 手动创建 / 编辑过的人物 → 不自动删，打包成确认提示——但**不中止**声纹删除，
+	//     声纹照常删，提示随成功响应带回前端，交由用户确认后再决定人物去留。
 	// 仅在 Persons+ChangeLogs 都装配时启用；旧装配（未装 ChangeLogs）退化为下方仅「解绑」。
 	if h.Persons != nil && h.ChangeLogs != nil {
 		person, err := h.Persons.GetBySpeaker(r.Context(), id)
@@ -520,10 +523,9 @@ func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 				writeJSONError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			// 有需要确认的人物 → 中止删除，返回提示（HTTP 200，ok=false 表示未删成功）
+			// 有需要确认的人物 → 不中止声纹删除，记录 prompts 稍后随成功响应返回
 			if len(prompts) > 0 {
-				writeJSON(w, map[string]any{"ok": false, "needs_confirm": true, "prompts": prompts})
-				return
+				cascadePrompts = prompts
 			}
 			// 无提示（人物已被自动 dismiss，或人物为 owner 不处理）→ 继续删声纹
 		}
@@ -556,6 +558,11 @@ func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		if err := h.SpeakerNameCandidates.DeleteBySpeaker(r.Context(), id); err != nil {
 			log.Printf("[speaker] 删说话人后清候选失败 speaker=%s: %v", id, err)
 		}
+	}
+	// 若有待确认的人物（编辑过 / 手动创建），声纹已删成功，把提示带回前端由用户确认。
+	if len(cascadePrompts) > 0 {
+		writeJSON(w, map[string]any{"ok": true, "needs_confirm": true, "prompts": cascadePrompts})
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

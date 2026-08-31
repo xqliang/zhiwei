@@ -828,8 +828,8 @@ func TestSpeakerDeleteUnbindsPerson(t *testing.T) {
 
 // TestDeleteSpeakerCascade 删声纹时级联处理关联人物（Persons+ChangeLogs 都装配才启用）：
 //   ① 关联的是「未编辑过的 LLM 自动人物」→ 随声纹一并软删（status=dismissed），声纹删成功（204）；
-//   ② 关联的是「编辑过 / 手动创建的人物」→ 不自动删，返回确认提示（200, ok=false, prompts 非空），
-//      且中止删除：声纹与人物都保留。
+//   ② 关联的是「编辑过 / 手动创建的人物」→ 声纹照常删除（200, ok=true, prompts 非空），
+//      人物保留，待确认提示随响应带回由前端提示用户。
 func TestDeleteSpeakerCascade(t *testing.T) {
 	db, err := repo.NewDB(repotest.DSN(t))
 	if err != nil {
@@ -877,7 +877,7 @@ func TestDeleteSpeakerCascade(t *testing.T) {
 		t.Fatalf("未编辑 LLM 人物应被级联 dismiss，实际 %+v", got)
 	}
 
-	// ── ② 编辑过的 LLM 人物：返回确认提示 + 中止删除（声纹与人物都保留） ──
+	// ── ② 编辑过的 LLM 人物：声纹照常删除 + 返回待确认提示（人物保留） ──
 	sp2 := &repo.Speaker{Name: "级联测试乙x", Source: "auto"}
 	if err := speakers.Create(ctx, sp2); err != nil {
 		t.Fatal(err)
@@ -912,15 +912,15 @@ func TestDeleteSpeakerCascade(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.OK {
-		t.Fatalf("有确认提示时 ok 应为 false，实际 %+v", out)
+	if !out.OK {
+		t.Fatalf("声纹已删成功时 ok 应为 true，实际 %+v", out)
 	}
 	if len(out.Prompts) != 1 || out.Prompts[0].PersonID != p2.ID.String() {
 		t.Fatalf("应返回 p2 的确认提示，实际 %+v", out.Prompts)
 	}
-	// 中止删除：声纹与人物都应保留
-	if _, err := speakers.Get(ctx, sp2.ID); err != nil {
-		t.Fatalf("有确认提示时应中止删除，声纹应保留: %v", err)
+	// 声纹照常删除；人物保留待用户确认
+	if _, err := speakers.Get(ctx, sp2.ID); err == nil {
+		t.Fatal("声纹应已被删除（不因人物确认而中止）")
 	}
 	if got, _ := persons.Get(ctx, 1, p2.ID); got == nil || got.Status == "dismissed" {
 		t.Fatalf("有确认提示时人物不应被 dismiss，实际 %+v", got)
