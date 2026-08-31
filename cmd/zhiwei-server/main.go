@@ -35,7 +35,7 @@ import (
 // promptPath 是抽取 prompt 的版本化文件路径；版本号 = 去掉扩展名的文件名
 // （如 extraction_v1），运行时从文件名推导并写进 job.trace。
 // v4（2026-08-31）：说话人归属（「思敏 提到…」取代泛称「用户」）+ 当前用户标注
-//（可能旁听/不在场）+ 事件旁听标注——配合 memory.person_id 归属（迁移 000027）。
+//（可能旁听/不在场）+ 事件旁听标注——配合 memory.person_id 归属（迁移 000028）。
 const promptPath = "prompts/extraction_v4.md"
 
 // nameInferPromptPath 说话人名字推断 prompt（speakername stage 用，版本号见文件名）。

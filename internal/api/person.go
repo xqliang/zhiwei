@@ -220,7 +220,7 @@ type personDetailResp struct {
 	Events        []repo.PersonEvent        `json:"events"`
 	Metrics       []metricGroup             `json:"metrics"`
 	Pets          []repo.PersonPet          `json:"pets"`
-	// Memories 归属该人物的最近记忆（「相关记忆」小节；memory.person_id 反查，迁移 000027）。
+	// Memories 归属该人物的最近记忆（「相关记忆」小节；memory.person_id 反查，迁移 000028）。
 	Memories         []repo.MemoryRow `json:"memories,omitempty"`
 	RecentSessionIDs []ids.ID         `json:"recent_session_ids"`
 	PendingCount     int              `json:"pending_count"`

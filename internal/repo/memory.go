@@ -31,7 +31,7 @@ type Memory struct {
 	TranscriptSegmentIDs ids.List   `db:"transcript_segment_ids" json:"transcript_segment_ids"`
 	EventAt              *time.Time `db:"event_at" json:"event_at,omitempty"`
 	Status               string     `db:"status" json:"status"`
-	// PersonID 记忆归属人（2026-08-31，迁移 000027）：录音来源记忆 = 来源段说话人绑定的
+	// PersonID 记忆归属人（2026-08-31，迁移 000028）：录音来源记忆 = 来源段说话人绑定的
 	// person（extract stage 多数投票），「思敏说的话是思敏的记忆」；对话来源/无法归属为 NULL。
 	PersonID *ids.ID `db:"person_id" json:"person_id,omitempty"`
 	// PersonName 归属人显示名（查询时 LEFT JOIN person 富化，非落库列；未 JOIN 的查询恒空）。
