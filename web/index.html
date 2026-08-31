@@ -1688,9 +1688,20 @@
             <span v-if="it.session_id" style="cursor:pointer; text-decoration:underline" @click="jumpToSession(it.session_id)">来源录音</span>
           </div>
         </div>
-        <div style="display:flex; gap:4px; flex-shrink:0">
-          <button class="btn mini" style="background:var(--ok-soft); color:var(--ok); border-color:var(--ok)" :disabled="queueBusyIds[it.kind + '-' + it.id]" @click="confirmPendingItem(it)">✓ 确认</button>
-          <button class="btn mini danger" :disabled="queueBusyIds[it.kind + '-' + it.id]" @click="dismissPendingItem(it)">✕ 放弃</button>
+        <div style="display:flex; gap:4px; flex-shrink:0; align-items:center; flex-wrap:wrap; justify-content:flex-end">
+          <template v-if="it.kind === 'person' && pMergeId === it.person_id">
+            <select class="mini" v-model="pMergeTarget">
+              <option value="" disabled>并入到…</option>
+              <option v-for="o in persons" :key="o.id" :value="o.id">{{ o.display_name }}</option>
+            </select>
+            <button class="btn mini danger" :disabled="!pMergeTarget || pMergeBusy" @click="confirmPersonMerge(it.person_id)">并入</button>
+            <button class="btn mini" @click="cancelPersonMerge()">取消</button>
+          </template>
+          <template v-else>
+            <button v-if="it.kind === 'person'" class="btn mini" @click="startPersonMerge(it.person_id)" title="此名是已有人物的别名？并入后原名成为其别名、已抽取数据转移过去，不再重复建人">并入…</button>
+            <button class="btn mini" style="background:var(--ok-soft); color:var(--ok); border-color:var(--ok)" :disabled="queueBusyIds[it.kind + '-' + it.id]" @click="confirmPendingItem(it)">✓ 确认</button>
+            <button class="btn mini danger" :disabled="queueBusyIds[it.kind + '-' + it.id]" @click="dismissPendingItem(it)">✕ 放弃</button>
+          </template>
         </div>
       </div>
     </div>
@@ -1737,12 +1748,24 @@
         </div>
         <div style="display:flex; gap:6px; align-items:center; flex-shrink:0" @click.stop>
           <span v-if="p.pending_count" class="chip" style="background:var(--warn-soft); color:var(--warn)" title="待确认的属性/关系数">{{ p.pending_count }} 待确认</span>
-          <template v-if="deletingPersonId === p.id">
+          <!-- 作为别名并入（2026-08-31）：源名字成为目标别名、八平面数据全量转移、源标 merged -->
+          <template v-if="pMergeId === p.id">
+            <select class="mini" v-model="pMergeTarget">
+              <option value="" disabled>并入到…</option>
+              <option v-for="o in persons.filter(x => x.id !== p.id)" :key="o.id" :value="o.id">{{ o.display_name }}</option>
+            </select>
+            <button class="btn mini danger" :disabled="!pMergeTarget || pMergeBusy" @click="confirmPersonMerge(p.id)">并入</button>
+            <button class="btn mini" @click="cancelPersonMerge()">取消</button>
+          </template>
+          <template v-else-if="deletingPersonId === p.id">
             <span class="muted">删除？</span>
             <button class="btn mini danger" @click="confirmDeletePerson(p)">确认</button>
             <button class="btn mini" @click="cancelDeletePerson()">取消</button>
           </template>
-          <button v-else class="btn mini" @click="askDeletePerson(p)" title="软删（status=dismissed）+ 六平面级联；可在下方「已删除」区恢复">删除</button>
+          <template v-else>
+            <button class="btn mini" @click="startPersonMerge(p.id)" title="把此人物并入另一人：原名成为其别名，全部画像数据转移过去">并入…</button>
+            <button class="btn mini" @click="askDeletePerson(p)" title="软删（status=dismissed）+ 六平面级联；可在下方「已删除」区恢复">删除</button>
+          </template>
         </div>
       </div>
     </div>

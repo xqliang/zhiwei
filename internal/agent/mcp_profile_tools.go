@@ -164,7 +164,7 @@ func getPersonHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallTo
 		if name == "" {
 			return nil, nil, fmt.Errorf("get_person 需给出 name")
 		}
-		p, err := d.Persons.FindByName(ctx, userID, name)
+		p, err := d.Persons.FindByNameOrAlias(ctx, userID, name) // 别名兜底（2026-08-31）
 		if err != nil {
 			return nil, nil, err
 		}
@@ -402,7 +402,7 @@ func proposeProfileRelationshipHandler(d MCPDeps, userID int64) func(context.Con
 		// 据此在 rationale 里追加「关联到已有人物X / 将新建人物X」提示，帮用户判断确认后果。
 		rationale := strings.TrimSpace(a.Rationale)
 		if relatedName != "" {
-			ex, err := d.Persons.FindByName(ctx, userID, relatedName)
+			ex, err := d.Persons.FindByNameOrAlias(ctx, userID, relatedName) // 别名兜底（2026-08-31）
 			if err != nil {
 				return nil, nil, err
 			}

@@ -1028,12 +1028,14 @@ func (s *Service) personByOwnerRelation(ctx context.Context, tx *sqlx.Tx, userID
 // 名字经 NormalizePersonName 硬校验兜底（prompt「人物名字规则」已要求 LLM 只给单人名，
 // 这里是防「老保一家」类口语粘连的第二道防线）：空名/代词/纯集合名词/超长（>8 rune）
 // → 拒绝新建（返回 0，调用方跳过该事实）。
+// 人物解析含**别名兜底**（FindByNameOrAliasExt，2026-08-31）：提到人物的已确认别名
+//（如「老保」之于解保功）直接归到该人物，不再重复建 pending 新人物。
 func (s *Service) resolveOrCreateByName(ctx context.Context, tx *sqlx.Tx, userID int64, name string, prov Provenance) (ids.ID, error) {
 	name = NormalizePersonName(name)
 	if name == "" {
 		return 0, nil
 	}
-	p, err := s.Persons.FindByNameExt(ctx, tx, userID, name)
+	p, err := s.Persons.FindByNameOrAliasExt(ctx, tx, userID, name)
 	if err != nil {
 		return 0, err
 	}

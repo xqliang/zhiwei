@@ -378,7 +378,8 @@ func (d ProposalDeps) applyInTx(ctx context.Context, tx *sqlx.Tx, p *repo.AgentP
 		}
 		var relID *ids.ID
 		if name := newStr("related_person_name"); name != "" {
-			ex, err := d.Persons.FindByNameExt(ctx, tx, p.UserID, name)
+			// 别名兜底（2026-08-31）：related_person_name 是人物的已确认别名时直接归到该人，不误建
+			ex, err := d.Persons.FindByNameOrAliasExt(ctx, tx, p.UserID, name)
 			if err != nil {
 				return nil, err
 			}

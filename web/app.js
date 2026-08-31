@@ -1486,6 +1486,27 @@ const app = createApp({
       finally { bindingSaving.value = false; }
     }
 
+    // 人物「作为别名并入」（2026-08-31）：LLM 按别名误建的人物收口——源名字成为目标别名、
+    // 八平面数据全量转移到目标、源标 merged。入口两处：名册卡 + 待确认队列的「LLM 自动新建人物」卡。
+    const pMergeId = ref(null);     // 正在执行并入操作的人物 id
+    const pMergeTarget = ref('');   // 选中的目标人物 id
+    const pMergeBusy = ref(false);
+    function startPersonMerge(id) { deletingPersonId.value = null; pMergeId.value = id; pMergeTarget.value = ''; }
+    function cancelPersonMerge() { pMergeId.value = null; pMergeTarget.value = ''; }
+    async function confirmPersonMerge(srcId) {
+      if (!pMergeTarget.value || pMergeBusy.value) return;
+      pMergeBusy.value = true;
+      try {
+        await api('POST', '/api/persons/' + srcId + '/alias-merge', { target_person_id: pMergeTarget.value });
+        const tname = (persons.value.find(x => x.id === pMergeTarget.value) || {}).display_name || '';
+        notify('已并入「' + tname + '」，原名成为其别名');
+        if (personDetail.value && personDetail.value.person.id === srcId) closePersonDetail(); // 源已 merged，详情收起
+        cancelPersonMerge();
+        await loadPersons();
+        await loadPending(); // 被并入者从队列消失；其 pending 项转到目标名下照常确认
+      } catch (e) { showError(e); } finally { pMergeBusy.value = false; }
+    }
+
     // 人物删除（原「归档」，2 步确认；DELETE = status=dismissed 软删，六平面级联 dismiss——
     // 行 dismiss 前状态记 pre_dismiss_status，恢复时可级联回滚，手动删过的行不受影响）
     const deletingPersonId = ref(null);
@@ -3426,7 +3447,7 @@ const app = createApp({
       statusTopicId, topicStatusRow, topicStatusLoading, topicStatusError, topicStatusContent, topicStatusFailed,
       loadTopicStatus, onPickStatusTopic,
       // 人物 / 画像
-      persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, jumpToPerson, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, deletingPersonId, askDeletePerson, cancelDeletePerson, confirmDeletePerson, deletedPersons, deletedCollapsed, loadDeletedPersons, restorePerson,
+      persons, personDetail, showNewPerson, newPerson, newPersonSpeakers, creatingPerson, loadPersons, cancelNewPerson, toggleNewPerson, createPerson, togglePerson, closePersonDetail, jumpToPerson, reloadPersonDetail, renamingPerson, startRenamePerson, commitRenamePerson, pMergeId, pMergeTarget, pMergeBusy, startPersonMerge, cancelPersonMerge, confirmPersonMerge, deletingPersonId, askDeletePerson, cancelDeletePerson, confirmDeletePerson, deletedPersons, deletedCollapsed, loadDeletedPersons, restorePerson,
       bindingSpeaker, bindingSaving, bindableSpeakers, startBindingSpeaker, commitBindingSpeaker,
       jumpToPerson, spPersonEdit, spPersonSaving, unboundPersons, startSpPersonEdit, commitSpPersonEdit,
       epiText, personNameOf,

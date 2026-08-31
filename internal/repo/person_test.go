@@ -227,3 +227,60 @@ func TestPersonRosterExcludesPending(t *testing.T) {
 		t.Error("List 应仍含 pending（确认队列人名映射用）")
 	}
 }
+
+// TestFindByNameOrAliasExt 别名感知解析（2026-08-31）：display_name 命中直返；
+// 否则 active aliases 行唯一 owner 才命中——歧义（「亮哥」两人共有）与 pending 别名不猜不算。
+func TestFindByNameOrAliasExt(t *testing.T) {
+	_ = ids.InitForTest()
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	persons := &PersonRepo{DB: db}
+	attrs := &PersonAttributeRepo{DB: db}
+
+	jbg := &Person{UserID: 1, DisplayName: "解保功", Source: "manual"}
+	_ = persons.Create(ctx, jbg)
+	zl := &Person{UserID: 1, DisplayName: "赵亮", Source: "manual"}
+	_ = persons.Create(ctx, zl)
+	ql := &Person{UserID: 1, DisplayName: "清亮", Source: "manual"}
+	_ = persons.Create(ctx, ql)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM person_attribute WHERE person_id IN (?, ?, ?)`, jbg.ID.Int64(), zl.ID.Int64(), ql.ID.Int64())
+		_, _ = db.ExecContext(ctx, `DELETE FROM person WHERE id IN (?, ?, ?)`, jbg.ID.Int64(), zl.ID.Int64(), ql.ID.Int64())
+	})
+	mkAlias := func(p *Person, val, status string) {
+		_ = attrs.Create(ctx, &PersonAttribute{UserID: 1, PersonID: p.ID, AttrKey: "aliases", ValueText: val, Source: "manual", Status: status})
+	}
+	mkAlias(jbg, "老保", "active")
+	mkAlias(zl, "亮哥", "active")
+	mkAlias(ql, "亮哥", "active") // 歧义：同一别名两人共有
+	mkAlias(ql, "阿亮", "pending") // pending 别名不算数
+
+	cases := []struct {
+		name, q string
+		want    *ids.ID // 期望命中的 person id（nil=不命中）
+	}{
+		{"显示名命中（不查别名）", "解保功", &jbg.ID},
+		{"别名唯一命中", "老保", &jbg.ID},
+		{"无别名不命中", "不存在的人", nil},
+		{"歧义别名不猜", "亮哥", nil},
+		{"pending 别名不算", "阿亮", nil},
+	}
+	for _, c := range cases {
+		p, err := persons.FindByNameOrAlias(ctx, 1, c.q)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if c.want == nil {
+			if p != nil {
+				t.Fatalf("%s: 应不命中，实际 %+v", c.name, p)
+			}
+			continue
+		}
+		if p == nil || p.ID != *c.want {
+			t.Fatalf("%s: 应命中 #%s，实际 %+v", c.name, *c.want, p)
+		}
+	}
+}

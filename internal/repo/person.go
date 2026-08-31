@@ -151,7 +151,7 @@ func (r *PersonRepo) GetBySpeaker(ctx context.Context, speakerID ids.ID) (*Perso
 }
 
 // FindByNameExt 按显示名精确匹配 active/pending 人物（画像归属解析用）；无命中返回 nil。
-// 只查 display_name；别名匹配（aliases 属性）由上层 profile.Service 扩展，P1 先名精确。
+// 只查 display_name；需要别名兜底的调用方用 FindByNameOrAliasExt。
 func (r *PersonRepo) FindByNameExt(ctx context.Context, ext QueryRowxContext, userID int64, name string) (*Person, error) {
 	var p Person
 	err := ext.QueryRowxContext(ctx, `
@@ -167,8 +167,50 @@ ORDER BY is_owner DESC, id LIMIT 1`, userID, name).StructScan(&p)
 	return &p, nil
 }
 
+// FindByNameOrAliasExt 显示名精确 → 别名兜底的人物解析（2026-08-31，补 FindByNameExt
+// 注释里一直欠着的「别名匹配由上层扩展」）。
+// 背景：画像抽取按说话人名/提及名建人物，用户给人物配的别名（person_attribute
+// attr_key='aliases'，一行一个别名）从未参与解析——提到「老保」仍会给已有别名「老保」的
+// 解保功新建 pending 人物。
+// 规则：display_name 命中（FindByNameExt 同语义）直接返回；否则查**active** aliases 行
+// （pending 别名尚未确认不算数），恰好 1 个 owner 才返回该人物——0 个（无别名）或 ≥2 个
+// （歧义：库里「亮哥」同时在赵亮与清亮名下）都返回 nil，不猜。ext 传 tx 即事务内读。
+func (r *PersonRepo) FindByNameOrAliasExt(ctx context.Context, ext QueryRowxContext, userID int64, name string) (*Person, error) {
+	p, err := r.FindByNameExt(ctx, ext, userID, name)
+	if err != nil || p != nil {
+		return p, err // 显示名命中：别名不必再查
+	}
+	var ids []ids.ID
+	// 走 r.DB 而非 ext：别名兜底查询无需行锁/事务可见性（属性表无并发改写场景），
+	// 且 ext 可能是只读语义混用的执行器；保持简单。
+	if err := r.DB.SelectContext(ctx, &ids, `
+SELECT DISTINCT pa.person_id FROM person_attribute pa
+JOIN person p ON p.id = pa.person_id
+WHERE pa.user_id = ? AND pa.attr_key = 'aliases' AND pa.value_text = ?
+  AND pa.status = 'active' AND p.status IN ('active','pending')`, userID, name); err != nil {
+		return nil, err
+	}
+	if len(ids) != 1 {
+		return nil, nil // 无别名（0）或歧义（≥2，如「亮哥」两人共有）：不猜，调用方按未命中处理
+	}
+	var hit Person
+	if err := ext.QueryRowxContext(ctx,
+		`SELECT * FROM person WHERE id = ? LIMIT 1`, ids[0].Int64()).StructScan(&hit); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &hit, nil
+}
+
 func (r *PersonRepo) FindByName(ctx context.Context, userID int64, name string) (*Person, error) {
 	return r.FindByNameExt(ctx, r.DB, userID, name)
+}
+
+// FindByNameOrAlias 是 FindByNameOrAliasExt 的非事务版（agent 工具等无 tx 调用方用）。
+func (r *PersonRepo) FindByNameOrAlias(ctx context.Context, userID int64, name string) (*Person, error) {
+	return r.FindByNameOrAliasExt(ctx, r.DB, userID, name)
 }
 
 // UpdateExt 手动编辑：改名/换绑声纹/改备注（speakerID/summary 传 nil 即清空）。

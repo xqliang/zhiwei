@@ -39,6 +39,7 @@ func RegisterPerson(r chi.Router, h *PersonHandler) {
 	r.Get("/api/persons", h.List)
 	r.Post("/api/persons", h.Create)
 	r.Get("/api/persons/{id}", h.Get)
+	r.Post("/api/persons/{id}/alias-merge", h.AliasMerge) // 「作为别名并入」：源名字成为目标别名+八平面数据转移+源标 merged
 	r.Patch("/api/persons/{id}", h.Patch)
 	r.Delete("/api/persons/{id}", h.Delete)
 
@@ -368,6 +369,48 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 		Person: p, SpeakerName: speakerName, Groups: groups, Relationships: relShown, Events: evShown,
 		Metrics: metricGroups, Pets: petShown, Memories: memRows, RecentSessionIDs: sids, PendingCount: pending,
 	})
+}
+
+// AliasMerge 「作为别名并入」（2026-08-31）：把 {id} 人物并入 body.target_person_id
+// 名下——源名字成为目标别名、八平面数据全量转移、源标 merged。入口：名册卡与确认队列
+// 「LLM 自动新建人物」卡的「并入…」按钮（LLM 按别名误建人物的收口手段）。
+func (h *PersonHandler) AliasMerge(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "id 非法", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		TargetPersonID string `json:"target_person_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	targetID, err := ids.ParseID(req.TargetPersonID)
+	if err != nil || targetID == 0 {
+		http.Error(w, "target_person_id 非法", http.StatusBadRequest)
+		return
+	}
+	if err := h.Service.ManualMergeAsAlias(r.Context(), uid.Int64(), id, targetID); err != nil {
+		switch {
+		case errors.Is(err, profile.ErrNotFound):
+			http.Error(w, "人物不存在", http.StatusNotFound)
+		case errors.Is(err, profile.ErrSamePerson),
+			errors.Is(err, profile.ErrBadMergeTarget),
+			errors.Is(err, profile.ErrOwnerUnmergeable):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (h *PersonHandler) Patch(w http.ResponseWriter, r *http.Request) {

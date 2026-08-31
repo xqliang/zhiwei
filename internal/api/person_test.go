@@ -1354,3 +1354,53 @@ func TestGetPersonMemories(t *testing.T) {
 		t.Fatalf("memories = %+v, want 1 条「思敏想学Rust」且 person_name=思敏", resp.Memories)
 	}
 }
+
+// TestPersonAliasMerge 「作为别名并入」端点（2026-08-31）：并入后目标获得别名行、
+// 源标 merged；同 id 400；目标不存在 404。
+func TestPersonAliasMerge(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+
+	src := &repo.Person{DisplayName: "老保", Source: "llm", Status: "pending"}
+	if err := svc.Persons.Create(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+	tgt := &repo.Person{DisplayName: "解保功", Source: "manual"}
+	if err := svc.Persons.Create(ctx, tgt); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = svc.Persons.DB.ExecContext(ctx, `DELETE FROM person_attribute WHERE person_id = ?`, tgt.ID.Int64())
+		_, _ = svc.Persons.DB.ExecContext(ctx, `DELETE FROM person WHERE id IN (?, ?)`, src.ID.Int64(), tgt.ID.Int64())
+	})
+
+	// 同 id → 400
+	rec := doReq(t, h, "POST", "/api/persons/"+src.ID.String()+"/alias-merge", map[string]string{"target_person_id": src.ID.String()})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("同 id 应 400，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	// 目标不存在 → 404
+	rec = doReq(t, h, "POST", "/api/persons/"+src.ID.String()+"/alias-merge", map[string]string{"target_person_id": "123456"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("目标不存在应 404，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	// 正常并入 → 200
+	rec = doReq(t, h, "POST", "/api/persons/"+src.ID.String()+"/alias-merge", map[string]string{"target_person_id": tgt.ID.String()})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("并入应 200，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	gotSrc, _ := svc.Persons.Get(ctx, 1, src.ID)
+	if gotSrc == nil || gotSrc.Status != "merged" {
+		t.Fatalf("源应标 merged，实际 %+v", gotSrc)
+	}
+	attrs, _ := svc.Attributes.ListByPerson(ctx, tgt.ID)
+	hasAlias := false
+	for _, a := range attrs {
+		if a.AttrKey == "aliases" && a.ValueText == "老保" && a.Status == "active" {
+			hasAlias = true
+		}
+	}
+	if !hasAlias {
+		t.Fatalf("目标应获得 active 别名「老保」，实际 %+v", attrs)
+	}
+}
