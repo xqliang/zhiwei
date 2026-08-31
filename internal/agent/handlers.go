@@ -130,7 +130,7 @@ func (h *AgentHandler) putConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	if err := h.Configs.Upsert(r.Context(), body.Identity, body.Soul); err != nil {
+	if err := h.Configs.Upsert(r.Context(), repo.AgentConfig{Identity: body.Identity, Soul: body.Soul}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

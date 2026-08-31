@@ -8,6 +8,7 @@ import (
 )
 
 // TestAgentConfigRepo 验证人设配置单例：未配置读到空；Upsert 后读回；再 Upsert 为更新（仍单行）。
+// Phase 2 起含搜索列（search_engine/search_api_key）roundtrip：空引擎归一 auto、空 key 存 NULL。
 func TestAgentConfigRepo(t *testing.T) {
 	db, err := NewDB(repotest.DSN(t))
 	if err != nil {
@@ -23,25 +24,34 @@ func TestAgentConfigRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(空): %v", err)
 	}
-	if c.Identity != "" || c.Soul != "" {
+	if c.Identity != "" || c.Soul != "" || c.SearchEngine != "" || c.SearchAPIKey != nil {
 		t.Fatalf("未配置应为空, got %+v", c)
 	}
 
-	if err := r.Upsert(ctx, "我是知微", "温柔简洁不废话"); err != nil {
+	if err := r.Upsert(ctx, AgentConfig{Identity: "我是知微", Soul: "温柔简洁不废话"}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	c, _ = r.Get(ctx)
 	if c.Identity != "我是知微" || c.Soul != "温柔简洁不废话" {
 		t.Fatalf("读回不符: %+v", c)
 	}
+	if c.SearchEngine != "auto" { // 空 engine 归一为 auto（默认免 key 链）
+		t.Fatalf("未给引擎应归一 auto, got %q", c.SearchEngine)
+	}
 
-	// 再 Upsert = 更新（不新增行）。
-	if err := r.Upsert(ctx, "我是知微v2", "毒舌"); err != nil {
+	// 再 Upsert = 更新（不新增行）；搜索列一并写入读回。
+	if err := r.Upsert(ctx, AgentConfig{
+		Identity: "我是知微v2", Soul: "毒舌",
+		SearchEngine: "tavily", SearchAPIKey: strPtr("tvly-test"),
+	}); err != nil {
 		t.Fatalf("Upsert 更新: %v", err)
 	}
 	c, _ = r.Get(ctx)
 	if c.Identity != "我是知微v2" || c.Soul != "毒舌" {
 		t.Fatalf("更新后不符: %+v", c)
+	}
+	if c.SearchEngine != "tavily" || c.SearchKey() != "tvly-test" {
+		t.Fatalf("搜索列读回不符: engine=%q key=%v", c.SearchEngine, c.SearchAPIKey)
 	}
 	var n int
 	if err := db.Get(&n, "SELECT COUNT(*) FROM agent_config"); err != nil {
@@ -51,3 +61,6 @@ func TestAgentConfigRepo(t *testing.T) {
 		t.Fatalf("应恒为单行, got %d", n)
 	}
 }
+
+// strPtr 测试辅助：取字符串指针。
+func strPtr(s string) *string { return &s }
