@@ -28,6 +28,7 @@ import (
 	"zhiwei/internal/repo"
 	"zhiwei/internal/retrieve"
 	"zhiwei/internal/review"
+	"zhiwei/internal/search"
 	"zhiwei/internal/storage"
 	"zhiwei/internal/voiceprint"
 )
@@ -322,9 +323,9 @@ func main() {
 	api.RegisterQuery(r, &api.QueryHandler{
 		Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
 		Memories: memories, Todos: todos, Speakers: speakers,
-		ChangeLogs:            personLogs,                                // 详情附带该录音触发的 profile 平面变更
-		Persons:               persons,                                   // 人物审计行富化现名（timeline「涉及的画像变更」方案 C 标注用）
-		SpeakerStates:         &repo.SpeakerSessionStateRepo{DB: db},      // 详情附带说话人情绪状态（audioscene stage）
+		ChangeLogs:            personLogs,                            // 详情附带该录音触发的 profile 平面变更
+		Persons:               persons,                               // 人物审计行富化现名（timeline「涉及的画像变更」方案 C 标注用）
+		SpeakerStates:         &repo.SpeakerSessionStateRepo{DB: db}, // 详情附带说话人情绪状态（audioscene stage）
 		SpeakerNameCandidates: nameCandidates,
 		VoiceprintThreshold:   cfg.VoiceprintThreshold, // timeline 列表「整段声纹」两级判定用
 		SpeakerEmbeddings:     speakerEmbeddings,       // 多向量匹配（每人任意样本命中即命中）
@@ -386,6 +387,9 @@ func main() {
 			}
 		}()
 	}
+	// 全局 agent 配置（人设 + Phase 2 搜索配置）：提前构造——mcpDeps（web_search 工具）
+	// 与下方 Agent 编排（Persona 注入 / AgentHandler.Configs）共用同一实例。
+	agentConfigs := &repo.AgentConfigRepo{DB: db}
 	// MCP 工具依赖（进程内运行、复用上面已开库的 repo 实例；同一个 DB 池）。
 	mcpDeps := agent.MCPDeps{
 		Memory:     memories,
@@ -401,6 +405,10 @@ func main() {
 		PersonMetrics:    personMetrics,
 		// 语义检索（可选，nil 则 search_memory 走关键词）
 		Retrieve: retriever,
+		// 联网搜索（Phase 2 web_search/web_fetch）：每次工具调用读 agentConfigs 最新配置。
+		Search:  search.NewSearcher(),
+		Fetch:   search.NewFetcher(),
+		Configs: agentConfigs,
 	}
 	// MCP 服务管理（全局）：读基模板 + DB 启用服务 → 生成 cordis.generated.yml（dsh spawn 实际读
 	// 的文件）；配置变更时重生成（给将来新 spawn）+ 对在用运行时 mcp/apply 热插拔（给当前进程）。
@@ -480,7 +488,6 @@ func main() {
 	if cfg.AgentEnabled {
 		agentConvs := &repo.AgentConversationRepo{DB: db}
 		agentMsgs := &repo.AgentMessageRepo{DB: db}
-		agentConfigs := &repo.AgentConfigRepo{DB: db}
 		agentSkills := &repo.AgentSkillRepo{DB: db}
 		// Orchestrator 按 conv.UserID 经 pool.Get 选运行时（2B-B：每用户独立 dsh + MCP token）。
 		// 装配可选的画像上下文头（每轮把 owner 概要 + 关键属性 + 当天日期前置到「发给 dsh 的文本」，
@@ -534,10 +541,10 @@ func main() {
 			SkillInst: skillInst,
 			// 设置页「专有名词」：实体纠错配置 + 手动实体 CRUD + 实时 auto 聚合/禁用
 			// （entityKB/entitySettings/entitySeed/entityDisabled 均于 BuildStages 前构造，此处复用）。
-			EntityKB:         entityKB,
-			EntitySettings:   entitySettings,
-			EntitySeed:       entitySeed,
-			EntityDisabled:   entityDisabled,
+			EntityKB:       entityKB,
+			EntitySettings: entitySettings,
+			EntitySeed:     entitySeed,
+			EntityDisabled: entityDisabled,
 		})
 		// 预热 owner(id=1) 的 dsh 边车：启动后后台 spawn + initialize 握手，把 node 启动的一次性
 		// 延迟从「首条消息」挪到启动阶段（best-effort：失败仅记日志，首条消息会自行懒启动）。
