@@ -292,6 +292,13 @@ type webFetchArgs struct {
 	URL string `json:"url" jsonschema:"要抓取的网页 URL（http/https）"`
 }
 
+// webPageOut 是 web_fetch 的单页结果（与 webResultOut 同为具名输出类型，便于测试复用）。
+type webPageOut struct {
+	URL   string `json:"url"`
+	Title string `json:"title,omitempty"`
+	Text  string `json:"text"`
+}
+
 // webFetchHandler 抓单页正文；Fetch 未装配 → tool-error。
 func webFetchHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, webFetchArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a webFetchArgs) (*mcp.CallToolResult, any, error) {
@@ -302,10 +309,6 @@ func webFetchHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, webF
 		if err != nil {
 			return nil, nil, err
 		}
-		return jsonResult(struct {
-			URL   string `json:"url"`
-			Title string `json:"title,omitempty"`
-			Text  string `json:"text"`
-		}{URL: p.URL, Title: p.Title, Text: p.Text})
+		return jsonResult(webPageOut{URL: p.URL, Title: p.Title, Text: p.Text})
 	}
 }
