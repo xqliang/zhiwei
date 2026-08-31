@@ -19,6 +19,7 @@ import (
 	"zhiwei/internal/api"
 	"zhiwei/internal/auth"
 	"zhiwei/internal/config"
+	"zhiwei/internal/entity"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/memory"
 	"zhiwei/internal/pipeline"
@@ -155,6 +156,18 @@ func main() {
 		log.Fatal("读取名字推断 prompt 失败: ", err)
 	}
 
+	// ASR 实体纠错（correct stage）：拼音/音素召回 + LLM 裁决，只改实体并标记。
+	correctPromptBytes, err := os.ReadFile("prompts/asr_correction_v1.md")
+	if err != nil {
+		log.Fatalf("读 asr_correction_v1.md: %v", err)
+	}
+	entityKB := &repo.EntityKBRepo{DB: db}
+	entitySettings := &repo.EntitySettingsRepo{DB: db}
+	entitySeed := entity.SeedDeps{
+		KB: entityKB, Persons: persons, Attributes: personAttrs, Relationships: personRels,
+		Pets: personPets, Speakers: speakers, Todos: todos, Topics: topics,
+	}
+
 	// 画像抽取 prompt（版本化文件；版本号见文件名）
 	profilePromptBytes, err := os.ReadFile("prompts/profile_extraction_v4.md")
 	if err != nil {
@@ -226,9 +239,24 @@ func main() {
 		NameInferWindowMin:      cfg.NameInferWindowMin,
 		NameInferMaxSegments:    cfg.NameInferMaxSegments,
 		Profile:                 profileSvc,
+		EntityKB:                entityKB,
+		EntitySettings:          entitySettings,
+		EntitySeed:              entitySeed,
+		CorrectPrompt:           string(correctPromptBytes),
+		CorrectPromptVersion:    "asr_correction_v1",
+		CorrectWindow:           cfg.EntityCorrectWindow,
+		CorrectTopK:             cfg.EntityCorrectTopK,
+		CorrectMinSim:           cfg.EntityCorrectMinSim,
+		CorrectMaxLLMCalls:      cfg.EntityCorrectMaxLLM,
 	})
 	// profile stage 按开关追加（ZW_PROFILE_EXTRACT_ENABLED=false 时仅手动+回填端点）
-	stagesList := []string{"asr", "segment", "speaker", "speakername", "extract"}
+	// correct stage 按开关插入 asr 之后（ZW_ENTITY_CORRECT_ENABLED=false 时跳过，
+	// 流水线退化为原 asr→segment 顺序；已在途的 job 不受影响——state 机按 stage 名推进）。
+	stagesList := []string{"asr"}
+	if cfg.EntityCorrectEnabled {
+		stagesList = append(stagesList, "correct")
+	}
+	stagesList = append(stagesList, "segment", "speaker", "speakername", "extract")
 	if cfg.ProfileExtractEnabled {
 		stagesList = append(stagesList, "profile")
 	}
