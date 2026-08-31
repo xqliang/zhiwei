@@ -107,6 +107,8 @@ func (h *AgentHandler) getConfig(w http.ResponseWriter, r *http.Request) {
 		if resp["search_engine"] == "" {
 			resp["search_engine"] = "auto"
 		}
+		// search_api_key 明文回传：设置页需展示/编辑。注意「owner-only」靠部署态单用户保证
+		//（端点只验登录不验 owner）——多用户化时须改为仅 owner 可读或掩码，防 key 泄给其他会话。
 		resp["search_api_key"] = c.SearchKey()
 	}
 	// 当前日期 + 时区：每轮无条件注入（不依赖 owner），动态计算——预览也每次取当前值。
