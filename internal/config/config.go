@@ -50,18 +50,18 @@ type Config struct {
 	EnrollMinDurationMS     int64   // 从转写段音频录入声纹的最小时长（毫秒，默认 3000=3s；WeSpeaker LM 对 >3s 更稳）
 
 	// ---- Agent / Chatbot（P1；设计见 agent-chatbot spec §14）----
-	AgentEnabled      bool   // ZW_AGENT_ENABLED，关掉则不 spawn dsh（报告等仍可用）
-	AgentModel        string // ZW_AGENT_MODEL：Ark 上的 DeepSeek 模型/endpoint id（agent 与报告/抽取共用）
-	AgentSidecarCmd   string // ZW_AGENT_SIDECAR_CMD：dsh 边车启动命令
-	AgentCordisConfig     string // ZW_AGENT_CORDIS_CONFIG：cordis.yml 基模板路径（生成文件的输入，不直接给 dsh 用）
-	AgentCordisGenerated  string // ZW_AGENT_CORDIS_GENERATED：生成的 cordis 配置路径（基模板 + 启用的外部 MCP 块；dsh 实际读它）
-	AgentMCPURL           string // ZW_AGENT_MCP_URL：供 cordis.yml 连回的 MCP-HTTP 地址
-	AgentSkillRoot        string // ZW_AGENT_SKILL_ROOT：技能磁盘根（enabled/ + disabled/ 子目录），dsh 热加载源
-	DSHSessionRoot    string // DSH_SESSION_ROOT：dsh 内部会话日志目录
-	DSHSystemPrompt   string // DSH_SYSTEM_PROMPT：dsh 进程级人设
-	AgentRetrieveTopK int    // ZW_AGENT_RETRIEVE_TOPK：上下文头检索种子条数
-	AgentMaxUsers     int    // ZW_AGENT_MAX_USERS：每用户 dsh 进程池上限（超出按 LRU 关最久未用，默认 8）
-	ReviewDailyCron   string // ZW_REVIEW_DAILY_CRON：日报定时
+	AgentEnabled         bool   // ZW_AGENT_ENABLED，关掉则不 spawn dsh（报告等仍可用）
+	AgentModel           string // ZW_AGENT_MODEL：Ark 上的 DeepSeek 模型/endpoint id（agent 与报告/抽取共用）
+	AgentSidecarCmd      string // ZW_AGENT_SIDECAR_CMD：dsh 边车启动命令
+	AgentCordisConfig    string // ZW_AGENT_CORDIS_CONFIG：cordis.yml 基模板路径（生成文件的输入，不直接给 dsh 用）
+	AgentCordisGenerated string // ZW_AGENT_CORDIS_GENERATED：生成的 cordis 配置路径（基模板 + 启用的外部 MCP 块；dsh 实际读它）
+	AgentMCPURL          string // ZW_AGENT_MCP_URL：供 cordis.yml 连回的 MCP-HTTP 地址
+	AgentSkillRoot       string // ZW_AGENT_SKILL_ROOT：技能磁盘根（enabled/ + disabled/ 子目录），dsh 热加载源
+	DSHSessionRoot       string // DSH_SESSION_ROOT：dsh 内部会话日志目录
+	DSHSystemPrompt      string // DSH_SYSTEM_PROMPT：dsh 进程级人设
+	AgentRetrieveTopK    int    // ZW_AGENT_RETRIEVE_TOPK：上下文头检索种子条数
+	AgentMaxUsers        int    // ZW_AGENT_MAX_USERS：每用户 dsh 进程池上限（超出按 LRU 关最久未用，默认 8）
+	ReviewDailyCron      string // ZW_REVIEW_DAILY_CRON：日报定时
 
 	// ---- 报告漫画（P4）----
 	ComicEnabled bool   // ZW_COMIC_ENABLED：是否启用报告漫画（默认 false）
@@ -154,15 +154,20 @@ func Load() (*Config, error) {
 		EnrollMinDurationMS:     int64(getenvInt("ZW_ENROLL_MIN_DURATION_MS", 3000)),
 
 		// ---- Agent / Chatbot ----
-		AgentEnabled:      getenvBool("ZW_AGENT_ENABLED", true),
-		AgentModel:        getenv("ZW_AGENT_MODEL", ""),
-		AgentSidecarCmd:   getenv("ZW_AGENT_SIDECAR_CMD", "node services/agent-sidecar/node_modules/.bin/dsh-jsonrpc-agent"),
+		AgentEnabled:         getenvBool("ZW_AGENT_ENABLED", true),
+		AgentModel:           getenv("ZW_AGENT_MODEL", ""),
+		AgentSidecarCmd:      getenv("ZW_AGENT_SIDECAR_CMD", "node services/agent-sidecar/node_modules/.bin/dsh-jsonrpc-agent"),
 		AgentCordisConfig:    getenv("ZW_AGENT_CORDIS_CONFIG", "services/agent-sidecar/cordis.agent.yml"),
 		AgentCordisGenerated: getenv("ZW_AGENT_CORDIS_GENERATED", "services/agent-sidecar/cordis.generated.yml"),
 		AgentMCPURL:          getenv("ZW_AGENT_MCP_URL", "http://127.0.0.1:8080/internal/mcp"),
 		AgentSkillRoot:       getenv("ZW_AGENT_SKILL_ROOT", "./data/agent-skills"),
-		DSHSessionRoot:    getenv("DSH_SESSION_ROOT", "./data/dsh-sessions"),
-		DSHSystemPrompt:   getenv("DSH_SYSTEM_PROMPT", "你是知微(zhiwei)个人智能体，基于用户的记忆/时间线/话题/待办用简体中文亲切、简洁地回答；需要时调用工具读取用户数据，不要编造。"),
+		DSHSessionRoot:       getenv("DSH_SESSION_ROOT", "./data/dsh-sessions"),
+		DSHSystemPrompt: getenv("DSH_SYSTEM_PROMPT", `你是知微(zhiwei)，用户的个人助理，用简体中文亲切、简洁地回答。
+请按问题类型分场景处理：
+1) 一般知识、专业术语、名词解释、常识等问题：直接基于你自己的知识回答，不要调用读取用户数据的工具，也不要生硬地关联到用户的记忆或指标。
+2) 只有问题明确关于用户本人（含「我/我的」或涉及其日程/记录/指标/待办等）时，才调用工具读取该用户的数据作答。
+3) 不确定或不懂时：如实说明，不要编造，也不要用用户的数据拼凑答案。
+只有在需要用户本人数据时才调用工具；不要臆测用户没有的记忆或数据。`),
 		AgentRetrieveTopK: getenvInt("ZW_AGENT_RETRIEVE_TOPK", 10),
 		AgentMaxUsers:     getenvInt("ZW_AGENT_MAX_USERS", 8),
 		ReviewDailyCron:   getenv("ZW_REVIEW_DAILY_CRON", "0 22 * * *"),

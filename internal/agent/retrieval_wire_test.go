@@ -98,12 +98,18 @@ func TestOrchestratorSeedsInjection(t *testing.T) {
 	orch := NewOrchestrator(rtFor(fake), convRepo, msgRepo)
 	orch.Ctx = &ProfileContext{Retrieve: r} // 只装 Retrieve（无 Persons → Head 为空，只测种子）
 
-	const raw = "猫应该怎么养"
+	const raw = "我的猫应该怎么养" // 含个人信号「我」→ 命中门控，注入种子
 	if _, err := orch.RunTurn(ctx, conv, raw); err != nil {
 		t.Fatalf("RunTurn: %v", err)
 	}
 	if !strings.Contains(fake.LastText, "布偶猫SEED") || !strings.Contains(fake.LastText, raw) {
 		t.Errorf("发给 dsh 文本应含种子标题+原始问题: %q", fake.LastText)
+	}
+	if !strings.Contains(fake.LastText, "与该问题可能相关的背景记忆") {
+		t.Errorf("种子块应用新措辞: %q", fake.LastText)
+	}
+	if strings.Contains(fake.LastText, "可能相关的我的记忆") {
+		t.Errorf("不应再用旧措辞: %q", fake.LastText)
 	}
 	if fake.LastText == raw {
 		t.Errorf("应前置种子(≠原始): %q", fake.LastText)
@@ -114,5 +120,42 @@ func TestOrchestratorSeedsInjection(t *testing.T) {
 	}
 	if len(msgs) == 0 || msgs[0].Content != raw {
 		t.Errorf("落库 user 消息应为原始文本(不含种子): %+v", msgs)
+	}
+}
+
+// TestSeedsGateSkipsNonPersonal：query 无个人信号（我/咱/自己/本人）时，即使有相关记忆
+// 也不注入种子——常识/名词解释题不再被生硬关联用户数据（Phase 1 门控）。
+func TestSeedsGateSkipsNonPersonal(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convRepo := &repo.AgentConversationRepo{DB: db}
+	msgRepo := &repo.AgentMessageRepo{DB: db}
+	mem := &repo.MemoryRepo{DB: db}
+	ctx := t.Context()
+	_ = seedMem(t, mem, "猫的常见习性GATESEED") // 含「猫」：与 query 同向量，本会被召回
+	r := &retrieve.Retriever{Memories: mem, Embedder: fakeEmbedder{}, TopK: 5}
+	if _, err := r.Backfill(ctx, toolUserID, 500); err != nil {
+		t.Fatal(err)
+	}
+
+	conv := &repo.AgentConversation{Title: "种子门控"}
+	if err := convRepo.Create(ctx, conv); err != nil {
+		t.Fatal(err)
+	}
+	msgData, _ := json.Marshal(map[string]any{"message": map[string]any{"content": []map[string]any{
+		{"type": "text", "text": "好的"},
+	}}})
+	fake := &FakeRuntime{Script: [][]Event{{{Type: EvAssistantMessage, Data: msgData}}}}
+	orch := NewOrchestrator(rtFor(fake), convRepo, msgRepo)
+	orch.Ctx = &ProfileContext{Retrieve: r} // 只装 Retrieve，测门控
+
+	const raw = "猫的常见习性" // 名词/常识问法，无个人信号 → 不注入种子
+	if _, err := orch.RunTurn(ctx, conv, raw); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if strings.Contains(fake.LastText, "背景记忆") || strings.Contains(fake.LastText, "猫的常见习性GATESEED") {
+		t.Errorf("常识题不应注入种子: %q", fake.LastText)
 	}
 }
