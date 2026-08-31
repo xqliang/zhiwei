@@ -82,6 +82,72 @@ func TestSearchMemoryTool(t *testing.T) {
 	}
 }
 
+// TestSearchMemoryToolToleratesStrayID 复现并守护：dsh 模型会在 search_memory 实参里幻觉多发
+// 一个 id（实测 {"query":"划船经历","id":11}）。go-sdk 从结构体推断的 InputSchema 对 struct
+// 固定 additionalProperties:false，多出的 id 曾使整个工具调用在校验层失败
+// （validating "arguments": …unexpected additional properties ["id"]）。本用例走「真 server +
+// 内存 transport + 客户端 CallTool 传原始 JSON」完整链路，断言带 id 的调用不再报错、正常返回。
+func TestSearchMemoryToolToleratesStrayID(t *testing.T) {
+	d := testDeps(t)
+	ctx := t.Context()
+	kw := "幻觉id容错验证词"
+	sid := ids.New()
+	t.Cleanup(func() { _ = d.Memory.DeleteBySessionExt(context.Background(), d.Memory.DB, sid) })
+	ms := []*repo.Memory{{Type: "fact", Title: kw, Content: kw, SessionID: &sid, Status: "active", Confidence: 0.8}}
+	if err := d.Memory.InsertExt(ctx, d.Memory.DB, ms); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewMCPServer(d, toolUserID)
+	ct, st := mcp.NewInMemoryTransports()
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer cs.Close()
+
+	// 原始 JSON 实参里带一个 search_memory 不认识的 id（复现模型幻觉）。
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_memory",
+		Arguments: json.RawMessage(`{"query":"` + kw + `","id":11}`),
+	})
+	if err != nil {
+		t.Fatalf("带 id 的 search_memory 调用应被容忍, 但仍报错: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("带 id 的 search_memory 返回错误结果: %s", firstText(t, res))
+	}
+	var out []memoryOut
+	if err := json.Unmarshal([]byte(firstText(t, res)), &out); err != nil {
+		t.Fatalf("结果非 JSON 数组: %v", err)
+	}
+	var hit bool
+	for _, m := range out {
+		if m.Title == kw {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Errorf("带 id 的 search_memory 未按 query 命中记忆（id 应被忽略）")
+	}
+
+	// 变体：id 为字符串也应放行（模型可能发整数也可能发字符串）。
+	res2, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_memory",
+		Arguments: json.RawMessage(`{"query":"` + kw + `","id":"11"}`),
+	})
+	if err != nil {
+		t.Fatalf("带字符串 id 的 search_memory 也应被容忍: %v", err)
+	}
+	if res2.IsError {
+		t.Fatalf("带字符串 id 的 search_memory 返回错误: %s", firstText(t, res2))
+	}
+}
+
 func TestGetTodosTool(t *testing.T) {
 	d := testDeps(t)
 	ctx := t.Context()

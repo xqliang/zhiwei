@@ -2560,24 +2560,50 @@ const app = createApp({
       // 2) 转义其余全部文本（占位符不含特殊字符，安全穿过）
       text = escapeHtml(text);
       const lines = text.split('\n');
-      let html = '', listType = null, para = [];
+      let html = '', para = [];
       const flushPara = () => { if (para.length) { html += '<p>' + para.join('<br>') + '</p>'; para = []; } };
-      const closeList = () => { if (listType) { html += '</' + listType + '>'; listType = null; } };
+      // 用缩进层级栈跟踪嵌套列表：栈每项 {type:'ul'|'ol', indent}。子列表（缩进更大）必须嵌进
+      // 父 <li> 内部再收尾，父列表才不被拆散——否则每个有序项各自成单项 <ol>、序号全重置为 1。
+      const lst = []; // 当前开着的列表栈（外层在前）
+      const indentOf = (line) => { const m = line.match(/^ */); return m ? m[0].length : 0; };
+      // 关闭全部列表（遇段落/标题/代码块/文末）。
+      const closeAllLists = () => { while (lst.length) { const top = lst.pop(); html += '</li></' + top.type + '>'; } };
       for (const line of lines) {
         const t = line.trim();
-        if (/^\uE000B\d+\uE000$/.test(t)) { flushPara(); closeList(); html += t; continue; } // 独立成行的代码块占位符
+        if (/^\uE000B\d+\uE000$/.test(t)) { flushPara(); closeAllLists(); html += t; continue; } // 独立成行的代码块占位符
         // ATX 标题：行首 1-6 个 # + 空格 → <h1>~<h6>（class=chat-h 控样式），标题文本走行内格式；
         // 结尾可选的收尾 #（如「## 标题 ##」）一并去掉。须放在列表/段落判定之前。
         const hd = t.match(/^(#{1,6})\s+(.*?)\s*#*$/);
-        if (hd) { flushPara(); closeList(); const lv = hd[1].length; html += '<h' + lv + ' class="chat-h">' + inlineMd(hd[2]) + '</h' + lv + '>'; continue; }
-        const ul = line.match(/^\s*[-*+]\s+(.*)$/);
-        const ol = line.match(/^\s*\d+\.\s+(.*)$/);
-        if (ul) { flushPara(); if (listType !== 'ul') { closeList(); html += '<ul>'; listType = 'ul'; } html += '<li>' + inlineMd(ul[1]) + '</li>'; }
-        else if (ol) { flushPara(); if (listType !== 'ol') { closeList(); html += '<ol>'; listType = 'ol'; } html += '<li>' + inlineMd(ol[1]) + '</li>'; }
-        else if (t === '') { flushPara(); }                     // 空行=段落分隔；注意「不断列表」——列表项之间的空行只是排版间距，若在此 closeList 会把一个 <ol>/<ul> 拆成多个单项列表，有序列表序号便全部重置为 1（表现为每项都显示 1.）。列表改由其后首个非列表行（普通段落/标题/代码块/异型列表）或文末统一收尾。
-        else { closeList(); para.push(inlineMd(line)); }         // 真正的非列表、非空行：先收尾可能开着的列表，再并入段落
+        if (hd) { flushPara(); closeAllLists(); const lv = hd[1].length; html += '<h' + lv + ' class="chat-h">' + inlineMd(hd[2]) + '</h' + lv + '>'; continue; }
+        // 无序列表标记：ASCII - * + 之外，兼容 LLM 常用的 Unicode 项目符号 •(2022) ·(00B7) ‧(2027) ∙(2219) ⋅(22C5) －(FF0D)。
+        const ul = line.match(/^\s*[-*+•·‧∙⋅－]\s+(.*)$/);
+        const ol = line.match(/^\s*\d+[.、)]\s+(.*)$/);
+        const ind = indentOf(line);
+        if (ul || ol) {
+          flushPara();
+          const type = ul ? 'ul' : 'ol';
+          const content = (ul || ol)[1];
+          // 先关掉所有「严格更深」的列表（回到更浅或同级）；同级列表不能关，否则从子列表返回时
+          // 父列表被拆散、有序序号重置。每次关列表连带收尾其未闭合的 <li>。
+          while (lst.length && lst[lst.length - 1].indent > ind) { const top = lst.pop(); html += '</li></' + top.type + '>'; }
+          const now = lst[lst.length - 1];
+          if (now && now.indent === ind && now.type === type) {
+            // 同级同类：收尾上一条 <li>，再开新 <li>（父列表保持不变，序号连续）
+            html += '</li><li>' + inlineMd(content);
+          } else if (now && now.indent === ind) {
+            // 同级异型（如 - 项后接 1. 项）：收尾上一条 <li> 并关掉旧列表，再开新列表
+            html += '</li></' + now.type + '><' + type + '><li>' + inlineMd(content);
+            lst.pop(); lst.push({ type, indent: ind });
+          } else {
+            // 更浅（嵌套子列表）或栈空：开新列表，其 <li> 嵌进父 <li> 内部（父 <li> 暂不闭合）
+            html += '<' + type + '><li>' + inlineMd(content);
+            lst.push({ type, indent: ind });
+          }
+        }
+        else if (t === '') { flushPara(); }                     // 空行=段落分隔；注意「不断列表」——列表项之间的空行只是排版间距，若在此收尾会把一个 <ol>/<ul> 拆成多个单项列表，有序列表序号便全部重置为 1（表现为每项都显示 1.）。
+        else { closeAllLists(); para.push(inlineMd(line)); }    // 真正的非列表、非空行：先收尾全部列表，再并入段落
       }
-      flushPara(); closeList();
+      flushPara(); closeAllLists();
       // 3) 回填代码块
       return html.replace(/\uE000B(\d+)\uE000/g, (m, i) => blocks[Number(i)] || '');
     }

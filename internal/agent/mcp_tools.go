@@ -92,6 +92,13 @@ type searchMemoryArgs struct {
 	Query string `json:"query,omitempty" jsonschema:"检索关键词(匹配标题或内容)；留空则按 type 列最近记忆"`
 	Type  string `json:"type,omitempty" jsonschema:"可选记忆类型: event|fact|decision|idea|problem|preference"`
 	Limit int    `json:"limit,omitempty" jsonschema:"最多返回条数, 默认 20, 上限 50"`
+	// ID 兼容字段：dsh 模型偶尔会在 search_memory 实参里幻觉多发一个 id（实测形如
+	// {"query":"划船经历","id":11}，id 可能是整数也可能是字符串）。go-sdk 从结构体推断
+	// InputSchema 时对 struct 固定设 additionalProperties:false（见 google/jsonschema-go
+	// infer.go），不收未知字段会使整个工具调用校验失败（server.go 报
+	// validating "arguments": …unexpected additional properties ["id"]）。声明此 any 字段让
+	// schema 放行且不限类型；handler 忽略它（按 query/type 检索，从不按 id 直取）。
+	ID any `json:"id,omitempty" jsonschema:"忽略此字段（兼容模型误传的记忆 id）；检索始终按 query 进行"`
 }
 
 func searchMemoryHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, searchMemoryArgs) (*mcp.CallToolResult, any, error) {
