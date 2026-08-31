@@ -113,3 +113,23 @@ func TestFetchTruncates(t *testing.T) {
 		t.Errorf("截断应带省略标记: %q", p.Text[:20])
 	}
 }
+
+// TestFetchGBKCharset：Content-Type 标 GBK 的中文页转码到 UTF-8 再提取文本（中文站 GBK 仍常见）。
+func TestFetchGBKCharset(t *testing.T) {
+	// 「你好」的 GBK 字节（双字节编码；硬编码避免测试引入 x/text 依赖）。
+	gbk := []byte{0xC4, 0xE3, 0xBA, 0xC3}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=GBK")
+		_, _ = w.Write([]byte(`<html><head><title>gbk page</title></head><body><p>`))
+		_, _ = w.Write(gbk)
+		_, _ = w.Write([]byte(`</p></body></html>`))
+	}))
+	defer srv.Close()
+	p, err := (&Fetcher{HTTP: testClient()}).Fetch(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.Text, "你好") {
+		t.Errorf("GBK 页应转码出「你好」, got %q", p.Text)
+	}
+}

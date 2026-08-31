@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/net/html"
+	"golang.org/x/net/html/charset"
 )
 
 const (
@@ -56,6 +57,10 @@ var safeDialer = &net.Dialer{
 }
 
 // safeClient 是带 SSRF 安全拨号 + 超时 + 重定向上限的 http.Client（生产用）。
+//
+// 已知取舍：Transport 未设 Proxy 字段（刻意不读 HTTP(S)_PROXY 环境变量）——出网恒为直连。
+// 若走 ProxyFromEnvironment，拨号目标是本机代理（如 127.0.0.1:7890），会被 SSRF 拨号
+// 守卫拒绝，反而全断；故对被墙站点表现为超时而非走代理（如需代理支持属后续需求）。
 func safeClient() *http.Client {
 	return &http.Client{
 		Timeout:   fetchTimeout,
@@ -124,7 +129,14 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Page, error) {
 	if ct != "" && !strings.HasPrefix(ct, "text/html") && !strings.HasPrefix(ct, "text/plain") {
 		return nil, fmt.Errorf("不支持的 Content-Type: %q（仅 text/html、text/plain）", ct)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, fetchMaxBody))
+	// 限读原始字节（2MB）后按 Content-Type / <meta charset> 转码到 UTF-8：中文站 GBK/GB2312
+	// 仍常见，直接按 UTF-8 解会得到乱码。charset.NewReader 对 text/html 嗅探 <meta charset>，
+	// 其余用 Content-Type 的 charset；无标注时回落 UTF-8（透传）。
+	decR, err := charset.NewReader(io.LimitReader(resp.Body, fetchMaxBody), ct)
+	if err != nil {
+		return nil, fmt.Errorf("识别字符集失败: %w", err)
+	}
+	body, err := io.ReadAll(decR)
 	if err != nil {
 		return nil, fmt.Errorf("读取响应体失败: %w", err)
 	}
