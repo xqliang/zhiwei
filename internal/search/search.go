@@ -73,7 +73,7 @@ func (s *Searcher) Search(ctx context.Context, engine, apiKey, query string, lim
 		return nil, fmt.Errorf("query 不能为空")
 	}
 	if limit <= 0 {
-		limit = 5
+		limit = 8 // 默认 8（原 5）：歧义词消歧时结果多样性越高越容易命中真实意图
 	}
 	if limit > 10 {
 		limit = 10

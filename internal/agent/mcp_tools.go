@@ -43,7 +43,9 @@ func registerReadTools(s *mcp.Server, d MCPDeps, userID int64) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "web_search",
 		Description: "联网搜索公开网络信息（搜索引擎）。用于：不确定或可能有时效性的问题、不了解的专业术语/名词、需要外部资料佐证时。" +
-			"返回结果列表(标题/链接/摘要)；要看某条结果详情时配合 web_fetch。与用户个人数据无关的通用问题优先用它查证。",
+			"返回结果列表(标题/链接/摘要)；要看某条结果详情时配合 web_fetch。与用户个人数据无关的通用问题优先用它查证。" +
+			"组词技巧：不要只搜原词——歧义缩写/新词要结合对话语境加领域关键词（如聊智能体时搜「ASL 智能体 安全」而非只搜「ASL」）；" +
+			"若首轮结果与对话语境明显不符，换更具体的关键词（加领域词/疑似全称）再搜 1-2 次，不要硬用不符的结果作答。",
 	}, webSearchHandler(d))
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -259,7 +261,7 @@ type webResultOut struct {
 
 type webSearchArgs struct {
 	Query string `json:"query" jsonschema:"搜索关键词（自然语言或关键词均可）"`
-	Limit int    `json:"limit,omitempty" jsonschema:"最多返回条数, 默认 5, 上限 10"`
+	Limit int    `json:"limit,omitempty" jsonschema:"最多返回条数, 默认 8, 上限 10"`
 }
 
 // webSearchHandler 每次调用读 Configs 最新搜索配置（引擎/API key，设置页热改即生效），
