@@ -35,7 +35,7 @@
 - `internal/search/{search,fetch}_test.go`：离线单测（httptest 服务器 + HTML 夹具）。
 - `internal/agent/mcp_tools.go`：注册 `web_search`、`web_fetch`（`registerReadTools`）。
 - `internal/agent/mcp_handlers.go`（或 MCPDeps 定义处）：`MCPDeps` 增加 `Search *search.Searcher`、`Configs *repo.AgentConfigRepo`。
-- `migrations/000028_agent_search_config.{up,down}.sql`：`agent_config` 加两列。
+- `migrations/000029_agent_search_config.{up,down}.sql`：`agent_config` 加两列。
 - `internal/repo/agent_config.go`：`AgentConfig` 加 `SearchEngine`/`SearchAPIKey`；`Get`/`Upsert` 带上。
 - `internal/agent/handlers.go`：`getConfig`/`putConfig` 透出/接收搜索配置。
 - `internal/config/config.go`：默认 `DSH_SYSTEM_PROMPT` 追加「不确定/时效/外部资料用 web_search/web_fetch 查证，不要编造」。
@@ -63,7 +63,7 @@
 
 ## 6. 数据模型
 
-`migrations/000028_agent_search_config.up.sql`：
+`migrations/000029_agent_search_config.up.sql`：
 ```sql
 -- 联网搜索配置（Phase 2）：与 identity/soul 共用 agent_config 单例行。
 -- search_engine: auto|bing|duckduckgo|tavily（默认 auto=免key链优先）
@@ -73,7 +73,7 @@ ALTER TABLE agent_config
   ADD COLUMN search_api_key  TEXT         NULL;
 ```
 `.down.sql`：`ALTER TABLE agent_config DROP COLUMN search_api_key, DROP COLUMN search_engine;`
-> 注：迁移版本号 000028（main 当前最高 000027 entity_disabled）。up/down 均提供（repotest 的 iofs 源与 `make init-testdb` 都认 down）。
+> 注：迁移版本号 000029（main 当前最高 000027 entity_disabled；因与并行分支的 000028_memory_person 撞号，本分支顺延到 000029）。up/down 均提供（repotest 的 iofs 源与 `make init-testdb` 都认 down）。
 
 `internal/repo/agent_config.go`：`AgentConfig` 加 `SearchEngine string \`db:"search_engine"\``、`SearchAPIKey *string \`db:"search_api_key"\``（key 可空用指针）；`Get`/`Upsert` 读写带上（`Upsert` 扩参或单独 `UpsertSearch`）。
 

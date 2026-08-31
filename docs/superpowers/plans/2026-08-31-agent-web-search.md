@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 给知微加两个常驻 MCP 工具——`web_search`（免 key 引擎链 Bing→DDG + 可选 Tavily）与 `web_fetch`（抓指定 URL 正文，SSRF 防护），配置共用 `agent_config` 表（迁移 000028），设置页可配引擎与 API key，人设补「查证」引导。
+**Goal:** 给知微加两个常驻 MCP 工具——`web_search`（免 key 引擎链 Bing→DDG + 可选 Tavily）与 `web_fetch`（抓指定 URL 正文，SSRF 防护），配置共用 `agent_config` 表（迁移 000029），设置页可配引擎与 API key，人设补「查证」引导。
 
 **Architecture:** 新增 `internal/search` 包（`search.go` 引擎链 + `fetch.go` 抓取，均带 SSRF 安全拨号）；MCP 工具在 `internal/agent/mcp_tools.go` 注册、经 `MCPDeps` 注入 `Search`/`Fetch`/`Configs`（每次调用读最新配置，设置页热改即生效）；`PUT /api/agent/config` 改指针合并语义（未传字段保持原值）；main.go 装配（注意：`agentConfigs` 定义需上移到 mcpDeps 装配之前）；前端设置页加「联网搜索」卡。
 
@@ -15,11 +15,11 @@
 
 ---
 
-### Task 1: 依赖 + 迁移 000028 + agent_config 搜索列（repo 层）
+### Task 1: 依赖 + 迁移 000029 + agent_config 搜索列（repo 层）
 
 **Files:**
 - Modify: `go.mod`/`go.sum`（`go get golang.org/x/net`）
-- Create: `migrations/000028_agent_search_config.up.sql` / `migrations/000028_agent_search_config.down.sql`
+- Create: `migrations/000029_agent_search_config.up.sql` / `migrations/000029_agent_search_config.down.sql`
 - Modify: `internal/repo/agent_config.go`
 - Modify: `internal/repo/agent_config_test.go`
 
@@ -108,7 +108,7 @@ TEST_MYSQL_DSN="zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei_test?parseTime=true&cha
 
 - [ ] **Step 4: 迁移 + repo 实现**
 
-创建 `migrations/000028_agent_search_config.up.sql`：
+创建 `migrations/000029_agent_search_config.up.sql`：
 
 ```sql
 -- 联网搜索配置（Phase 2）：与 identity/soul 共用 agent_config 单例行。
@@ -119,7 +119,7 @@ ALTER TABLE agent_config
   ADD COLUMN search_api_key TEXT        NULL;
 ```
 
-创建 `migrations/000028_agent_search_config.down.sql`：
+创建 `migrations/000029_agent_search_config.down.sql`：
 
 ```sql
 -- 回滚 Phase 2 搜索配置列。
@@ -201,7 +201,7 @@ TEST_MYSQL_DSN="zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei_test?parseTime=true&cha
 - [ ] **Step 6: 提交**
 
 ```bash
-git add go.mod go.sum migrations/000028_agent_search_config.up.sql migrations/000028_agent_search_config.down.sql internal/repo/agent_config.go internal/repo/agent_config_test.go internal/agent/handlers.go
+git add go.mod go.sum migrations/000029_agent_search_config.up.sql migrations/000029_agent_search_config.down.sql internal/repo/agent_config.go internal/repo/agent_config_test.go internal/agent/handlers.go
 git commit -m "feat(repo): agent_config 加搜索列(000028)+Upsert 改收结构体（Phase 2 web_search 配置底座）"
 ```
 
