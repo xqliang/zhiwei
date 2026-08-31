@@ -525,6 +525,10 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 		if h.SpeakerStates != nil {
 			// 行级 user_id 过滤（IDOR 防护）；未装配则不返回该字段
 			states, _ := h.SpeakerStates.ListBySession(r.Context(), uid.Int64(), sid)
+			// 同人去重（2026-08-31）：碎片在场归并后同一真人的多个 ASR 标签解析到同一 speaker，
+			// 情绪行按标签存储会出现「思敏: 平静 / 思敏: 焦虑」多药丸——按人保留主要标签
+			// （发言时长最大）的一行。读侧去重让存量数据无需重跑即恢复单人单药丸。
+			states = repo.DedupStatesBySpeaker(states, repo.LabelDurations(segs))
 			// 解析 speaker_id → 正式名（与 segments 同一套 spMap）：speaker stage 声纹匹配后
 			// speaker_id 已回填，但情绪行只存原始 label（speaker_0…），前端「在场情绪」须显示
 			// 正式名（如「Allen: 困惑」）才能对上下方说话人面板。speaker_id 为空回退「说话人 N」。

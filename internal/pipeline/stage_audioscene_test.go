@@ -259,3 +259,72 @@ func TestParseSilenceBounds(t *testing.T) {
 		t.Errorf("第二段静音 start 异常: %+v", rs[1])
 	}
 }
+
+// TestStageAudioSceneSameSpeakerDedup 同人情绪去重（2026-08-31）：碎片在场归并后两个
+// ASR 标签（1=主 3s / 2=碎片 1s）都归因同一 speaker——audioscene 按**标签**拿到的两行
+// 情绪须折成**每人一行**（保留时长最大标签的读数），否则一个人 N 个情绪药丸。
+func TestStageAudioSceneSameSpeakerDedup(t *testing.T) {
+	requireFFmpeg(t)
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	sessions := &repo.SessionRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	states := &repo.SpeakerSessionStateRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "speech20s.wav",
+		StoragePath: sampleWAVPath, DurationMS: 20000, Status: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	sp1 := &repo.Speaker{UserID: 1, Name: "甲"}
+	_ = speakers.Create(ctx, sp1)
+	conf := 0.9
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "主要发言", StartMS: 0, EndMS: 3000, Confidence: &conf},
+		{TranscriptID: tr.ID, SequenceNo: 2, SpeakerLabel: "2", Text: "碎片", StartMS: 3100, EndMS: 4100, Confidence: &conf},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 两标签归因同一 speaker（碎片在场归并的结果）
+	if err := transcripts.SetSegmentSpeaker(ctx, tr.ID, "1", sp1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.SetSegmentSpeaker(ctx, tr.ID, "2", sp1.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	d := StageDeps{
+		Sessions: sessions, Transcripts: transcripts, SpeakerStates: states, Speakers: speakers,
+		DataDir: t.TempDir(), AudioInsightEnabled: true, AudioInsightChunkSec: 600,
+		AudioInsight: &fakeAI{out: provider.AudioInsight{
+			AcousticScene: "室内", OverallMood: "专注",
+			Speakers: []provider.SpeakerInsight{
+				{Label: "1", Emotion: "平静", Confidence: 0.9},
+				{Label: "2", Emotion: "焦虑", Confidence: 0.6},
+			},
+		}},
+	}
+	if err := stageAudioScene(d)(ctx, nil, sid); err != nil {
+		t.Fatalf("stage 应成功: %v", err)
+	}
+	rows, err := states.ListBySession(ctx, 1, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("同人两标签应折成 1 行，实际 %d: %+v", len(rows), rows)
+	}
+	if rows[0].Emotion != "平静" || rows[0].SpeakerID == nil || *rows[0].SpeakerID != sp1.ID {
+		t.Fatalf("应保留主标签(3s)的「平静」且归因 sp1，实际 %+v", rows[0])
+	}
+}

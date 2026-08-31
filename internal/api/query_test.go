@@ -1472,3 +1472,86 @@ func TestGetSessionCorrectedReasonShort(t *testing.T) {
 		t.Fatalf("short 段 corrected_from 应为空，实际 %q", resp.Segments[0].CorrectedFrom)
 	}
 }
+
+// TestGetSessionSpeakerStateDedupSameSpeaker 同人情绪药丸去重（2026-08-31）：
+// 碎片在场归并后同一真人（Allen）的多个 ASR 标签都解析到同一 speaker——情绪行按标签
+// 存了两行（speaker_0 平静 / speaker_1 焦虑），详情应只返回一人一行：发言时长最大的
+// 标签（speaker_0，5s vs 1s）的「平静」。
+func TestGetSessionSpeakerStateDedupSameSpeaker(t *testing.T) {
+	_ = ids.InitForTest()
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+	speakerStates := &repo.SpeakerSessionStateRepo{DB: db}
+
+	allen := &repo.Speaker{Name: "Allen", Source: "enrolled"}
+	if err := speakers.Create(ctx, allen); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), allen.ID) })
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "dedup.wav",
+		StoragePath: "/tmp/dedup.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	// speaker_0 两段共 5s（主要发言），speaker_1 一段 1s（过度切分碎片）——两标签同一真人
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "speaker_0", Text: "主要发言", StartMS: 0, EndMS: 3000},
+		{TranscriptID: tr.ID, SequenceNo: 2, SpeakerLabel: "speaker_0", Text: "继续发言", StartMS: 3100, EndMS: 5100},
+		{TranscriptID: tr.ID, SequenceNo: 3, SpeakerLabel: "speaker_1", Text: "碎片", StartMS: 5200, EndMS: 6200},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{"speaker_0", "speaker_1"} {
+		if err := transcripts.SetSegmentSpeaker(ctx, tr.ID, label, allen.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 两标签各一行情绪（同人）：应按人去重为 1 行
+	if err := speakerStates.InsertBatch(ctx, []repo.SpeakerSessionState{
+		{UserID: 1, TranscriptID: tr.ID, SessionID: sid, SpeakerLabel: "speaker_0", SpeakerID: &allen.ID,
+			Emotion: "平静", Confidence: 0.9},
+		{UserID: 1, TranscriptID: tr.ID, SessionID: sid, SpeakerLabel: "speaker_1", SpeakerID: &allen.ID,
+			Emotion: "焦虑", Confidence: 0.7},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newAuthedRouter()
+	RegisterQuery(r, &QueryHandler{
+		Sessions: sessions, Transcripts: transcripts, Speakers: speakers,
+		SpeakerStates: speakerStates,
+	})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		SpeakerStates []struct {
+			SpeakerName string `json:"speaker_name"`
+			Emotion     string `json:"emotion"`
+		} `json:"speaker_states"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.SpeakerStates) != 1 {
+		t.Fatalf("同人两行应去重为 1 个药丸，实际 %d: %+v", len(resp.SpeakerStates), resp.SpeakerStates)
+	}
+	if resp.SpeakerStates[0].SpeakerName != "Allen" || resp.SpeakerStates[0].Emotion != "平静" {
+		t.Fatalf("应保留主标签(5s)的「Allen: 平静」，实际 %+v", resp.SpeakerStates[0])
+	}
+}

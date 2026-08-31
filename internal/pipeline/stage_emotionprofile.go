@@ -31,6 +31,17 @@ func stageEmotionProfile(d StageDeps) Handler {
 		if len(states) == 0 {
 			return nil
 		}
+		// 同人去重（2026-08-31）：情绪行按 ASR 标签存储，碎片在场归并后同一真人的多个标签
+		// 解析到同一 speaker——不去重会给一个人一次录音写多个情绪测点（污染情绪平面时序）。
+		// 保留发言时长最大标签的一行；未装配 Transcripts / 段读取失败则退化为不去重
+		//（保持旧行为，不阻断——测试装配与线上降级同路径）。
+		if d.Transcripts != nil {
+			if tr, err := d.Transcripts.GetBySession(ctx, sessionID); err == nil {
+				if segs, serr := d.Transcripts.ListSegments(ctx, tr.ID); serr == nil {
+					states = repo.DedupStatesBySpeaker(states, repo.LabelDurations(segs))
+				}
+			}
+		}
 		for i := range states {
 			st := &states[i]
 			if st.SpeakerID == nil {
