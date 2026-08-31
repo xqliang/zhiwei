@@ -10,7 +10,7 @@
 
 **关键约束（全任务通用）：**
 - 本工作树调试/测试库：`repotest.DSN(t)` 自动隔离到 `zhiwei_test_<pkg>`（`make test-integration` 起容器并设 `TEST_MYSQL_DSN`）；**不要碰共享 `zhiwei` 库**。
-- 迁移号 **000025**（main 已到 000024）。`transcript_segment` 加列必须与 `TranscriptSegment` struct 字段同任务落地（sqlx safe 模式：`SELECT *` 遇到无字段列会扫描报错，拆开会让全库测试红）。
+- 迁移号 **000025**（main 已到 000024）。【落地后重编号为 **000026**：audioscene 分支的 000025_audio_insight 先合入 main，撞号避让】`transcript_segment` 加列必须与 `TranscriptSegment` struct 字段同任务落地（sqlx safe 模式：`SELECT *` 遇到无字段列会扫描报错，拆开会让全库测试红）。
 - 单元测试（无 DB）直接 `go test`；集成测试无 `TEST_MYSQL_DSN` 时自动 skip。
 - 注释用中文、写给新人看（项目惯例）。
 

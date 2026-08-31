@@ -127,8 +127,11 @@ func runCorrectStage(ctx context.Context, d StageDeps, j *repo.Job, sessionID id
 	changed := false
 	for i := range segs {
 		sg := &segs[i]
-		if sg.CorrectedReason != nil && *sg.CorrectedReason == "entity" {
-			continue // 幂等：已纠正段跳过（显式跳过比「召回为空」更省）
+		if (sg.CorrectedReason != nil && *sg.CorrectedReason == "entity") || len(sg.EntityEdits) > 0 {
+			// 幂等：已纠正段跳过。除 corrected_reason=='entity' 外还认 entity_edits 非空——
+			// corrected_reason 是共享列，后续 speaker stage 的 mismatch/short 改判会覆写掉
+			// 'entity'，若只看 reason 会对已纠正文本重复召回+调 LLM（浪费；门控仍防错改）。
+			continue
 		}
 		if strings.TrimSpace(sg.Text) == "" {
 			continue

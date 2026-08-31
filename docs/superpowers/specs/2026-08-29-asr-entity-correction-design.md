@@ -74,10 +74,10 @@ asr → correct → segment → speaker → speakername → extract → [profile
 **best-effort**：stage 出错只 log、不 fail job（沿用 `speakername`），下游 speaker/extract 仍可基于未纠正文本运行。
 **幂等**：二次运行因文本已匹配规范名、召回不到候选而自然不再改动；显式跳过已 `corrected_reason='entity'` 的段亦可（二者取其一，实现时定）。
 
-## 5. 数据模型（迁移 `000025_entity_kb`）
+## 5. 数据模型（迁移 `000026_entity_kb`）
 
-> 迁移号 000025：main 现有最高为 000024（`000022_mcp_server`/`000023_person_change_log_session_idx`/`000024_agent_skill`），
-> 000025 无冲突。本工作树运行用临时库 `zhiwei_asr_entity_correction`。
+> 迁移号 000026（重编号自 000025：spec 撰写时 main 最高为 000024，后续 audioscene 分支以 `000025_audio_insight` 先合入 main，
+> 故本特性重排为 000026——沿用项目「合并前重排迁移号」惯例）。本工作树测试走 `repotest.DSN` 按包隔离库。
 
 ### 5.1 `entity_kb` 表（每用户实体知识库）
 
@@ -223,7 +223,7 @@ ALTER TABLE transcript_segment
 
 ## 15. 落地文件清单（预排）
 
-- `migrations/000025_entity_kb.{up,down}.sql`
+- `migrations/000026_entity_kb.{up,down}.sql`（重编号自 000025，避让 main 的 000025_audio_insight）
 - `internal/repo/entity.go`、`internal/repo/entity_test.go`
 - `internal/repo/transcript.go`（+`ApplyEntityCorrections`）、对应测试
 - `internal/pinyin/` 或复用库：拼音/音素工具 + 召回（`internal/entity/recall.go`）

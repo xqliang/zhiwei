@@ -437,3 +437,34 @@ func TestStageCorrectNoDeps(t *testing.T) {
 		t.Fatalf("开关关闭不应调 LLM，实际 %d 次", len(llm.calls))
 	}
 }
+
+// TestStageCorrectSkipOnEntityEditsOnly 幂等守卫兜底：corrected_reason 被 speaker stage
+// 覆写（mismatch/short）但 entity_edits 仍在的段，重跑 correct 仍跳过（不重复调 LLM）。
+func TestStageCorrectSkipOnEntityEditsOnly(t *testing.T) {
+	fx := setupCorrectFixture(t)
+	ctx := context.Background()
+	// 先正常纠错一次（HappyPath 语义）：seg2 落 entity_edits + reason='entity'。
+	llm := &fakeCorrectLLM{resps: []string{
+		fmt.Sprintf(`{"edits":[{"orig":"常梦瑜","corrected":"张梦瑜","entity_id":"%s","confidence":0.95}]}`, fx.ent.ID.String()),
+	}}
+	d := newCorrectDeps(fx, llm)
+	if err := runCorrectStage(ctx, d, &repo.Job{}, fx.sid); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟 speaker stage 后续改判覆写共享列（entity_edits 不被清除）。
+	if _, err := fx.db.ExecContext(ctx,
+		`UPDATE transcript_segment SET corrected_reason='mismatch' WHERE transcript_id = ? AND sequence_no = 2`, fx.tr.ID.Int64()); err != nil {
+		t.Fatal(err)
+	}
+	// 重跑：seg2 仍被跳过（entity_edits 非空），无任何新 LLM 调用。
+	if err := runCorrectStage(ctx, d, &repo.Job{}, fx.sid); err != nil {
+		t.Fatal(err)
+	}
+	if len(llm.calls) != 1 {
+		t.Fatalf("reason 被覆写但 entity_edits 仍在时应跳过不重复调 LLM，实际 %d 次", len(llm.calls))
+	}
+	seg2 := getSeg(t, fx.transcripts, fx.tr.ID, 2)
+	if seg2.Text != "张梦瑜你看到我的邮件了吗" {
+		t.Fatalf("文本不应被二次改动: %q", seg2.Text)
+	}
+}

@@ -2,6 +2,7 @@ package entity
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"zhiwei/internal/repo"
@@ -25,7 +26,8 @@ type SeedDeps struct {
 // RefreshAuto 重建用户 auto 实体：对 kinds 里每个 kind，收集当前来源行的名字
 // → ReplaceAuto（事务内删旧 auto 该 kind + 落新，带拼音/音素键；manual 条目与
 // 禁用态由 ReplaceAuto 内部保留）。
-// 任一 kind 刷新失败即返回错误——调用方（correct stage）吞错降级用库内旧实体继续。
+// 来源读错或 ReplaceAuto 写错都返回错误——调用方（correct stage）吞错降级用库内
+// 旧实体继续（不能吞掉读错拿空列表落库，那会清空该 kind）。
 func RefreshAuto(ctx context.Context, d SeedDeps, userID int64, kinds []string) error {
 	if d.KB == nil {
 		return nil
@@ -34,41 +36,50 @@ func RefreshAuto(ctx context.Context, d SeedDeps, userID int64, kinds []string) 
 	for _, k := range kinds {
 		enabled[k] = true
 	}
+	// 来源读错误一律**传播**（返回 error）：调用方（correct stage）吞错降级用库内旧实体
+	// 继续纠错。若这里吞掉读错再拿空列表 ReplaceAuto，会把该 kind 的 auto 实体整体
+	// 清空——一次瞬时 DB 抖动就静默丢掉该类白名单（旧库总比空库好）。
 	// person 聚合：display_name + 别名(aliases) + 称呼(relationship.label)；同一轮遍历
 	// 顺带收集 current_projects（归 project kind，少查一遍属性表）。
 	if enabled[repo.EntityKindPerson] && d.Persons != nil {
 		var persons, projects []repo.Entity
-		if ps, err := d.Persons.List(ctx, userID); err == nil {
-			for _, p := range ps {
-				// person.List 返回非 dismissed（active|pending|merged）；只收 active/pending，
-				// merged 是已并入他人的旧行，其名不再单独作为纠错目标。
-				if p.Status != "active" && p.Status != "pending" {
-					continue
+		ps, err := d.Persons.List(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("读 person 名册: %w", err)
+		}
+		for _, p := range ps {
+			// person.List 返回非 dismissed（active|pending|merged）；只收 active/pending，
+			// merged 是已并入他人的旧行，其名不再单独作为纠错目标。
+			if p.Status != "active" && p.Status != "pending" {
+				continue
+			}
+			addSeedEntity(&persons, p.DisplayName, repo.EntityKindPerson, "person:"+p.ID.String())
+			if d.Attributes != nil {
+				attrs, err := d.Attributes.ListByPerson(ctx, p.ID)
+				if err != nil {
+					return fmt.Errorf("读 person 属性(person=%s): %w", p.ID, err)
 				}
-				addSeedEntity(&persons, p.DisplayName, repo.EntityKindPerson, "person:"+p.ID.String())
-				if d.Attributes != nil {
-					if attrs, err := d.Attributes.ListByPerson(ctx, p.ID); err == nil {
-						for _, a := range attrs {
-							if a.Status != "active" || a.ValueText == "" {
-								continue
-							}
-							switch a.AttrKey {
-							case "aliases":
-								addSeedEntity(&persons, a.ValueText, repo.EntityKindPerson, "person_attr:"+a.ID.String())
-							case "current_projects":
-								addSeedEntity(&projects, a.ValueText, repo.EntityKindProject, "person_attr:"+a.ID.String())
-							}
-						}
+				for _, a := range attrs {
+					if a.Status != "active" || a.ValueText == "" {
+						continue
+					}
+					switch a.AttrKey {
+					case "aliases":
+						addSeedEntity(&persons, a.ValueText, repo.EntityKindPerson, "person_attr:"+a.ID.String())
+					case "current_projects":
+						addSeedEntity(&projects, a.ValueText, repo.EntityKindProject, "person_attr:"+a.ID.String())
 					}
 				}
-				if d.Relationships != nil {
-					if rels, err := d.Relationships.ListByPerson(ctx, p.ID); err == nil {
-						for _, rel := range rels {
-							// ListByPerson 返回全状态，只收 active 的自由称呼（张总等）。
-							if rel.Status == "active" && rel.Label != nil && *rel.Label != "" {
-								addSeedEntity(&persons, *rel.Label, repo.EntityKindPerson, "person_rel:"+rel.ID.String())
-							}
-						}
+			}
+			if d.Relationships != nil {
+				rels, err := d.Relationships.ListByPerson(ctx, p.ID)
+				if err != nil {
+					return fmt.Errorf("读 person 关系(person=%s): %w", p.ID, err)
+				}
+				for _, rel := range rels {
+					// ListByPerson 返回全状态，只收 active 的自由称呼（张总等）。
+					if rel.Status == "active" && rel.Label != nil && *rel.Label != "" {
+						addSeedEntity(&persons, *rel.Label, repo.EntityKindPerson, "person_rel:"+rel.ID.String())
 					}
 				}
 			}
@@ -87,17 +98,21 @@ func RefreshAuto(ctx context.Context, d SeedDeps, userID int64, kinds []string) 
 	} else if enabled[repo.EntityKindProject] && d.Persons != nil && d.Attributes != nil {
 		// person 关了但 project 开着：单独跑一遍属性收集（少见配置，简单实现）。
 		var projects []repo.Entity
-		if ps, err := d.Persons.List(ctx, userID); err == nil {
-			for _, p := range ps {
-				if p.Status != "active" && p.Status != "pending" {
-					continue
-				}
-				if attrs, err := d.Attributes.ListByPerson(ctx, p.ID); err == nil {
-					for _, a := range attrs {
-						if a.Status == "active" && a.AttrKey == "current_projects" && a.ValueText != "" {
-							addSeedEntity(&projects, a.ValueText, repo.EntityKindProject, "person_attr:"+a.ID.String())
-						}
-					}
+		ps, err := d.Persons.List(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("读 person 名册: %w", err)
+		}
+		for _, p := range ps {
+			if p.Status != "active" && p.Status != "pending" {
+				continue
+			}
+			attrs, err := d.Attributes.ListByPerson(ctx, p.ID)
+			if err != nil {
+				return fmt.Errorf("读 person 属性(person=%s): %w", p.ID, err)
+			}
+			for _, a := range attrs {
+				if a.Status == "active" && a.AttrKey == "current_projects" && a.ValueText != "" {
+					addSeedEntity(&projects, a.ValueText, repo.EntityKindProject, "person_attr:"+a.ID.String())
 				}
 			}
 		}
@@ -108,18 +123,22 @@ func RefreshAuto(ctx context.Context, d SeedDeps, userID int64, kinds []string) 
 	// pet：name + nickname（按用户的人物遍历；pet 表挂在 person 下）。
 	if enabled[repo.EntityKindPet] && d.Pets != nil && d.Persons != nil {
 		var list []repo.Entity
-		if ps, err := d.Persons.List(ctx, userID); err == nil {
-			for _, p := range ps {
-				if petList, err := d.Pets.ListByPerson(ctx, p.ID); err == nil {
-					for _, pet := range petList {
-						if pet.Status != "active" {
-							continue
-						}
-						addSeedEntity(&list, pet.Name, repo.EntityKindPet, "pet:"+pet.ID.String())
-						if pet.Nickname != nil && *pet.Nickname != "" {
-							addSeedEntity(&list, *pet.Nickname, repo.EntityKindPet, "pet:"+pet.ID.String())
-						}
-					}
+		ps, err := d.Persons.List(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("读 person 名册: %w", err)
+		}
+		for _, p := range ps {
+			petList, err := d.Pets.ListByPerson(ctx, p.ID)
+			if err != nil {
+				return fmt.Errorf("读 person 宠物(person=%s): %w", p.ID, err)
+			}
+			for _, pet := range petList {
+				if pet.Status != "active" {
+					continue
+				}
+				addSeedEntity(&list, pet.Name, repo.EntityKindPet, "pet:"+pet.ID.String())
+				if pet.Nickname != nil && *pet.Nickname != "" {
+					addSeedEntity(&list, *pet.Nickname, repo.EntityKindPet, "pet:"+pet.ID.String())
 				}
 			}
 		}
@@ -130,13 +149,15 @@ func RefreshAuto(ctx context.Context, d SeedDeps, userID int64, kinds []string) 
 	// speaker：全量名册非随机名（「说话人xxxxx」是自动登记占位名，无纠错价值）。
 	if enabled[repo.EntityKindSpeaker] && d.Speakers != nil {
 		var list []repo.Entity
-		if sps, err := d.Speakers.List(ctx); err == nil {
-			for _, sp := range sps {
-				if isAutoSpeakerName(sp.Name) {
-					continue
-				}
-				addSeedEntity(&list, sp.Name, repo.EntityKindSpeaker, "speaker:"+sp.ID.String())
+		sps, err := d.Speakers.List(ctx)
+		if err != nil {
+			return fmt.Errorf("读说话人名册: %w", err)
+		}
+		for _, sp := range sps {
+			if isAutoSpeakerName(sp.Name) {
+				continue
 			}
+			addSeedEntity(&list, sp.Name, repo.EntityKindSpeaker, "speaker:"+sp.ID.String())
 		}
 		if err := d.KB.ReplaceAuto(ctx, userID, repo.EntityKindSpeaker, dedupeSeed(list)); err != nil {
 			return err
@@ -145,10 +166,12 @@ func RefreshAuto(ctx context.Context, d SeedDeps, userID int64, kinds []string) 
 	// task：未关闭 todo 标题。
 	if enabled[repo.EntityKindTask] && d.Todos != nil {
 		var list []repo.Entity
-		if titles, err := d.Todos.ListOpenTitles(ctx, userID); err == nil {
-			for _, t := range titles {
-				addSeedEntity(&list, t, repo.EntityKindTask, "")
-			}
+		titles, err := d.Todos.ListOpenTitles(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("读未关闭待办: %w", err)
+		}
+		for _, t := range titles {
+			addSeedEntity(&list, t, repo.EntityKindTask, "")
 		}
 		if err := d.KB.ReplaceAuto(ctx, userID, repo.EntityKindTask, dedupeSeed(list)); err != nil {
 			return err
@@ -157,10 +180,12 @@ func RefreshAuto(ctx context.Context, d SeedDeps, userID int64, kinds []string) 
 	// topic：active 话题名。
 	if enabled[repo.EntityKindTopic] && d.Topics != nil {
 		var list []repo.Entity
-		if ts, err := d.Topics.ListActive(ctx, userID, 500); err == nil {
-			for _, tp := range ts {
-				addSeedEntity(&list, tp.Name, repo.EntityKindTopic, "topic:"+tp.ID.String())
-			}
+		ts, err := d.Topics.ListActive(ctx, userID, 500)
+		if err != nil {
+			return fmt.Errorf("读话题: %w", err)
+		}
+		for _, tp := range ts {
+			addSeedEntity(&list, tp.Name, repo.EntityKindTopic, "topic:"+tp.ID.String())
 		}
 		if err := d.KB.ReplaceAuto(ctx, userID, repo.EntityKindTopic, dedupeSeed(list)); err != nil {
 			return err
