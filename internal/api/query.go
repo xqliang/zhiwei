@@ -372,8 +372,12 @@ type segmentView struct {
 	CorrectedFrom     string `json:"corrected_from,omitempty"`
 	CorrectedFromName string `json:"corrected_from_name,omitempty"`
 	// CorrectedReason 非空=该段被自动纠正；'phantom'=幽灵历史声纹改判(配 CorrectedFrom)；
-	// 'short'=过短噪声段并入最近在场说话人(CorrectedFrom 为空)。前端据此渲染徽章 + tooltip。
+	// 'short'=过短噪声段并入最近在场说话人(CorrectedFrom 为空)；'entity'=实体纠错(配 EntityEdits)。
+	// 前端据此渲染徽章 + tooltip。
 	CorrectedReason string `json:"corrected_reason,omitempty"`
+	// EntityEdits 实体纠错明细（correct stage 落库的 JSON 原样透传，corrected_reason='entity'
+	// 时非空）：[{orig, corrected, canonical, confidence}]，前端渲染「原文(删除线)→纠正后」对照。
+	EntityEdits json.RawMessage `json:"entity_edits,omitempty"`
 }
 
 func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
@@ -449,6 +453,10 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 			}
 			if sg.CorrectedReason != nil {
 				views[i].CorrectedReason = *sg.CorrectedReason
+			}
+			// 实体纠错明细原样透传（DB JSON 列 → 前端对照展示；非 entity 纠错段为空）。
+			if len(sg.EntityEdits) > 0 {
+				views[i].EntityEdits = json.RawMessage(sg.EntityEdits)
 			}
 			// 段级声纹 top-3（含归属者）：speaker stage 落库的逐段向量 vs 全库余弦
 			if len(lib) > 0 && len(sg.Embedding) > 0 {
