@@ -70,6 +70,43 @@ func TestAgentConfigAPI(t *testing.T) {
 	if !strings.Contains(out.DatetimeHead, "今天是 ") || !strings.Contains(out.DatetimeHead, "UTC") {
 		t.Errorf("应返回当前日期+时区头 datetime_head: %q", out.DatetimeHead)
 	}
+
+	// Phase 2：只 PUT 搜索字段（指针合并——未传的 identity/soul 必须保持原值）。
+	putSearch := httptest.NewRequest("PUT", "/api/agent/config",
+		strings.NewReader(`{"search_engine":"tavily","search_api_key":"tvly-test"}`))
+	putSearchRec := httptest.NewRecorder()
+	r.ServeHTTP(putSearchRec, putSearch)
+	if putSearchRec.Code != http.StatusOK {
+		t.Fatalf("PUT search code=%d body=%s", putSearchRec.Code, putSearchRec.Body.String())
+	}
+	getRec2 := httptest.NewRecorder()
+	r.ServeHTTP(getRec2, httptest.NewRequest("GET", "/api/agent/config", nil))
+	if getRec2.Code != http.StatusOK {
+		t.Fatalf("GET2 code=%d", getRec2.Code)
+	}
+	var out2 struct {
+		Identity     string `json:"identity"`
+		Soul         string `json:"soul"`
+		SearchEngine string `json:"search_engine"`
+		SearchAPIKey string `json:"search_api_key"`
+	}
+	if err := json.Unmarshal(getRec2.Body.Bytes(), &out2); err != nil {
+		t.Fatalf("resp2 解析: %v", err)
+	}
+	if out2.Identity != "我是知微API" || out2.Soul != "简洁API" {
+		t.Errorf("指针合并：未传的 identity/soul 应保持原值: %+v", out2)
+	}
+	if out2.SearchEngine != "tavily" || out2.SearchAPIKey != "tvly-test" {
+		t.Errorf("搜索字段应已保存: %+v", out2)
+	}
+
+	// 非法引擎 → 400。
+	badRec := httptest.NewRecorder()
+	r.ServeHTTP(badRec, httptest.NewRequest("PUT", "/api/agent/config",
+		strings.NewReader(`{"search_engine":"nope"}`)))
+	if badRec.Code != http.StatusBadRequest {
+		t.Errorf("非法引擎应 400, got %d", badRec.Code)
+	}
 }
 
 func TestPostMessageEndToEndFake(t *testing.T) {

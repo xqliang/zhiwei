@@ -167,7 +167,8 @@ func Load() (*Config, error) {
 1) 一般知识、专业术语、名词解释、常识等问题：直接基于你自己的知识回答，不要调用读取用户数据的工具，也不要生硬地关联到用户的记忆或指标。
 2) 只有问题明确关于用户本人（含「我/我的」或涉及其日程/记录/指标/待办等）时，才调用工具读取该用户的数据作答。
 3) 不确定或不懂时：如实说明，不要编造，也不要用用户的数据拼凑答案。
-只有在需要用户本人数据时才调用工具；不要臆测用户没有的记忆或数据。`),
+只有在需要用户本人数据时才调用工具；不要臆测用户没有的记忆或数据。
+遇到不确定、有时效性、或需要最新外部资料的问题时，先用 web_search 联网搜索、必要时用 web_fetch 阅读具体网页，再作答；查不到就如实说明。`),
 		AgentRetrieveTopK: getenvInt("ZW_AGENT_RETRIEVE_TOPK", 10),
 		AgentMaxUsers:     getenvInt("ZW_AGENT_MAX_USERS", 8),
 		ReviewDailyCron:   getenv("ZW_REVIEW_DAILY_CRON", "0 22 * * *"),
