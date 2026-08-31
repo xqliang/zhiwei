@@ -86,6 +86,13 @@ type Config struct {
 	ProfileExtractEnabled bool    // ZW_PROFILE_EXTRACT_ENABLED：是否启用 profile 流水线阶段（默认 true）
 	ProfileExtractWindow  int     // ZW_PROFILE_EXTRACT_WINDOW：抽取窗口大小（对话块数，默认 10）
 
+	// ---- correct stage（ASR 实体纠错）----
+	EntityCorrectEnabled bool    // ZW_ENTITY_CORRECT_ENABLED：是否启用 correct stage（默认 true）
+	EntityCorrectWindow  int     // ZW_ENTITY_CORRECT_WINDOW：LLM 上下文前后段数（默认 2）
+	EntityCorrectTopK    int     // ZW_ENTITY_CORRECT_TOPK：召回 Top-K（默认 5）
+	EntityCorrectMinSim  float64 // ZW_ENTITY_CORRECT_MIN_SIM：召回相似度下限 [0,1]（默认 0.6）
+	EntityCorrectMaxLLM  int     // ZW_ENTITY_CORRECT_MAX_LLM：逐段 LLM 调用的会话级上限（默认 500）
+
 	// ---- 多用户鉴权（阶段1：cookie+session）----
 	OwnerPassword  string // ZW_OWNER_PASSWORD：首启引导 owner(id=1) 口令（其 password_hash 空时用它设置）
 	CookieSecure   bool   // ZW_COOKIE_SECURE：session cookie 是否 Secure（默认 true；本地 http 调试可设 false）
@@ -183,6 +190,13 @@ func Load() (*Config, error) {
 		ProfileAutoConfidence: getenvFloat("ZW_PROFILE_AUTO_CONFIDENCE", 0.75),
 		ProfileExtractEnabled: getenvBool("ZW_PROFILE_EXTRACT_ENABLED", true),
 		ProfileExtractWindow:  getenvInt("ZW_PROFILE_EXTRACT_WINDOW", 10),
+
+		// ---- correct stage（ASR 实体纠错）----
+		EntityCorrectEnabled: getenvBool("ZW_ENTITY_CORRECT_ENABLED", true),
+		EntityCorrectWindow:  getenvInt("ZW_ENTITY_CORRECT_WINDOW", 2),
+		EntityCorrectTopK:    getenvInt("ZW_ENTITY_CORRECT_TOPK", 5),
+		EntityCorrectMinSim:  getenvFloat("ZW_ENTITY_CORRECT_MIN_SIM", 0.6),
+		EntityCorrectMaxLLM:  getenvInt("ZW_ENTITY_CORRECT_MAX_LLM", 500),
 
 		// ---- 多用户鉴权（阶段1）----
 		OwnerPassword:  os.Getenv("ZW_OWNER_PASSWORD"),

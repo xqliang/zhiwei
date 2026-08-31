@@ -19,18 +19,20 @@ type AgentHandler struct {
 	Orch          *Orchestrator
 	Conversations *repo.AgentConversationRepo
 	Messages      *repo.AgentMessageRepo
-	Configs       *repo.AgentConfigRepo // 人设配置（identity/soul，全局单份）；nil 时人设端点返回空/不可写
-	SystemPrompt  string                // 进程级 system prompt（DSH_SYSTEM_PROMPT/persona，只读展示用）
-	Ctx           *ProfileContext       // 与 orchestrator 同一份：getConfig 据此算 owner 画像头（动态注入预览）
-	Hub           *turnHub              // 每会话轮次广播器（nil 时由 RegisterAgent 惰性初始化）
+	Configs       *repo.AgentConfigRepo                                            // 人设配置（identity/soul，全局单份）；nil 时人设端点返回空/不可写
+	SystemPrompt  string                                                           // 进程级 system prompt（DSH_SYSTEM_PROMPT/persona，只读展示用）
+	Ctx           *ProfileContext                                                  // 与 orchestrator 同一份：getConfig 据此算 owner 画像头（动态注入预览）
+	Hub           *turnHub                                                         // 每会话轮次广播器（nil 时由 RegisterAgent 惰性初始化）
 	Gen           func(ctx context.Context, uid int64, cid ids.ID) (string, error) // 手动生成标题（nil 时端点 503）
 	// MCPServers 全局 MCP 服务清单（设置页管理）；nil 时 MCP 端点返回 503（管理面未装配的降级）。
 	MCPServers *repo.MCPServerRepo
 	// OnMCPChange 在任一 MCP 写操作成功后调用一次（重生成 cordis + 对在用运行时热插拔下发）；
 	// nil 时只落库不生效（下次进程重启才读新配置）。
-	OnMCPChange func(ctx context.Context)
-	Skills      *repo.AgentSkillRepo // 已装技能元数据；nil 时技能端点 503
-	SkillInst   *SkillInstaller      // 安装器（tarball/搜索代理 + 磁盘根）；nil 时技能端点 503
+	OnMCPChange    func(ctx context.Context)
+	Skills         *repo.AgentSkillRepo     // 已装技能元数据；nil 时技能端点 503
+	SkillInst      *SkillInstaller          // 安装器（tarball/搜索代理 + 磁盘根）；nil 时技能端点 503
+	EntityKB       *repo.EntityKBRepo       // 实体知识库（设置页「专有名词」）；nil 时实体端点 503
+	EntitySettings *repo.EntitySettingsRepo // 实体纠错配置；nil 时 503
 }
 
 // RegisterAgent 挂载 /api/agent 路由。
@@ -38,8 +40,8 @@ func RegisterAgent(r chi.Router, h *AgentHandler) {
 	if h.Hub == nil {
 		h.Hub = newTurnHub() // 生产/测试都经此入口，main.go 用结构体字面量构造无需感知内部 hub 类型
 	}
-	r.Get("/api/agent/config", h.getConfig)   // 查看人设（identity/soul + 组装预览）
-	r.Put("/api/agent/config", h.putConfig)   // 保存人设（每轮注入，下一条消息即时生效，不重启 dsh）
+	r.Get("/api/agent/config", h.getConfig) // 查看人设（identity/soul + 组装预览）
+	r.Put("/api/agent/config", h.putConfig) // 保存人设（每轮注入，下一条消息即时生效，不重启 dsh）
 	r.Post("/api/agent/conversations", h.createConversation)
 	r.Get("/api/agent/conversations", h.listConversations)
 	r.Get("/api/agent/conversations/{cid}", h.getConversation)
@@ -57,8 +59,9 @@ func RegisterAgent(r chi.Router, h *AgentHandler) {
 	r.Get("/api/agent/skills/search", h.searchSkills)      // skills.sh 搜索代理（在 /{id} 前注册）
 	r.Post("/api/agent/skills/install", h.installSkill)    // 安装（owner/repo/skill）
 	r.Get("/api/agent/skills/{id}", h.getSkill)
-	r.Patch("/api/agent/skills/{id}", h.patchSkill)  // 启禁（目录 rename 热生效）
+	r.Patch("/api/agent/skills/{id}", h.patchSkill) // 启禁（目录 rename 热生效）
 	r.Delete("/api/agent/skills/{id}", h.deleteSkill)
+	registerEntityRoutes(r, h) // 专有名词：纠错配置 + 手动实体 CRUD（设置页）
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

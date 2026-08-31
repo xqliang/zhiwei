@@ -663,7 +663,7 @@
                    可用段首下拉换人或说话人 chip 的 ⇄ 批量切换。存量会话无逐段向量则不显示；
                    「已修改」徽章贴在本行末尾（声纹自动纠正标记：幽灵历史声纹改判 或 过短噪声段并入），无相似度数据时单独成行。 -->
               <div v-if="(sg.voice_matches||[]).length || sg.corrected_reason || sg.corrected_from" class="muted" style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
-                   :title="(sg.voice_matches||[]).length ? '该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错' : (sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'))">
+                   :title="(sg.voice_matches||[]).length ? '该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错' : ((sg.entity_edits||[]).length ? '实体纠错：专有名词已按实体库自动纠正（对照见下方删除线）' : (sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）')))">
                 <template v-if="(sg.voice_matches||[]).length">
                   <span>时长 {{ (segDurMs(sg)/1000).toFixed(2) }} s ·</span>
                   <span>声纹 ≈</span>
@@ -674,7 +674,15 @@
                   </span>
                 </template>
                 <span v-if="sg.corrected_reason || sg.corrected_from" class="corrected-badge"
-                      :title="sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）')">已修改</span>
+                      :title="(sg.entity_edits||[]).length ? '实体纠错：专有名词已按实体库自动纠正（对照见下方删除线）' : (sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'))">已修改</span>
+                <!-- 实体纠错对照：原文(删除线) → 纠正后（corrected_reason='entity' 才有 entity_edits） -->
+                <template v-if="(sg.entity_edits||[]).length">
+                  <span v-for="(ed, ei) in sg.entity_edits" :key="ei"
+                        :title="'纠错依据：' + (ed.reason || '发音相近') + '（置信度 ' + (ed.confidence || 0).toFixed(2) + '）'"
+                        style="margin-left:4px">
+                    <s style="opacity:.55">{{ ed.orig }}</s> → <b>{{ ed.corrected }}</b>
+                  </span>
+                </template>
               </div>
             </div>
           </div>
@@ -1060,6 +1068,49 @@
         <div class="muted" style="font-size:var(--fs-xs); font-weight:700; text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px">整体 PROMPT 组装（只读，看全貌）</div>
         <pre class="chat-code">{{ agentCfgFullPrompt }}</pre>
       </div>
+    </div>
+
+    <!-- ============ 专有名词（ASR 实体纠错：设置阈值/开关 + 实体库增删启禁） ============ -->
+    <!-- ASR 常把人名/花名/项目代号听错；开启后转写中发音相近片段按实体库自动纠正，纠正处在时间线标注原文对照。
+         自动实体每次录音刷新收录（删除后下次回来，想持久停用请禁用）；手动实体可自由增删。 -->
+    <div class="card">
+      <h2 style="margin:0 0 4px">专有名词</h2>
+      <div class="muted" style="font-size:var(--fs-sm); margin-bottom:16px">
+        ASR 常把人名/花名/项目代号听错。开启后，转写中发音相近的片段会按下方实体库自动纠正，纠正处会在时间线里标注原文对照。
+      </div>
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px; flex-wrap:wrap">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:600">
+          <input type="checkbox" v-model="entCfg.correction_enabled"> 实体纠错
+        </label>
+        <label style="display:flex; align-items:center; gap:4px; font-size:var(--fs-sm)" title="低于该置信度的纠正建议不落地">
+          置信度阈值
+          <input class="txt" type="number" v-model.number="entCfg.confidence_threshold" min="0" max="1" step="0.05" style="width:72px">
+        </label>
+        <button class="btn primary" @click="saveEntitySettings" :disabled="entSaving">{{ entSaving ? '保存中…' : '保存设置' }}</button>
+      </div>
+      <div class="muted" style="font-size:var(--fs-xs); margin-bottom:12px">
+        自动收录（每次录音时刷新）：
+        <span v-for="(n, k) in entCfg.counts_by_kind" :key="k" style="margin-right:10px">{{ entKindLabels[k] || k }} {{ n }}</span>
+        <span v-if="!Object.keys(entCfg.counts_by_kind||{}).length">（暂无）</span>
+      </div>
+
+      <!-- 手动补充 -->
+      <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap">
+        <input class="txt" v-model="entNewCanonical" placeholder="补充专有名词（内部代号/产品别名等）" style="flex:1; min-width:200px" @keyup.enter="addEntity">
+        <input class="txt" v-model="entNewNote" placeholder="备注（可选）" style="width:140px">
+        <button class="btn primary" @click="addEntity">添加</button>
+      </div>
+
+      <!-- 实体列表（auto+manual，含禁用行） -->
+      <div v-for="e in entList" :key="e.id"
+           style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid var(--border,#eee)">
+        <span :class="{ muted: !e.enabled }" :style="e.enabled ? 'font-weight:600' : 'text-decoration:line-through'">{{ e.canonical }}</span>
+        <span class="muted" style="font-size:var(--fs-xs)">{{ entKindLabels[e.kind] || e.kind }} · {{ e.source === 'manual' ? '手动' : '自动' }}<template v-if="e.note"> · {{ e.note }}</template></span>
+        <span style="flex:1"></span>
+        <button class="btn" style="padding:4px 10px; font-size:var(--fs-xs)" @click="toggleEntity(e)" :title="e.enabled ? '禁用（不参与纠错，刷新保留）' : '启用'">{{ e.enabled ? '禁用' : '启用' }}</button>
+        <button class="btn" style="padding:4px 10px; font-size:var(--fs-xs)" @click="removeEntity(e)" :title="e.source === 'manual' ? '删除' : '自动实体删除后下次刷新会回来，想持久停用请禁用'">删除</button>
+      </div>
+      <div v-if="!entList.length" class="muted" style="font-size:var(--fs-xs); padding:6px 0">实体库为空——录一段音频后自动收录，或在上方手动补充。</div>
     </div>
 
     <!-- ============ MCP 服务（全局管理：手动添加/启禁/删除，保存即时生效） ============ -->
@@ -2647,6 +2698,6 @@
   </template>
 </div>
 
-<script src="/app/app.f32dad44.js"></script>
+<script src="/app/app.08ef9fa9.js"></script>
 </body>
 </html>

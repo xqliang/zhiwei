@@ -3002,6 +3002,59 @@ const app = createApp({
       finally { agentCfgSaving.value = false; }
     }
 
+    // ---------- 设置：专有名词（实体纠错；/api/agent/entity-settings + /api/agent/entities） ----------
+    // 后端契约见各函数注释；实体 kind → 中文标签。
+    const entCfg = ref({ correction_enabled: true, confidence_threshold: 0.8, auto_sources: [], counts_by_kind: {} });
+    const entSaving = ref(false);
+    const entList = ref([]);           // 全部实体（auto+manual，含禁用行，设置页分组展示）
+    const entNewCanonical = ref('');   // 手动新增输入
+    const entNewNote = ref('');
+    const entKindLabels = { person: '人物', pet: '宠物', project: '项目', task: '待办', topic: '话题', speaker: '说话人', custom: '自定义' };
+    // GET /api/agent/entity-settings → {correction_enabled, confidence_threshold, auto_sources, counts_by_kind}
+    // GET /api/agent/entities → {entities:[{id,canonical,kind,pinyin,metaphone,source,source_ref,enabled,note,...}]}
+    async function loadEntities() {
+      try {
+        const [st, list] = await Promise.all([api('GET', '/api/agent/entity-settings'), api('GET', '/api/agent/entities')]);
+        entCfg.value = Object.assign(entCfg.value, st, { counts_by_kind: st.counts_by_kind || {} });
+        entList.value = (list && list.entities) || [];
+      } catch (e) { showError(e); }
+    }
+    // PUT /api/agent/entity-settings（指针合并；未传字段保持原值）→ 保存后重载实体库计数
+    async function saveEntitySettings() {
+      if (entSaving.value) return;
+      entSaving.value = true;
+      try {
+        await api('PUT', '/api/agent/entity-settings', {
+          correction_enabled: entCfg.value.correction_enabled,
+          confidence_threshold: entCfg.value.confidence_threshold,
+          auto_sources: entCfg.value.auto_sources,
+        });
+        await loadEntities();
+        notify('专有名词设置已保存', 2000);
+      } catch (e) { showError(e); }
+      finally { entSaving.value = false; }
+    }
+    // POST /api/agent/entities（服务端计算发音键；重复/超长 → 400）
+    async function addEntity() {
+      const name = (entNewCanonical.value || '').trim();
+      if (!name) return;
+      try {
+        await api('POST', '/api/agent/entities', { canonical: name, kind: 'custom', note: (entNewNote.value || '').trim() });
+        entNewCanonical.value = ''; entNewNote.value = '';
+        await loadEntities();
+      } catch (e) { showError(e); }
+    }
+    // PATCH /api/agent/entities/{id} {enabled}（任意来源均可启禁）
+    async function toggleEntity(e) {
+      try { await api('PATCH', '/api/agent/entities/' + e.id, { enabled: !e.enabled }); await loadEntities(); }
+      catch (err) { showError(err); }
+    }
+    // DELETE /api/agent/entities/{id} → 204（自动实体删除后下次刷新会回来，想持久停用请禁用）
+    async function removeEntity(e) {
+      try { await api('DELETE', '/api/agent/entities/' + e.id); await loadEntities(); }
+      catch (err) { showError(err); }
+    }
+
     // ---------- 设置：MCP 服务（全局，手动管理；增删启禁经 /api/agent/mcp，保存后即时生效） ----------
     // 后端契约：GET /api/agent/mcp → {servers:[{id,server_key,display_name,transport,url,command,args,enabled,builtin}]}；
     // POST {server_key,display_name,transport,url|command+args,enabled}；PATCH /{id} {enabled}；DELETE /{id}。
@@ -3246,7 +3299,7 @@ const app = createApp({
       // 问知微 tab：拉会话列表；若已有选中会话，重拉历史 + 重连 WS（切回时恢复现场）。
       if (name === 'agent') { loadAgentConversations(); if (agentConvId.value) { const cid = agentConvId.value; loadAgentHistory(cid); openAgentWS(cid); } }
       // 设置 tab：拉当前人设（identity/soul）到表单。
-      if (name === 'settings') { loadAgentConfig(); loadMCP(); loadSkills(); }
+      if (name === 'settings') { loadAgentConfig(); loadEntities(); loadMCP(); loadSkills(); }
       // 报告 tab：拉主题列表（话题状态选择器数据源）+ 按当前日报/周报类型加载报告。
       if (name === 'reports') { loadTopics(); loadReport(); }
       // 人物 tab：进入时复位详情/删除确认态，拉名册 + 已删除列表 + 确认队列（跨平面 pending 并集，独立刷新）+ 属性目录（受控输入元数据，懒加载缓存）。
@@ -3301,6 +3354,7 @@ const app = createApp({
       agentTurns, turnRunning, agentThinkingGap, turnDuration, fmtDur, isTurnOpen, toggleTurn, streamDraft,
       loadAgentConversations, newAgentConversation, selectAgentConversation, startEditConv, cancelEditConv, saveAgentTitle, askDeleteConv, cancelDeleteConv, deleteAgentConversation, sendAgentMessage, stopAgentMessage,
       agentCfgIdentity, agentCfgSoul, agentCfgSaving, agentCfgSaved, agentCfgPreview, agentCfgSystemPrompt, agentCfgOwnerHead, agentCfgFullPrompt, loadAgentConfig, saveAgentConfig,
+      entCfg, entSaving, entList, entNewCanonical, entNewNote, entKindLabels, loadEntities, saveEntitySettings, addEntity, toggleEntity, removeEntity,
       mcpServers, mcpForm, mcpErr, loadMCP, addMCP, toggleMCP, deleteMCP,
       agentSkills, skillSearchQ, skillResults, skillSearching, skillManual, skillErr, skillView, loadSkills, searchSkills, installSkill, toggleSkill, deleteSkill,
       confirmProposal, dismissProposal,

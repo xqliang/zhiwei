@@ -19,6 +19,7 @@ import (
 	"zhiwei/internal/api"
 	"zhiwei/internal/auth"
 	"zhiwei/internal/config"
+	"zhiwei/internal/entity"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/memory"
 	"zhiwei/internal/pipeline"
@@ -155,6 +156,18 @@ func main() {
 		log.Fatal("读取名字推断 prompt 失败: ", err)
 	}
 
+	// ASR 实体纠错（correct stage）：拼音/音素召回 + LLM 裁决，只改实体并标记。
+	correctPromptBytes, err := os.ReadFile("prompts/asr_correction_v1.md")
+	if err != nil {
+		log.Fatalf("读 asr_correction_v1.md: %v", err)
+	}
+	entityKB := &repo.EntityKBRepo{DB: db}
+	entitySettings := &repo.EntitySettingsRepo{DB: db}
+	entitySeed := entity.SeedDeps{
+		KB: entityKB, Persons: persons, Attributes: personAttrs, Relationships: personRels,
+		Pets: personPets, Speakers: speakers, Todos: todos, Topics: topics,
+	}
+
 	// 画像抽取 prompt（版本化文件；版本号见文件名）
 	profilePromptBytes, err := os.ReadFile("prompts/profile_extraction_v4.md")
 	if err != nil {
@@ -251,6 +264,17 @@ func main() {
 		NameInferWindowMin:      cfg.NameInferWindowMin,
 		NameInferMaxSegments:    cfg.NameInferMaxSegments,
 		Profile:                 profileSvc,
+		// ---- correct stage（ASR 实体纠错）----
+		EntityKB:             entityKB,
+		EntitySettings:       entitySettings,
+		EntitySeed:           entitySeed,
+		CorrectPrompt:        string(correctPromptBytes),
+		CorrectPromptVersion: "asr_correction_v1",
+		CorrectEnabled:       cfg.EntityCorrectEnabled,
+		CorrectWindow:        cfg.EntityCorrectWindow,
+		CorrectTopK:          cfg.EntityCorrectTopK,
+		CorrectMinSim:        cfg.EntityCorrectMinSim,
+		CorrectMaxLLMCalls:   cfg.EntityCorrectMaxLLM,
 		// ---- audioscene stage（P1 音频场景与情绪）----
 		SpeakerStates:        &repo.SpeakerSessionStateRepo{DB: db},
 		AudioInsight:         audioInsight,
@@ -262,7 +286,11 @@ func main() {
 		EmotionProfileEnabled: cfg.EmotionProfileEnabled,
 	})
 	// profile stage 按开关追加（ZW_PROFILE_EXTRACT_ENABLED=false 时仅手动+回填端点）
-	stagesList := []string{"asr", "segment", "speaker", "speakername", "audioscene", "emotionprofile", "extract"}
+	// correct stage 常驻 stagesList、开关在 stage 内部生效（CorrectEnabled=false → no-op）：
+	// 它是**中段** stage，若按开关从列表移除，恰停在该 stage 的在途 job 会在
+	// Flow.Next 找不到后继而直接判完成，静默跳过 segment/speaker/extract（末段
+	// profile 无此问题）。常驻+内部 no-op 让开关随时翻转、在途 job 无损。
+	stagesList := []string{"asr", "correct", "segment", "speaker", "speakername", "audioscene", "emotionprofile", "extract"}
 	if cfg.ProfileExtractEnabled {
 		stagesList = append(stagesList, "profile")
 	}
@@ -501,6 +529,9 @@ func main() {
 			// 技能管理（二期）：安装/启禁/删除都是磁盘操作（skillInst 持根目录），dsh skills 插件热加载。
 			Skills:    agentSkills,
 			SkillInst: skillInst,
+			// 设置页「专有名词」：实体纠错配置 + 手动实体 CRUD（entityKB/entitySettings 于 BuildStages 前构造，此处复用）。
+			EntityKB:       entityKB,
+			EntitySettings: entitySettings,
 		})
 		// 预热 owner(id=1) 的 dsh 边车：启动后后台 spawn + initialize 握手，把 node 启动的一次性
 		// 延迟从「首条消息」挪到启动阶段（best-effort：失败仅记日志，首条消息会自行懒启动）。
