@@ -38,6 +38,10 @@ func TestAgentConfigRepo(t *testing.T) {
 	if c.SearchEngine != "auto" { // 空 engine 归一为 auto（默认免 key 链）
 		t.Fatalf("未给引擎应归一 auto, got %q", c.SearchEngine)
 	}
+	// 空 key 存 NULL，持久化行的 NULL → *string 扫描路径读回 nil（SearchKey 免判空取空串）。
+	if c.SearchAPIKey != nil || c.SearchKey() != "" {
+		t.Fatalf("空 key 应存 NULL 读回 nil, got %v", c.SearchAPIKey)
+	}
 
 	// 再 Upsert = 更新（不新增行）；搜索列一并写入读回。
 	if err := r.Upsert(ctx, AgentConfig{
