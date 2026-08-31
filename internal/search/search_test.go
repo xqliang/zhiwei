@@ -18,12 +18,22 @@ func fakeSERP(t *testing.T, key string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/bing":
+			// 简中市场参数（mkt/setlang）缺失 → 400，锁定中文结果优先的引擎层修复。
+			if r.URL.Query().Get("mkt") != "zh-CN" || r.URL.Query().Get("setlang") != "zh-CN" {
+				w.WriteHeader(400)
+				return
+			}
 			w.Header().Set("Content-Type", "text/html")
 			fmt.Fprint(w, `<html><body><ol><li class="b_algo"><h2><a href="https://ex.com/a">结果甲</a></h2><div class="b_caption"><p>摘要甲</p></div></li><li class="b_algo"><h2><a href="https://ex.com/b">结果乙</a></h2><p>摘要乙</p></li></ol></body></html>`)
 		case "/empty":
 			w.Header().Set("Content-Type", "text/html")
 			fmt.Fprint(w, `<html><body><p>没有结果</p></body></html>`)
 		case "/ddg":
+			// DDG 区域参数 kl=cn-zh（中国·简中）缺失 → 400。
+			if r.URL.Query().Get("kl") != "cn-zh" {
+				w.WriteHeader(400)
+				return
+			}
 			w.Header().Set("Content-Type", "text/html")
 			fmt.Fprint(w, `<html><body><table>
 <tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fex.com%2Fddg&amp;rut=abc" class="result-link">DDG结果</a></td></tr>

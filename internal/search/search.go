@@ -43,10 +43,12 @@ type Searcher struct {
 }
 
 // NewSearcher 构造生产用搜索器（复用 SSRF 安全 client）。
+// Bing 用 cn.bing.com：www.bing.com 会按出口 IP/UA 漂移市场（实测漂成繁中/日文/英文结果），
+// cn 域 + mkt/setlang=zh-CN 双保险锁定简中市场；DDG 用 kl=cn-zh 区域参数（在 ddg() 里拼）。
 func NewSearcher() *Searcher {
 	return &Searcher{
 		HTTP:      safeClient(),
-		BingURL:   "https://www.bing.com/search",
+		BingURL:   "https://cn.bing.com/search",
 		DDGURL:    "https://lite.duckduckgo.com/lite/",
 		TavilyURL: "https://api.tavily.com/search",
 	}
@@ -101,7 +103,8 @@ func (s *Searcher) Search(ctx context.Context, engine, apiKey, query string, lim
 
 // bing 抓 Bing 网页版 SERP：解析 <li class="b_algo">，h2>a 取标题+链接，其后首个 p 取摘要。
 func (s *Searcher) bing(ctx context.Context, query string, limit int) ([]Result, error) {
-	u := s.BingURL + "?q=" + url.QueryEscape(query) + "&count=10&mkt=zh-CN"
+	// mkt=结果市场（zh-CN 简中）+ setlang=界面语言 双参数锁定中文结果，防市场漂移。
+	u := s.BingURL + "?q=" + url.QueryEscape(query) + "&count=10&mkt=zh-CN&setlang=zh-CN"
 	doc, err := s.fetchDoc(ctx, u)
 	if err != nil {
 		return nil, fmt.Errorf("bing: %w", err)
@@ -136,7 +139,8 @@ func (s *Searcher) bing(ctx context.Context, query string, limit int) ([]Result,
 // ddg 抓 DuckDuckGo lite SERP：a.result-link 取标题+链接（解开 uddg 跳转包装），
 // 其后（文档序）td.result-snippet 取摘要。
 func (s *Searcher) ddg(ctx context.Context, query string, limit int) ([]Result, error) {
-	u := s.DDGURL + "?q=" + url.QueryEscape(query)
+	// kl=区域参数（cn-zh=中国·简体中文）：DDG 默认无区域偏好，会混出繁中/日文/英文结果。
+	u := s.DDGURL + "?q=" + url.QueryEscape(query) + "&kl=cn-zh"
 	doc, err := s.fetchDoc(ctx, u)
 	if err != nil {
 		return nil, fmt.Errorf("duckduckgo: %w", err)
