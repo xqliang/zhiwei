@@ -12,6 +12,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
+	"zhiwei/internal/entity"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/memory"
 	"zhiwei/internal/profile"
@@ -57,6 +58,15 @@ type StageDeps struct {
 	NameInferWindowMin    int                            // 上下文回看窗口（分钟），0 = 默认 10
 	NameInferMaxSegments  int                            // 上下文段数上限，0 = 默认 400
 
+	// ---- correct stage（ASR 实体纠错）----
+	EntityKB       *repo.EntityKBRepo       // 实体知识库；nil = no-op（兼容旧装配/测试）
+	EntitySettings *repo.EntitySettingsRepo // 纠错配置（每用户开关/阈值/auto_sources）；nil = no-op
+	EntitySeed     entity.SeedDeps          // 种子刷新依赖（各来源 repo + KB）
+	CorrectPrompt  string                   // prompts/asr_correction_v1.md 内容（system prompt）
+	CorrectWindow  int                      // 上下文前后段数，0 = 默认 2
+	CorrectTopK    int                      // 召回 Top-K，0 = 默认 5
+	CorrectMinSim  float64                  // 召回相似度下限，0 = 默认 0.6
+
 	// ---- profile stage（用户画像 P1）----
 	Profile *profile.Service // 画像编排服务（ExtractSession / 手动 CRUD / 确认队列）
 }
@@ -69,6 +79,7 @@ func BuildStages(d StageDeps) map[string]Handler {
 		"speaker":     stageSpeaker(d),
 		"speakername": stageSpeakerName(d),
 		"extract":     stageExtract(d),
+		"correct":     stageCorrect(d),
 		"profile":     stageProfile(d),
 	}
 }
