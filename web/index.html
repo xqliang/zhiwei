@@ -505,7 +505,9 @@
               </div>
             </div>
             <div style="display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap" @click.stop>
-              <span v-if="!reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage) }}</span>
+              <!-- job_stage_label：后端 pipeline.StageLabel 给的中文阶段名（单一事实源）；
+                   旧后端无该字段时退回原始 key，statusText 兜底。 -->
+              <span v-if="!reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage_label || s.job_stage) }}</span>
               <span v-else-if="reextractingIds.has(s.id)" class="badge running"><span class="spinner"></span> 重新提取中</span>
               <span v-else class="badge running"><span class="spinner"></span> 重新识别中</span>
               <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && !reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="btn mini" @click="askReidentify(s)" title="清空说话人归属，按最新声纹库重新匹配（会覆盖手动换人）">重新识别</button>

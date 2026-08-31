@@ -768,6 +768,50 @@ func TestListSessionsEnriched(t *testing.T) {
 	}
 }
 
+// TestListSessionsJobStageLabel 验证列表富化的 job_stage_label 是后端 pipeline.StageLabel
+// 给的中文阶段名（前端 badge 直接展示，单一事实源防「新 stage 漏配中文」——correct 曾漏）。
+// 用 correct stage 造 running job：正是当年漏配、前端显示英文 key 的那个 stage。
+func TestListSessionsJobStageLabel(t *testing.T) {
+	r, sid, sessions := buildEnrichedSession(t)
+	ctx := context.Background()
+
+	jobs := &repo.JobRepo{DB: sessions.DB}
+	j := &repo.Job{SessionID: sid, Stage: "correct", Status: "running"}
+	if err := jobs.Create(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetJobID(ctx, sid, j.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Sessions []struct {
+			ID            string `json:"id"`
+			JobStatus     string `json:"job_status"`
+			JobStage      string `json:"job_stage"`
+			JobStageLabel string `json:"job_stage_label"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v %s", err, rec.Body.String())
+	}
+	for _, s := range resp.Sessions {
+		if s.ID != sid.String() {
+			continue
+		}
+		if s.JobStage != "correct" || s.JobStageLabel != "实体纠错" {
+			t.Fatalf("job_stage=%q job_stage_label=%q, want correct/实体纠错", s.JobStage, s.JobStageLabel)
+		}
+		return
+	}
+	t.Fatalf("session %s missing: %s", sid, rec.Body.String())
+}
+
 // TestDeleteSession 验证 DELETE session 级联：audio_session/memory/transcript/todo 均删。
 func TestDeleteSession(t *testing.T) {
 	r, sid, sr := buildEnrichedSession(t)

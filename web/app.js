@@ -193,16 +193,13 @@ const app = createApp({
     });
     // 跳转「人物」tab 的确认队列处理待确认项（确认队列在 persons tab，见 index.html 确认队列区）。
     function goProfilePending() { switchTab('persons'); }
-    function statusText(status, stage) {
+    // status 第二参直接收「已中文化的阶段名」（后端 /api/sessions 富化的 job_stage_label，
+    // 单一事实源在 internal/pipeline/stage_labels.go，配守护测试防漏）。
+    function statusText(status, stageLabel) {
       if (status === 'done' || status === 'completed') return '已完成';
       if (status === 'failed') return '失败';
-      // 处理中标注当前阶段（中文）：pipeline 各 stage 的用户可读名（与后端 stagesList 对齐）
-      const stageNames = {
-        asr: '语音转写', segment: '全文汇总', speaker: '声纹识别',
-        speakername: '名字推断', extract: '记忆抽取', profile: '画像抽取',
-        audioscene: '场景情绪', emotionprofile: '情绪汇总',
-      };
-      if (status === 'running') return '处理中 · ' + (stageNames[stage] || stage || '');
+      // 处理中标注当前阶段（后端给的中文标签；旧缓存字段缺失时原样展示 key）
+      if (status === 'running') return '处理中 · ' + (stageLabel || '');
       return '排队中';
     }
     // 待办状态 → 中文标签（模板多处复用，集中一处避免散落的三元）
@@ -228,6 +225,21 @@ const app = createApp({
         const d = await api('GET', '/api/sessions?limit=200');
         sessions.value = d.sessions || [];
       } catch (e) { showError(e); }
+      syncTimelinePoll();
+    }
+    // 时间线活跃轮询：列表里有任务 running/pending 时每 2s 自动刷新列表，
+    // badge 的「处理中 · 阶段」随 stage 推进实时更新（覆盖页面刷新中途、重新提取等
+    // 无上传轮询的场景）；全部结束后自动停，不做常驻空轮询。timer 用普通变量
+    // （与 recTimer/pollTimer 同风格），unmount 统一清理。
+    let timelinePollTimer = null;
+    function syncTimelinePoll() {
+      const busy = sessions.value.some(jobInProgress);
+      if (busy && !timelinePollTimer) {
+        timelinePollTimer = setInterval(loadSessions, 2000);
+      } else if (!busy && timelinePollTimer) {
+        clearInterval(timelinePollTimer);
+        timelinePollTimer = null;
+      }
     }
     // 点击会话卡片：已展开则收起；否则拉取详情就地展开（内联在当前卡片下方）
     async function toggleSession(id) {
@@ -3358,7 +3370,7 @@ const app = createApp({
     // 401 → api() 已置 authed=false，显示登录页。未登录时不再盲发 sessions/topics/speakers 等请求。
     checkAuth();
 
-    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); clearTimeout(reextractPollTimer); if (agentTimer) clearInterval(agentTimer); closeAgentWS(); });
+    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); if (timelinePollTimer) clearInterval(timelinePollTimer); clearTimeout(reextractPollTimer); if (agentTimer) clearInterval(agentTimer); closeAgentWS(); });
 
     return {
       tab, toast, switchTab,

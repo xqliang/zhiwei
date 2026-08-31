@@ -14,6 +14,7 @@ import (
 
 	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
+	"zhiwei/internal/pipeline"
 	"zhiwei/internal/repo"
 	"zhiwei/internal/voiceprint"
 )
@@ -75,8 +76,9 @@ func (h *QueryHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 	limit := intQuery(r, "limit", 50)
 	type row struct {
 		repo.AudioSession
-		JobStatus   string `json:"job_status,omitempty"`
-		JobStage    string `json:"job_stage,omitempty"`
+		JobStatus     string `json:"job_status,omitempty"`
+		JobStage      string `json:"job_stage,omitempty"`
+		JobStageLabel string `json:"job_stage_label,omitempty"` // stage 中文名（pipeline.StageLabel，前端 badge 直接展示）
 		MemoryCount int    `db:"memory_count" json:"memory_count"`
 		TodoCount   int    `db:"todo_count" json:"todo_count"`
 		AsrFull     string `db:"asr_full" json:"-"` // GROUP_CONCAT 全文，截断后给 AsrPreview
@@ -108,6 +110,7 @@ FROM audio_session s WHERE s.user_id = ? ORDER BY s.id DESC LIMIT ?`, uid.Int64(
 		if s.JobID != nil {
 			if j, err := h.Jobs.Get(r.Context(), *s.JobID); err == nil {
 				out[i].JobStatus, out[i].JobStage = j.Status, j.Stage
+				out[i].JobStageLabel = pipeline.StageLabel(j.Stage)
 			}
 		}
 	}
