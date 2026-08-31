@@ -23,7 +23,7 @@ type PersonMetric struct {
 	ID        ids.ID `db:"id" json:"id"`
 	UserID    int64  `db:"user_id" json:"user_id"`
 	PersonID  ids.ID `db:"person_id" json:"person_id"`
-	MetricKey string `db:"metric_key" json:"metric_key"` // emotion|weight|sleep|mood_energy|diet|health（catalog）
+	MetricKey string `db:"metric_key" json:"metric_key"` // emotion|weight|sleep|mood_energy|diet|health|height|waist|chest|hip|body_fat（catalog）
 	// 可空数值/文本/单位：sqlx safe 模式把 NULL 扫进值类型会报错，故一律用指针，nil 即 NULL。
 	ValueNum   *float64  `db:"value_num" json:"value_num,omitempty"`   // 数值读数；仅它非空的行才进曲线
 	ValueText  *string   `db:"value_text" json:"value_text,omitempty"` // 类别描述读数

@@ -1744,7 +1744,7 @@ const app = createApp({
     }
 
     // ---------- 指标（metric 平面，第 5 平面 person_metric，P2） ----------
-    // 前端指标目录：与后端 6 键一致（profile.MetricDefOf / catalog）。numeric=true 的指标可画趋势曲线。
+    // 前端指标目录：与后端 11 键一致（profile.MetricDefOf / catalog）。numeric=true 的指标可画趋势曲线。
     const METRIC_CATALOG = [
       { key: 'emotion', label: '情绪', unit: '', numeric: true },
       { key: 'weight', label: '体重', unit: 'kg', numeric: true },
@@ -1752,6 +1752,11 @@ const app = createApp({
       { key: 'mood_energy', label: '精力', unit: '', numeric: true },
       { key: 'diet', label: '饮食', unit: '', numeric: false },
       { key: 'health', label: '健康', unit: '', numeric: false },
+      { key: 'height', label: '身高', unit: 'cm', numeric: true },
+      { key: 'waist', label: '腰围', unit: 'cm', numeric: true },
+      { key: 'chest', label: '胸围', unit: 'cm', numeric: true },
+      { key: 'hip', label: '臀围', unit: 'cm', numeric: true },
+      { key: 'body_fat', label: '体脂率', unit: '%', numeric: true },
     ];
     // metric_key → 中文标签（确认队列摘要用；目录外键原样返回，不出空标签）
     function metricLabel(key) { const d = METRIC_CATALOG.find(m => m.key === key); return d ? d.label : (key || ''); }

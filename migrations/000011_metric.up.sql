@@ -6,7 +6,7 @@ CREATE TABLE person_metric (
   id BIGINT PRIMARY KEY,
   user_id BIGINT NOT NULL DEFAULT 1,
   person_id BIGINT NOT NULL,
-  metric_key VARCHAR(32) NOT NULL,            -- emotion|weight|sleep|mood_energy|diet|health（catalog）
+  metric_key VARCHAR(32) NOT NULL,            -- emotion|weight|sleep|mood_energy|diet|health|height|waist|chest|hip|body_fat（catalog）
   value_num DECIMAL(10,3) NULL,               -- 数值（体重kg/情绪-1..1/睡眠h）；曲线只画非空者
   value_text VARCHAR(256) NULL,               -- 类别描述（情绪='焦虑'/饮食='火锅'）
   unit VARCHAR(16) NULL,                       -- kg|h|…

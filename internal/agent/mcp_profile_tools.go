@@ -37,7 +37,7 @@ func registerProfileTools(s *mcp.Server, d MCPDeps, userID int64) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_metrics",
-		Description: "读取我的时序个人指标(第 5 平面 person_metric)：情绪/体重/睡眠/精力/饮食/健康等测点序列。可选 metric_key 过滤(emotion|weight|sleep|mood_energy|diet|health)，留空返回全部。按指标键分组返回，每组含 key/label(中文名)/unit(单位)/numeric(是否数值型) 及 points(测点，每点含 measured_at/value_num/value_text/status，按时间升序)。owner 尚未建立时返回 {found:false}。",
+		Description: "读取我的时序个人指标(第 5 平面 person_metric)：情绪/体重/睡眠/精力/饮食/健康/身高/腰围/胸围/臀围/体脂率等测点序列。可选 metric_key 过滤(emotion|weight|sleep|mood_energy|diet|health|height|waist|chest|hip|body_fat)，留空返回全部。按指标键分组返回，每组含 key/label(中文名)/unit(单位)/numeric(是否数值型) 及 points(测点，每点含 measured_at/value_num/value_text/status，按时间升序)。owner 尚未建立时返回 {found:false}。",
 	}, getMetricsHandler(d, userID))
 
 	// ---- 写-提议工具 ----
@@ -58,7 +58,7 @@ func registerProfileTools(s *mcp.Server, d MCPDeps, userID int64) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "propose_profile_metric",
-		Description: "提议给我记录一个时序指标测点(不立即生效，返回待确认提议；用户确认后才落库)。metric_key 必须合法(emotion|weight|sleep|mood_energy|diet|health)。数值型指标(体重/睡眠/情绪/精力)必须给 value_num；类别型指标(饮食/健康)必须给 value_text。unit 可选(留空取目录默认，如 kg/h)；measured_at 可选(如 2026-07-20 / '2026-07-20 15:04' / RFC3339，解析失败或留空取当前时间)。",
+		Description: "提议给我记录一个时序指标测点(不立即生效，返回待确认提议；用户确认后才落库)。metric_key 必须合法(emotion|weight|sleep|mood_energy|diet|health|height|waist|chest|hip|body_fat)。数值型指标(体重/睡眠/情绪/精力/身高/腰围/胸围/臀围/体脂率)必须给 value_num；类别型指标(饮食/健康)必须给 value_text。unit 可选(留空取目录默认，如 kg/h/cm)；measured_at 可选(如 2026-07-20 / '2026-07-20 15:04' / RFC3339，解析失败或留空取当前时间)。",
 	}, proposeProfileMetricHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -205,7 +205,7 @@ type metricsOut struct {
 }
 
 type getMetricsArgs struct {
-	MetricKey string `json:"metric_key,omitempty" jsonschema:"可选指标键过滤: emotion|weight|sleep|mood_energy|diet|health；留空返回全部指标"`
+	MetricKey string `json:"metric_key,omitempty" jsonschema:"可选指标键过滤: emotion|weight|sleep|mood_energy|diet|health|height|waist|chest|hip|body_fat；留空返回全部指标"`
 }
 
 // getMetricsHandler 读 owner「我」的时序指标测点（只取 active/pending，见 ListByPerson），
@@ -431,7 +431,7 @@ func proposeProfileRelationshipHandler(d MCPDeps, userID int64) func(context.Con
 // 仿 proposeProfileEventHandler：校验 + GetOwner + Create 一条 pending 提议；确认时才在单事务内
 // 经 profile.Service.ManualAddMetricExt 落库（apply-once，见 proposals.go 的 profile_metric case）。
 type proposeProfileMetricArgs struct {
-	MetricKey  string   `json:"metric_key" jsonschema:"指标键(必填): emotion|weight|sleep|mood_energy|diet|health"`
+	MetricKey  string   `json:"metric_key" jsonschema:"指标键(必填): emotion|weight|sleep|mood_energy|diet|health|height|waist|chest|hip|body_fat"`
 	ValueNum   *float64 `json:"value_num,omitempty" jsonschema:"数值读数：数值型指标(体重/睡眠/情绪/精力)必填，如体重 70、睡眠 7.5、情绪 -1..1"`
 	ValueText  string   `json:"value_text,omitempty" jsonschema:"类别读数：类别型指标(饮食/健康)必填，如饮食「火锅」、健康「感冒」"`
 	Unit       string   `json:"unit,omitempty" jsonschema:"单位(可选)，留空取目录默认，如 kg/h"`
@@ -445,7 +445,7 @@ func proposeProfileMetricHandler(d MCPDeps, userID int64) func(context.Context, 
 		// 校验（非法 → tool-error 供模型读）：
 		// ① metric_key 必须在指标目录内；
 		if !profile.ValidMetricKey(metricKey) {
-			return nil, nil, fmt.Errorf("非法指标键: %q（合法: emotion|weight|sleep|mood_energy|diet|health）", a.MetricKey)
+			return nil, nil, fmt.Errorf("非法指标键: %q（合法: emotion|weight|sleep|mood_energy|diet|health|height|waist|chest|hip|body_fat）", a.MetricKey)
 		}
 		// ② 数值型指标必须给 value_num；类别型指标必须给 value_text（与 ManualAddMetricExt 硬约束一致）。
 		valueText := strings.TrimSpace(a.ValueText)

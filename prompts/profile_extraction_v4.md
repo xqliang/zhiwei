@@ -65,8 +65,8 @@
   - related_people：同场/同行人物数组（可选，每项同 subject 结构，最多 3 人）；「和朋友张三去」→ 一个元素，「带家人去」→ 配偶+子女两个元素（`[{"kind":"mentioned","name":"张三"}]` / `[{"kind":"relation","relation":"配偶"},{"kind":"relation","relation":"子女"}]`）
   - importance：事件的人生分量 0~1（女儿出生/晋升 0.9、旅行/聚会 0.5、日常小事 0.3；与 confidence 无关——它是「这件事在人生里多重要」，不是「你多确定」；不确定可不填，走事件类型默认）
 - metric 平面字段（时序个人指标——同一指标随时间多次测量，每个测点抽一条；每次对话是独立测点，不要合并成「当前状态」）：
-  - metric_key：emotion（情绪）|weight（体重）|sleep（睡眠时长）|mood_energy（精力）|diet（饮食）|health（健康）
-  - value_num：数值读数（可空）。数值型指标必须给：emotion 用情绪效价 −1..1（越负越负面）、weight 用公斤数、sleep 用小时数、mood_energy 用 0..1。
+  - metric_key：emotion（情绪）|weight（体重）|sleep（睡眠时长）|mood_energy（精力）|diet（饮食）|health（健康）|height（身高）|waist（腰围）|chest（胸围）|hip（臀围）|body_fat（体脂率）
+  - value_num：数值读数（可空）。数值型指标必须给：emotion 用情绪效价 −1..1（越负越负面）、weight 用公斤数、sleep 用小时数、mood_energy 用 0..1、height/waist/chest/hip 用厘米、body_fat 用百分比。
   - value_text：类别描述读数（可空）。类别型指标（diet/health）必须给（如「火锅」「感冒」）；情绪也可附类别词（如「焦虑」）。
   - unit：单位，如 kg|h（可空；数值型不带天然单位的如 emotion/mood_energy 留空）。
   - measured_at：测点时间，尽量给到时刻（YYYY-MM-DD HH:MM 或 YYYY-MM-DD 或带时区的 RFC3339）；不确定留空（默认取本次记录时间）。

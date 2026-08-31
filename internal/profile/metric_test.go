@@ -4,8 +4,9 @@ import "testing"
 
 // TestMetricCatalog 锁定指标目录：命中/不命中判定，以及数值型/类别型的 Numeric 标志。
 func TestMetricCatalog(t *testing.T) {
-	// 命中：目录内键
-	for _, k := range []string{"emotion", "weight", "sleep", "mood_energy", "diet", "health"} {
+	// 命中：目录内键（含人体测量指标 height/waist/chest/hip/body_fat）
+	for _, k := range []string{"emotion", "weight", "sleep", "mood_energy", "diet", "health",
+		"height", "waist", "chest", "hip", "body_fat"} {
 		if !ValidMetricKey(k) {
 			t.Errorf("目录内键应命中: %s", k)
 		}
@@ -21,6 +22,18 @@ func TestMetricCatalog(t *testing.T) {
 	w := MetricDefOf("weight")
 	if !w.Numeric || w.Unit != "kg" || w.Label != "体重" {
 		t.Fatalf("weight 定义错误: %+v", w)
+	}
+	// 人体测量：围度类带单位 cm
+	for _, k := range []string{"height", "waist", "chest", "hip"} {
+		d := MetricDefOf(k)
+		if !d.Numeric || d.Unit != "cm" || d.Key != k {
+			t.Fatalf("%s 定义错误(应 Numeric+cm): %+v", k, d)
+		}
+	}
+	// 人体测量：体脂率带单位 %
+	bf := MetricDefOf("body_fat")
+	if !bf.Numeric || bf.Unit != "%" || bf.Label != "体脂率" {
+		t.Fatalf("body_fat 定义错误: %+v", bf)
 	}
 	// 类别型：diet.Numeric=false，无单位
 	d := MetricDefOf("diet")

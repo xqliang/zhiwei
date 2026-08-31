@@ -25,6 +25,12 @@ var MetricCatalog = map[string]MetricDef{
 	"mood_energy": {"mood_energy", "精力", "", true}, // value_num 0..1
 	"diet":        {"diet", "饮食", "", false},       // value_text 类别（火锅/清淡…）
 	"health":      {"health", "健康", "", false},     // value_text 类别（感冒/头痛…）
+	// 人体测量（均数值型，value_num 为测量读数；单位见 Unit）
+	"height":   {"height", "身高", "cm", true},   // value_num 厘米
+	"waist":    {"waist", "腰围", "cm", true},    // value_num 厘米
+	"chest":    {"chest", "胸围", "cm", true},    // value_num 厘米
+	"hip":      {"hip", "臀围", "cm", true},      // value_num 厘米
+	"body_fat": {"body_fat", "体脂率", "%", true}, // value_num 百分比
 }
 
 // ValidMetricKey 判定指标键是否在目录内（抽取校验用；目录外的键一律丢弃——

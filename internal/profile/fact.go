@@ -56,7 +56,7 @@ type Fact struct {
 	// ---- metric 平面（P3 时序个人指标）----
 	// 注意：value_text 字段名刻意用 MetricValueText，与 attribute 平面的 Value 区分
 	//（两者语义不同：Value 是属性值，MetricValueText 是测点的类别描述读数）。
-	MetricKey       string   // 指标键（emotion|weight|sleep|mood_energy|diet|health，见 MetricCatalog）
+	MetricKey       string   // 指标键（emotion|weight|sleep|mood_energy|diet|health|height|waist|chest|hip|body_fat，见 MetricCatalog）
 	ValueNum        *float64 // 数值读数（可空；Numeric 指标必填，曲线只画非空者）
 	MetricValueText string   // 类别描述读数（可空；非 Numeric 指标必填）
 	Unit            string   // 单位（可空；空时落库回退 MetricDefOf(key).Unit）
