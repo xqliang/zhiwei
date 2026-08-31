@@ -24,7 +24,7 @@ func TestParseCorrectionEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
-	if len(got) != 1 || got[0].Orig != "常梦瑜" || got[0].Corrected != "张梦瑜" || got[0].EntityID != "9527" {
+	if len(got) != 1 || got[0].Orig != "常梦瑜" || got[0].Corrected != "张梦瑜" {
 		t.Fatalf("解析不符: %+v", got)
 	}
 	if got[0].Confidence != 0.9 {
@@ -205,9 +205,9 @@ func TestStageCorrectHappyPath(t *testing.T) {
 	if len(llm.calls) != 1 {
 		t.Fatalf("应恰好 1 次 LLM 调用（仅 seg2 有候选），实际 %d", len(llm.calls))
 	}
-	// user message 含白名单（canonical + entity id）+ 本段标记 + 段文本。
+	// user message 含白名单 canonical(不再含 entity id) + 本段标记 + 段文本。
 	user := llm.calls[0]
-	for _, want := range []string{"张梦瑜", fx.ent.ID.String(), "本段", "常梦瑜你看到我的邮件了吗"} {
+	for _, want := range []string{"张梦瑜", "canonical=张梦瑜", "本段", "常梦瑜你看到我的邮件了吗"} {
 		if !strings.Contains(user, want) {
 			t.Fatalf("user message 应含 %q，实际=\n%s", want, user)
 		}
@@ -275,9 +275,6 @@ func TestStageCorrectGate(t *testing.T) {
 		{name: "corrected不在白名单", editFn: func(id string) string {
 			return fmt.Sprintf(`{"edits":[{"orig":"常梦瑜","corrected":"张梦宇","entity_id":"%s","confidence":0.95}]}`, id)
 		}},
-		{name: "entity_id不在白名单", editFn: func(id string) string {
-			return `{"edits":[{"orig":"常梦瑜","corrected":"张梦瑜","entity_id":"999","confidence":0.95}]}`
-		}},
 		{name: "LLM失败不阻塞", llmErr: errors.New("模拟 LLM 超时")},
 		{name: "解析失败不阻塞", resp: "这不是JSON"},
 	}
@@ -309,51 +306,65 @@ func TestStageCorrectGate(t *testing.T) {
 	}
 }
 
-// TestStageCorrectCrossCandidateGate 跨候选拼接错位：白名单同时含 张梦瑜 与 王芳，
-// LLM 返回 corrected=张梦瑜 但 entity_id=王芳 的 id——两个都在白名单、却不是同一个
-// 候选。门控须拦下（idToCanon 同候选校验），文本不动。
-func TestStageCorrectCrossCandidateGate(t *testing.T) {
+// TestStageCorrectRealtimeDisabledExcluded 去拷贝化 + 禁用排除：说话人「李工」是实时聚合的
+// auto 实体（不落 entity_kb），被禁用后 correct stage 白名单应剔除它 → 召回李工的段无候选、
+// 不调 LLM、文本不动。（manual 张梦瑜不受影响，仍走原路径。）
+func TestStageCorrectRealtimeDisabledExcluded(t *testing.T) {
 	fx := setupCorrectFixture(t)
 	ctx := context.Background()
-	// 追加第二个实体 王芳 + 一段同时召回两者的段（「常梦瑜和王房聊天」：
-	// 常梦瑜→zhang meng yu 精确命中张梦瑜；王房→wang fang 精确命中王芳）。
-	wf := "wang fang"
-	if err := fx.entityKB.ReplaceAuto(ctx, 1, repo.EntityKindPerson, []repo.Entity{{Canonical: "王芳", Pinyin: &wf}}); err != nil {
+
+	// 隔离：speaker 表无 user 作用域(全量)，实时聚合会聚入其它测试遗留的说话人，
+	// 污染白名单断言——故本测试开头清空全局 speaker 与禁用名单，自造自清。
+	clearSpeakers := func() {
+		_, _ = fx.db.Exec("DELETE FROM speaker")
+		_, _ = fx.db.Exec("DELETE FROM entity_disabled WHERE user_id = 1")
+	}
+	clearSpeakers()
+	t.Cleanup(clearSpeakers)
+
+	// 实时源：造说话人「李工」（AssembleEntities 从 speaker 表聚合，非 entity_kb）。
+	speakers := &repo.SpeakerRepo{DB: fx.db}
+	if err := speakers.Create(ctx, &repo.Speaker{Name: "李工"}); err != nil {
 		t.Fatal(err)
 	}
-	segs := []repo.TranscriptSegment{{
+	t.Cleanup(func() { _, _ = fx.db.Exec("DELETE FROM speaker") })
+
+	// 加一段召回李工的 seq3。
+	if err := fx.transcripts.InsertSegments(ctx, []repo.TranscriptSegment{{
 		TranscriptID: fx.tr.ID, SequenceNo: 3, SpeakerLabel: "1",
-		Text: "常梦瑜和王房聊天", StartMS: 6000, EndMS: 9000,
-	}}
-	if err := fx.transcripts.InsertSegments(ctx, segs); err != nil {
+		Text: "李工你看到我的邮件了吗", StartMS: 6000, EndMS: 9000,
+	}}); err != nil {
 		t.Fatal(err)
 	}
-	// 取两个实体的真实 id：张梦瑜（fx.ent）与王芳（按 canonical List 查）。
-	list, err := fx.entityKB.ListEnabled(ctx, 1)
-	if err != nil {
+
+	// 禁用李工（写 entity_disabled）。
+	ed := &repo.EntityDisabledRepo{DB: fx.db}
+	if err := ed.SetDisabled(ctx, 1, "李工"); err != nil {
 		t.Fatal(err)
 	}
-	var wID string
-	for _, e := range list {
-		if e.Canonical == "王芳" {
-			wID = e.ID.String()
-		}
-	}
-	if wID == "" {
-		t.Fatal("实体 王芳 未入库")
-	}
-	// seq2 先处理（返回空 edits 省一次响应对齐），seq3 返回拼接错位的 edit。
-	llm := &fakeCorrectLLM{resps: []string{
-		`{"edits":[]}`,
-		fmt.Sprintf(`{"edits":[{"orig":"常梦瑜","corrected":"张梦瑜","entity_id":"%s","confidence":0.95,"reason":"拼接错位"}]}`, wID),
-	}}
+	t.Cleanup(func() { _, _ = fx.db.Exec("DELETE FROM entity_disabled") })
+
+	// 组 deps：实时源 + 禁用名单。断言重点：被禁用的李工 不出现在任何一次 LLM 调用的
+	// 白名单里（去拷贝化后 correct stage 白名单 = 实时聚合 auto − 禁用 + manual）。
+	llm := &fakeCorrectLLM{resps: []string{`{"edits":[]}`, `{"edits":[]}`}}
 	d := newCorrectDeps(fx, llm)
+	d.EntitySeed = entity.SeedDeps{Speakers: speakers}
+	d.EntityDisabled = ed
 	if err := runCorrectStage(ctx, d, &repo.Job{}, fx.sid); err != nil {
-		t.Fatalf("err=%v", err)
+		t.Fatalf("stage: %v", err)
 	}
-	seg3 := getSeg(t, fx.transcripts, fx.tr.ID, 3)
-	if seg3.Text != "常梦瑜和王房聊天" || seg3.CorrectedReason != nil || len(seg3.EntityEdits) != 0 {
-		t.Fatalf("跨候选拼接错位应被门控拦下: text=%q reason=%v edits=%s", seg3.Text, seg3.CorrectedReason, seg3.EntityEdits)
+
+	// 关键断言：禁用的李工 从未进入白名单（disabled 排除生效）。manual 张梦瑜 仍在。
+	if len(llm.calls) == 0 {
+		t.Fatalf("至少 seq2(张梦瑜) 应调 LLM")
+	}
+	for i, c := range llm.calls {
+		if strings.Contains(c, "canonical=李工") {
+			t.Fatalf("call[%d] 白名单不应含被禁用的李工:\n%s", i, c)
+		}
+		if !strings.Contains(c, "canonical=张梦瑜") {
+			t.Fatalf("call[%d] 白名单应含 manual 张梦瑜:\n%s", i, c)
+		}
 	}
 }
 

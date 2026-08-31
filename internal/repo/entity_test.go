@@ -126,8 +126,8 @@ func TestEntitySettingsRepo(t *testing.T) {
 	if !s.CorrectionEnabled || s.ConfidenceThreshold != 0.8 {
 		t.Fatalf("默认值不对: %+v", s)
 	}
-	if len(s.AutoSources) != 6 {
-		t.Fatalf("默认 auto_sources 应为 6 种 kind: %v", s.AutoSources)
+	if len(s.AutoSources) != 5 {
+		t.Fatalf("默认 auto_sources 应为 5 种 kind(去 task): %v", s.AutoSources)
 	}
 
 	// 2) Upsert 后读回。
@@ -221,6 +221,50 @@ func TestEntityKBReplaceAutoInvariants(t *testing.T) {
 	}
 	if wf := findByCanonical(EntityKindPerson, "王芳"); wf == nil {
 		t.Fatal("清空 pet 不应影响 person 的 manual 王芳")
+	}
+}
+
+// TestEntityDisabledRepo：禁用名单的 SetDisabled(幂等)/Clear/ListDisabled(set, 小写归一)。
+func TestEntityDisabledRepo(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	r := &EntityDisabledRepo{DB: db}
+	const uid int64 = 7
+	t.Cleanup(func() { _, _ = db.Exec("DELETE FROM entity_disabled WHERE user_id = ?", uid) })
+	_, _ = db.Exec("DELETE FROM entity_disabled WHERE user_id = ?", uid)
+
+	// 空 → 空 set。
+	m, err := r.ListDisabled(ctx, uid)
+	if err != nil || len(m) != 0 {
+		t.Fatalf("空名单应返回空 set: %v %v", m, err)
+	}
+	// SetDisabled 幂等：重复禁无副作用。
+	for i := 0; i < 2; i++ {
+		if err := r.SetDisabled(ctx, uid, "allen"); err != nil {
+			t.Fatalf("SetDisabled: %v", err)
+		}
+	}
+	if err := r.SetDisabled(ctx, uid, "李工"); err != nil {
+		t.Fatalf("SetDisabled 李工: %v", err)
+	}
+	m, _ = r.ListDisabled(ctx, uid)
+	if !m["allen"] || !m["李工"] || len(m) != 2 {
+		t.Fatalf("名单应含 allen/李工: %v", m)
+	}
+	// Clear 取消禁用。
+	if err := r.Clear(ctx, uid, "allen"); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	m, _ = r.ListDisabled(ctx, uid)
+	if m["allen"] || !m["李工"] || len(m) != 1 {
+		t.Fatalf("Clear 后应只剩 李工: %v", m)
+	}
+	// Clear 不存在的名无副作用。
+	if err := r.Clear(ctx, uid, "不存在"); err != nil {
+		t.Fatalf("Clear 不存在不应报错: %v", err)
 	}
 }
 

@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,86 @@ func registerEntityRoutes(r chi.Router, h *AgentHandler) {
 	r.Delete("/api/agent/entities/{id}", h.deleteEntity)
 }
 
+// entityView 是设置页实体列表的响应 DTO。ID 用字符串：manual 是真 snowflake；
+// auto 实时聚合无稳定行，用 "auto:<canonical>" 合成 id（PATCH 据此消歧启禁）。
+type entityView struct {
+	ID        string  `json:"id"`
+	Canonical string  `json:"canonical"`
+	Kind      string  `json:"kind"`
+	Pinyin    *string `json:"pinyin,omitempty"`
+	Metaphone *string `json:"metaphone,omitempty"`
+	Source    string  `json:"source"` // manual | auto
+	SourceRef *string `json:"source_ref,omitempty"`
+	Enabled   bool    `json:"enabled"`
+	Note      *string `json:"note,omitempty"`
+}
+
+// autoIDPrefix 自动实体合成 id 前缀（manual 用真 snowflake，auto 无行 → "auto:<canonical>"）。
+const autoIDPrefix = "auto:"
+
+// buildEntityList 组装设置页实体列表（去拷贝化）：manual（entity_kb 全量含禁用）+
+// auto（实时聚合，enabled=未被禁用；同名被 manual 覆盖则不重复列出——对齐「同名只留一条」）。
+// kind 空串=全部。best-effort：auto 聚合/禁用名单读失败时降级为仅 manual，不报错。
+func (h *AgentHandler) buildEntityList(ctx context.Context, uid int64, kind string) ([]entityView, error) {
+	manual, err := h.EntityKB.List(ctx, uid, "")
+	if err != nil {
+		return nil, err
+	}
+	manualByCanon := map[string]bool{}
+	var out []entityView
+	for i := range manual {
+		e := &manual[i]
+		if e.Source != repo.EntitySourceManual {
+			continue
+		}
+		manualByCanon[strings.ToLower(e.Canonical)] = true
+		out = append(out, entityView{
+			ID: e.ID.String(), Canonical: e.Canonical, Kind: e.Kind, Source: "manual",
+			Enabled: e.Enabled, Note: e.Note, Pinyin: e.Pinyin, Metaphone: e.Metaphone, SourceRef: e.SourceRef,
+		})
+	}
+	// auto 实时聚合（需来源 repo 装配；enabled=!禁用；被 manual 同 canonical 覆盖的跳过）。
+	if h.EntitySeed.Persons != nil || h.EntitySeed.Speakers != nil || h.EntitySeed.Pets != nil || h.EntitySeed.Topics != nil {
+		var sources []string
+		if h.EntitySettings != nil {
+			if st, gerr := h.EntitySettings.Get(ctx, uid); gerr == nil {
+				sources = st.AutoSources
+			}
+		}
+		if auto, aerr := entity.AssembleEntities(ctx, h.EntitySeed, uid, sources); aerr == nil {
+			var disabled map[string]bool
+			if h.EntityDisabled != nil {
+				disabled, _ = h.EntityDisabled.ListDisabled(ctx, uid)
+			}
+			for i := range auto {
+				e := &auto[i]
+				if manualByCanon[strings.ToLower(e.Canonical)] {
+					continue // manual 同名覆盖，不重复列出
+				}
+				key := strings.ToLower(e.Canonical)
+				out = append(out, entityView{
+					ID: autoIDPrefix + e.Canonical, Canonical: e.Canonical, Kind: e.Kind, Source: "auto",
+					Enabled: !disabled[key], Pinyin: e.Pinyin, Metaphone: e.Metaphone, SourceRef: e.SourceRef,
+				})
+			}
+		}
+	}
+	if kind != "" {
+		filtered := out[:0]
+		for _, v := range out {
+			if v.Kind == kind {
+				filtered = append(filtered, v)
+			}
+		}
+		out = filtered
+	}
+	if out == nil {
+		out = []entityView{}
+	}
+	return out, nil
+}
+
+
 // getEntitySettings 返回纠错配置 + 各 kind 实体数汇总（设置页一次拉齐）。
 func (h *AgentHandler) getEntitySettings(w http.ResponseWriter, r *http.Request) {
 	uid, ok := reqUserID(r)
@@ -42,10 +123,18 @@ func (h *AgentHandler) getEntitySettings(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	counts, err := h.EntityKB.CountByKind(r.Context(), uid)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	// counts_by_kind：对组装后的实体列表(manual + 实时 auto)按 kind 统计启用数
+	// （entity_kb.CountByKind 去拷贝化后只数得到 manual，故改为对白名单计数）。
+	list, lerr := h.buildEntityList(r.Context(), uid, "")
+	if lerr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
 		return
+	}
+	counts := map[string]int{}
+	for _, v := range list {
+		if v.Enabled {
+			counts[v.Kind]++
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"correction_enabled":   st.CorrectionEnabled,
@@ -104,7 +193,8 @@ func (h *AgentHandler) putEntitySettings(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// listEntities 列实体（?kind= 过滤；含 auto+manual+禁用行，设置页分组展示）。
+// listEntities 列实体（?kind= 过滤）：manual(entity_kb) + auto(实时聚合,enabled=!禁用)，
+// 同名 manual 覆盖 auto 不重复。设置页据此展示；auto 无稳定行，id 为 "auto:<canonical>"。
 func (h *AgentHandler) listEntities(w http.ResponseWriter, r *http.Request) {
 	uid, ok := reqUserID(r)
 	if !ok {
@@ -115,7 +205,7 @@ func (h *AgentHandler) listEntities(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "专有名词配置不可用"})
 		return
 	}
-	list, err := h.EntityKB.List(r.Context(), uid, r.URL.Query().Get("kind"))
+	list, err := h.buildEntityList(r.Context(), uid, r.URL.Query().Get("kind"))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -175,8 +265,10 @@ func (h *AgentHandler) createEntity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, e)
 }
 
-// patchEntity 改实体：enabled 对 manual/auto 都可改；canonical/note 只许 manual
-// （auto 由刷新重建，改名会被覆盖——想调整来源数据去对应平面改）。改名时服务端重算匹配键。
+// patchEntity 改实体启禁。id 分两种：
+//   - "auto:<canonical>"：实时聚合的自动实体，只支持 enabled 切换（写 entity_disabled 持久停用）；
+//     不可改名（改来源数据去对应平面）。
+//   - 真 snowflake：manual 实体，走 entity_kb（enabled 启禁 + canonical/note 改名，重算匹配键）。
 func (h *AgentHandler) patchEntity(w http.ResponseWriter, r *http.Request) {
 	uid, ok := reqUserID(r)
 	if !ok {
@@ -187,11 +279,7 @@ func (h *AgentHandler) patchEntity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "专有名词配置不可用"})
 		return
 	}
-	id, err := ids.ParseID(chi.URLParam(r, "id"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
-		return
-	}
+	raw := chi.URLParam(r, "id")
 	var body struct {
 		Canonical *string `json:"canonical"`
 		Note      *string `json:"note"`
@@ -199,6 +287,51 @@ func (h *AgentHandler) patchEntity(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+
+	// auto 分支：只支持 enabled 切换（禁用名单持久化）。
+	if strings.HasPrefix(raw, autoIDPrefix) {
+		if h.EntityDisabled == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "专有名词配置不可用"})
+			return
+		}
+		if body.Canonical != nil || body.Note != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "自动实体不可改名，可禁用或改来源数据"})
+			return
+		}
+		if body.Enabled == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "自动实体只可启禁（enabled）"})
+			return
+		}
+		canonical := strings.TrimPrefix(raw, autoIDPrefix)
+		var derr error
+		if *body.Enabled {
+			derr = h.EntityDisabled.Clear(r.Context(), uid, canonical)
+		} else {
+			derr = h.EntityDisabled.SetDisabled(r.Context(), uid, canonical)
+		}
+		if derr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": derr.Error()})
+			return
+		}
+		// 回显该 auto 的最新 view（从组装列表取，保证 kind/pinyin/enabled 一致）。
+		if list, lerr := h.buildEntityList(r.Context(), uid, ""); lerr == nil {
+			for _, v := range list {
+				if v.ID == raw {
+					writeJSON(w, http.StatusOK, v)
+					return
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, entityView{ID: raw, Canonical: canonical, Source: "auto", Enabled: *body.Enabled})
+		return
+	}
+
+	// manual 分支：走 entity_kb。
+	id, err := ids.ParseID(raw)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 		return
 	}
 	if body.Enabled != nil {
@@ -255,8 +388,8 @@ func (h *AgentHandler) patchEntity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, full)
 }
 
-// deleteEntity 删除实体（manual 删除即消失；auto 删除后下次刷新会回来——想持久
-// 不参与纠错用 PATCH enabled=false）。
+// deleteEntity 删除实体。manual 删除即消失；auto("auto:" 前缀)由来源实时重建、删除无意义，
+// 返回 400 提示用「禁用」持久停用（前端也已对 auto 隐藏删除按钮）。
 func (h *AgentHandler) deleteEntity(w http.ResponseWriter, r *http.Request) {
 	uid, ok := reqUserID(r)
 	if !ok {
@@ -267,7 +400,12 @@ func (h *AgentHandler) deleteEntity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "专有名词配置不可用"})
 		return
 	}
-	id, err := ids.ParseID(chi.URLParam(r, "id"))
+	raw := chi.URLParam(r, "id")
+	if strings.HasPrefix(raw, autoIDPrefix) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "自动实体不可删除，请用「禁用」持久停用"})
+		return
+	}
+	id, err := ids.ParseID(raw)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 		return
