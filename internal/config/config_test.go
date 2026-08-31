@@ -119,7 +119,7 @@ func TestAgentConfigDefaults(t *testing.T) {
 	// 默认 system prompt 须含行为路由关键词（常识题自答、不硬关联用户数据、不懂直说），
 	// 锁定 Phase 1 行为意图（不断言整串，避免脆弱）。
 	sp := cfg.DSHSystemPrompt
-	for _, kw := range []string{"分场景", "直接基于你自己的知识", "如实说明"} {
+	for _, kw := range []string{"分场景", "直接基于你自己的知识", "如实说明", "web_search"} {
 		if !strings.Contains(sp, kw) {
 			t.Errorf("DSHSystemPrompt 应含路由关键词 %q: %q", kw, sp)
 		}

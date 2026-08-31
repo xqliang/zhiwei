@@ -3062,6 +3062,25 @@ const app = createApp({
       seg.push('【最后拼上你的实际问题】');
       return seg.join('\n\n──────────\n\n');
     });
+    // ---------- 设置：联网搜索配置（Phase 2 web_search/web_fetch） ----------
+    // PUT /api/agent/config 指针合并：只传搜索字段，identity/soul 保持原值不动。
+    const agentSearchEngine = ref('auto');
+    const agentSearchKey = ref('');
+    const agentSearchSaving = ref(false);
+    const agentSearchSaved = ref(false);
+    const agentSearchErr = ref('');
+    async function saveAgentSearch() {
+      if (agentSearchSaving.value) return;
+      agentSearchSaving.value = true; agentSearchSaved.value = false; agentSearchErr.value = '';
+      try {
+        await api('PUT', '/api/agent/config', {
+          search_engine: agentSearchEngine.value,
+          search_api_key: agentSearchKey.value,
+        });
+        agentSearchSaved.value = true;
+      } catch (e) { agentSearchErr.value = (e && e.message) || String(e); }
+      finally { agentSearchSaving.value = false; }
+    }
     async function loadAgentConfig() {
       try {
         const d = await api('GET', '/api/agent/config');
@@ -3070,6 +3089,8 @@ const app = createApp({
         agentCfgSystemPrompt.value = (d && d.system_prompt) || '';
         agentCfgDatetimeHead.value = (d && d.datetime_head) || '';
         agentCfgOwnerHead.value = (d && d.owner_head) || '';
+        agentSearchEngine.value = (d && d.search_engine) || 'auto';
+        agentSearchKey.value = (d && d.search_api_key) || '';
         agentCfgSaved.value = false;
       } catch (e) { showError(e); }
     }
@@ -3436,6 +3457,7 @@ const app = createApp({
       agentTurns, turnRunning, agentThinkingGap, turnDuration, fmtDur, isTurnOpen, toggleTurn, streamDraft,
       loadAgentConversations, newAgentConversation, selectAgentConversation, startEditConv, cancelEditConv, saveAgentTitle, askDeleteConv, cancelDeleteConv, deleteAgentConversation, sendAgentMessage, stopAgentMessage,
       agentCfgIdentity, agentCfgSoul, agentCfgSaving, agentCfgSaved, agentCfgPreview, agentCfgSystemPrompt, agentCfgOwnerHead, agentCfgFullPrompt, loadAgentConfig, saveAgentConfig,
+      agentSearchEngine, agentSearchKey, agentSearchSaving, agentSearchSaved, agentSearchErr, saveAgentSearch,
       entCfg, entSaving, entList, entNewCanonical, entNewNote, entKindLabels, loadEntities, saveEntitySettings, addEntity, toggleEntity, removeEntity,
       mcpServers, mcpForm, mcpErr, loadMCP, addMCP, toggleMCP, deleteMCP,
       agentSkills, skillSearchQ, skillResults, skillSearching, skillManual, skillErr, skillView, loadSkills, searchSkills, installSkill, toggleSkill, deleteSkill,

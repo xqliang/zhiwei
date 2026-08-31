@@ -13,6 +13,7 @@ import (
 	"zhiwei/internal/entity"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/search"
 )
 
 // AgentHandler 提供对话 REST（本期非流式；WS 流式见 P2c）。
@@ -92,7 +93,7 @@ func (h *AgentHandler) getConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	resp := map[string]any{"identity": "", "soul": "", "preview": "", "system_prompt": h.SystemPrompt}
+	resp := map[string]any{"identity": "", "soul": "", "preview": "", "system_prompt": h.SystemPrompt, "search_engine": "auto", "search_api_key": ""}
 	if h.Configs != nil {
 		c, err := h.Configs.Get(r.Context())
 		if err != nil {
@@ -102,6 +103,13 @@ func (h *AgentHandler) getConfig(w http.ResponseWriter, r *http.Request) {
 		resp["identity"], resp["soul"] = c.Identity, c.Soul
 		resp["preview"] = AssemblePersona(c.Identity, c.Soul)
 		resp["updated_at"] = c.UpdatedAt
+		resp["search_engine"] = c.SearchEngine
+		if resp["search_engine"] == "" {
+			resp["search_engine"] = "auto"
+		}
+		// search_api_key 明文回传：设置页需展示/编辑。注意「owner-only」靠部署态单用户保证
+		//（端点只验登录不验 owner）——多用户化时须改为仅 owner 可读或掩码，防 key 泄给其他会话。
+		resp["search_api_key"] = c.SearchKey()
 	}
 	// 当前日期 + 时区：每轮无条件注入（不依赖 owner），动态计算——预览也每次取当前值。
 	resp["datetime_head"] = DateTimeHead(time.Now())
@@ -112,7 +120,9 @@ func (h *AgentHandler) getConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// putConfig 保存全局人设。每轮注入，下一条消息即时生效（不重启 dsh）。
+// putConfig 保存全局配置。Phase 2 起为指针合并语义：body 里未传（缺省/为 null）的字段
+// 保持原值，传了的字段才覆盖——设置页「人设」与「联网搜索」两张卡各自只传自己的字段。
+// 每轮注入，下一条消息即时生效（不重启 dsh）。
 func (h *AgentHandler) putConfig(w http.ResponseWriter, r *http.Request) {
 	if _, ok := reqUserID(r); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -123,20 +133,53 @@ func (h *AgentHandler) putConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Identity string `json:"identity"`
-		Soul     string `json:"soul"`
+		Identity     *string `json:"identity"`
+		Soul         *string `json:"soul"`
+		SearchEngine *string `json:"search_engine"`
+		SearchAPIKey *string `json:"search_api_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	if err := h.Configs.Upsert(r.Context(), body.Identity, body.Soul); err != nil {
+	// 读现值做合并基底（无行时零值：identity/soul 空、engine 由 repo 归一 auto）。
+	cur, err := h.Configs.Get(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	cfg := repo.AgentConfig{Identity: cur.Identity, Soul: cur.Soul, SearchAPIKey: cur.SearchAPIKey}
+	if body.Identity != nil {
+		cfg.Identity = *body.Identity
+	}
+	if body.Soul != nil {
+		cfg.Soul = *body.Soul
+	}
+	if body.SearchEngine != nil {
+		e := strings.TrimSpace(*body.SearchEngine)
+		if !search.ValidEngine(e) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法搜索引擎: " + e})
+			return
+		}
+		cfg.SearchEngine = e
+	}
+	if body.SearchAPIKey != nil {
+		k := strings.TrimSpace(*body.SearchAPIKey)
+		if k == "" {
+			cfg.SearchAPIKey = nil // 清空 key 存 NULL
+		} else {
+			cfg.SearchAPIKey = &k
+		}
+	}
+	if err := h.Configs.Upsert(r.Context(), cfg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"identity": body.Identity, "soul": body.Soul,
-		"preview": AssemblePersona(body.Identity, body.Soul),
+		"identity": cfg.Identity, "soul": cfg.Soul,
+		"preview":        AssemblePersona(cfg.Identity, cfg.Soul),
+		"search_engine":  cfg.SearchEngine,
+		"search_api_key": cfg.SearchKey(),
 	})
 }
 

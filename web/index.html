@@ -1074,6 +1074,31 @@
       </div>
     </div>
 
+    <!-- ============ 联网搜索（Phase 2：引擎 + API key；PUT /api/agent/config 指针合并，只传搜索字段） ============ -->
+    <div class="card">
+      <h2 style="margin:0 0 4px">联网搜索</h2>
+      <div class="muted" style="font-size:var(--fs-sm); margin-bottom:16px">
+        配置知微的联网搜索（web_search / web_fetch 工具）。默认「自动」用免 key 引擎（Bing → DuckDuckGo，失败自动降级）；
+        如需更稳定的结果可配置 Tavily API key（<a href="https://tavily.com" target="_blank" rel="noopener">tavily.com</a> 获取）。
+        保存后<b>下一轮对话即生效</b>。
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <label style="font-size:var(--fs-sm); font-weight:600">搜索引擎</label>
+        <select class="txt" v-model="agentSearchEngine" style="width:170px">
+          <option value="auto">自动（免 key 链）</option>
+          <option value="bing">Bing</option>
+          <option value="duckduckgo">DuckDuckGo</option>
+          <option value="tavily">Tavily（需 API key）</option>
+        </select>
+        <input class="txt" type="password" v-model="agentSearchKey" placeholder="Tavily API key（可选，留空=免 key）" style="flex:1; min-width:220px">
+        <button class="btn primary" :disabled="agentSearchSaving" @click="saveAgentSearch">
+          <span v-if="agentSearchSaving" class="spinner"></span>保存
+        </button>
+        <span v-if="agentSearchSaved" class="muted" style="font-size:var(--fs-sm); color:var(--ok)">✓ 已保存，下条消息生效</span>
+      </div>
+      <div v-if="agentSearchErr" class="muted" style="font-size:var(--fs-xs); color:var(--danger,#c33); margin-top:6px">{{ agentSearchErr }}</div>
+    </div>
+
     <!-- ============ 专有名词（ASR 实体纠错：设置阈值/开关 + 实体库增删启禁） ============ -->
     <!-- ASR 常把人名/花名/项目代号听错；开启后转写中发音相近片段按实体库自动纠正，纠正处在时间线标注原文对照。
          自动实体每次录音刷新收录（删除后下次回来，想持久停用请禁用）；手动实体可自由增删。 -->
