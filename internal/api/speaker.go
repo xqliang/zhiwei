@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/agent"
 	"zhiwei/internal/auth"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/profile"
@@ -40,6 +41,8 @@ type SpeakerHandler struct {
 	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // 名字候选 repo（nil = 不富化/不清理，兼容旧装配）
 
 	Persons *repo.PersonRepo // 人物 repo（nil = 不富化人物绑定，兼容旧装配/测试）
+
+	ChangeLogs *repo.PersonChangeLogRepo // 人物审计 repo（级联删除时判「人物是否被编辑过」用；nil = 不做级联，退化为仅解绑）
 
 	Service *profile.Service // 人物服务（nil = 声纹改名不联动人物名，兼容旧装配/测试）
 }
@@ -479,11 +482,51 @@ func (h *SpeakerHandler) SetPerson(w http.ResponseWriter, r *http.Request) {
 }
 
 // Delete 删 sidecar 向量 + DB 行 + 清悬空引用（段 speaker_id 置 NULL）。
+// 删除前先级联处理关联人物（见下方 cascade 块）。
 func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id, err := ids.ParseID(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
+	}
+	// 级联处理关联人物：删声纹前先查它绑定的人物——
+	//   · 未编辑过的 LLM 自动人物 → 随声纹一并软删（status=dismissed），继续删声纹；
+	//   · 手动创建 / 编辑过的人物 → 不自动删，打包成确认提示返回，并**中止本次删除**，
+	//     交由用户确认后再决定人物去留（前端确认后可重发删除或单独处理人物）。
+	// 仅在 Persons+ChangeLogs 都装配时启用；旧装配（未装 ChangeLogs）退化为下方仅「解绑」。
+	if h.Persons != nil && h.ChangeLogs != nil {
+		person, err := h.Persons.GetBySpeaker(r.Context(), id)
+		if err != nil {
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if person != nil {
+			// 取该人物全平面审计（判「是否被编辑过」= 是否有非 create 的变更记录）
+			logs, err := h.ChangeLogs.ListByPerson(r.Context(), person.ID, "", "")
+			if err != nil {
+				writeJSONError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// ListByPerson 返回值切片；CascadeSpeaker 收指针切片，逐条取址转换
+			logPtrs := make([]*repo.PersonChangeLog, len(logs))
+			for i := range logs {
+				logPtrs[i] = &logs[i]
+			}
+			prompts, err := agent.CascadeSpeaker(r.Context(), &repo.Speaker{ID: id}, person, logPtrs,
+				func(ctx context.Context, pid ids.ID) error {
+					return h.Persons.SetStatus(ctx, pid, "dismissed")
+				})
+			if err != nil {
+				writeJSONError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// 有需要确认的人物 → 中止删除，返回提示（HTTP 200，ok=false 表示未删成功）
+			if len(prompts) > 0 {
+				writeJSON(w, map[string]any{"ok": false, "needs_confirm": true, "prompts": prompts})
+				return
+			}
+			// 无提示（人物已被自动 dismiss，或人物为 owner 不处理）→ 继续删声纹
+		}
 	}
 	_ = h.Voiceprint.Remove(r.Context(), id)
 	if err := h.Speakers.Delete(r.Context(), id); err != nil {

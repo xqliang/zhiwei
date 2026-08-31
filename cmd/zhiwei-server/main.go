@@ -307,6 +307,7 @@ func main() {
 		VoiceprintThreshold:   cfg.VoiceprintThreshold,
 		SpeakerNameCandidates: nameCandidates,
 		Persons:               persons,
+		ChangeLogs:            personLogs, // 删声纹级联：判关联人物是否被编辑过（未编辑的 LLM 人物随删）
 		Service:               profileSvc,
 	})
 	api.RegisterMemory(r, &api.MemoryHandler{

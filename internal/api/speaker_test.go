@@ -825,3 +825,104 @@ func TestSpeakerDeleteUnbindsPerson(t *testing.T) {
 		t.Errorf("删声纹后人物应解绑 speaker_id=nil, got %v", *got.SpeakerID)
 	}
 }
+
+// TestDeleteSpeakerCascade 删声纹时级联处理关联人物（Persons+ChangeLogs 都装配才启用）：
+//   ① 关联的是「未编辑过的 LLM 自动人物」→ 随声纹一并软删（status=dismissed），声纹删成功（204）；
+//   ② 关联的是「编辑过 / 手动创建的人物」→ 不自动删，返回确认提示（200, ok=false, prompts 非空），
+//      且中止删除：声纹与人物都保留。
+func TestDeleteSpeakerCascade(t *testing.T) {
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ids.InitForTest(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	speakers := &repo.SpeakerRepo{DB: db}
+	persons := &repo.PersonRepo{DB: db}
+	changeLogs := &repo.PersonChangeLogRepo{DB: db}
+
+	r := chi.NewRouter()
+	RegisterSpeaker(r, &SpeakerHandler{
+		Speakers: speakers, Transcripts: &repo.TranscriptRepo{DB: db},
+		Voiceprint: fakeVoiceprintAPI{}, DataDir: t.TempDir(),
+		Persons: persons, ChangeLogs: changeLogs,
+	})
+
+	del := func(spID ids.ID) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/speakers/"+spID.String(), nil))
+		return rec
+	}
+
+	// ── ① 未编辑的 LLM 人物：级联 dismiss + 声纹删成功 ──
+	sp1 := &repo.Speaker{Name: "级联测试甲x", Source: "auto"}
+	if err := speakers.Create(ctx, sp1); err != nil {
+		t.Fatal(err)
+	}
+	p1 := &repo.Person{UserID: 1, DisplayName: "级联测试甲x", SpeakerID: &sp1.ID, Source: "llm"}
+	if err := persons.Create(ctx, p1); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = persons.SetStatus(context.Background(), p1.ID, "dismissed") })
+
+	if rec := del(sp1.ID); rec.Code != http.StatusNoContent {
+		t.Fatalf("未编辑 LLM 人物：应删成功 204，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := speakers.Get(ctx, sp1.ID); err == nil {
+		t.Fatal("声纹应已被删除")
+	}
+	if got, _ := persons.Get(ctx, 1, p1.ID); got == nil || got.Status != "dismissed" {
+		t.Fatalf("未编辑 LLM 人物应被级联 dismiss，实际 %+v", got)
+	}
+
+	// ── ② 编辑过的 LLM 人物：返回确认提示 + 中止删除（声纹与人物都保留） ──
+	sp2 := &repo.Speaker{Name: "级联测试乙x", Source: "auto"}
+	if err := speakers.Create(ctx, sp2); err != nil {
+		t.Fatal(err)
+	}
+	p2 := &repo.Person{UserID: 1, DisplayName: "级联测试乙x", SpeakerID: &sp2.ID, Source: "llm"}
+	if err := persons.Create(ctx, p2); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = persons.SetStatus(context.Background(), p2.ID, "dismissed")
+		_ = speakers.Delete(context.Background(), sp2.ID)
+	})
+	// 追加一条非 create 的审计 → 视为「被编辑过」
+	if err := changeLogs.Create(ctx, &repo.PersonChangeLog{
+		UserID: 1, PersonID: p2.ID, EntityKind: "person", ChangeType: "update", ChangedBy: "user",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := del(sp2.ID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("编辑过的人物：应返回确认提示 200，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		OK      bool `json:"ok"`
+		Prompts []struct {
+			PersonID string `json:"person_id"`
+			Name     string `json:"name"`
+			Reason   string `json:"reason"`
+		} `json:"prompts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.OK {
+		t.Fatalf("有确认提示时 ok 应为 false，实际 %+v", out)
+	}
+	if len(out.Prompts) != 1 || out.Prompts[0].PersonID != p2.ID.String() {
+		t.Fatalf("应返回 p2 的确认提示，实际 %+v", out.Prompts)
+	}
+	// 中止删除：声纹与人物都应保留
+	if _, err := speakers.Get(ctx, sp2.ID); err != nil {
+		t.Fatalf("有确认提示时应中止删除，声纹应保留: %v", err)
+	}
+	if got, _ := persons.Get(ctx, 1, p2.ID); got == nil || got.Status == "dismissed" {
+		t.Fatalf("有确认提示时人物不应被 dismiss，实际 %+v", got)
+	}
+}
