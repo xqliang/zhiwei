@@ -31,6 +31,11 @@ type Memory struct {
 	TranscriptSegmentIDs ids.List   `db:"transcript_segment_ids" json:"transcript_segment_ids"`
 	EventAt              *time.Time `db:"event_at" json:"event_at,omitempty"`
 	Status               string     `db:"status" json:"status"`
+	// PersonID 记忆归属人（2026-08-31，迁移 000027）：录音来源记忆 = 来源段说话人绑定的
+	// person（extract stage 多数投票），「思敏说的话是思敏的记忆」；对话来源/无法归属为 NULL。
+	PersonID *ids.ID `db:"person_id" json:"person_id,omitempty"`
+	// PersonName 归属人显示名（查询时 LEFT JOIN person 富化，非落库列；未 JOIN 的查询恒空）。
+	PersonName string `db:"person_name" json:"person_name,omitempty"`
 	// Embedding 本期恒 NULL（Sprint 3 启用）；必须保留 db 映射，
 	// 否则 SELECT * 会因缺目标列报 missing destination name。
 	Embedding []byte    `db:"embedding" json:"-"`
@@ -81,9 +86,9 @@ func (r *MemoryRepo) InsertExt(ctx context.Context, ext ExecerContext, ms []*Mem
 	}
 	_, err := ext.NamedExecContext(ctx, `
 INSERT INTO memory (id, user_id, type, title, content, epistemic_type,
-  importance, confidence, session_id, transcript_segment_ids, event_at, status)
+  importance, confidence, session_id, transcript_segment_ids, event_at, status, person_id)
 VALUES (:id, :user_id, :type, :title, :content, :epistemic_type,
-  :importance, :confidence, :session_id, :transcript_segment_ids, :event_at, :status)`, ms)
+  :importance, :confidence, :session_id, :transcript_segment_ids, :event_at, :status, :person_id)`, ms)
 	return err
 }
 
@@ -220,6 +225,28 @@ func (r *MemoryRepo) ListBySession(ctx context.Context, sessionID ids.ID) ([]Mem
 	return r.listWhere(ctx, map[string]any{"m.session_id": sessionID.Int64()}, nil, 200, 0)
 }
 
+// ListByPerson 某归属人的记忆（人物页「相关记忆」小节用）：按事件时间倒序取最近 limit 条，
+// 排除 dismissed。软删（dismissed）person 的记忆仍可查（人物恢复后即可见）。
+func (r *MemoryRepo) ListByPerson(ctx context.Context, personID ids.ID, limit int) ([]MemoryRow, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	var rows []MemoryRow
+	err := r.DB.SelectContext(ctx, &rows, `
+SELECT m.*, COALESCE(p.display_name, '') AS person_name FROM memory m
+LEFT JOIN person p ON p.id = m.person_id
+WHERE m.person_id = ? AND m.status != 'dismissed'
+ORDER BY m.event_at DESC, m.id DESC
+LIMIT ?`, personID.Int64(), limit)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.attachTopics(ctx, rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 func (r *MemoryRepo) ListByTopic(ctx context.Context, topicID ids.ID) ([]MemoryRow, error) {
 	var rows []MemoryRow
 	err := r.DB.SelectContext(ctx, &rows, `
@@ -266,9 +293,12 @@ func (r *MemoryRepo) listWhere(ctx context.Context, where map[string]any, topicI
 		cond += " AND " + strings.Join(conds, " AND ")
 	}
 	args = append(args, limit, offset)
+	// LEFT JOIN person 富化 person_name（记忆卡「👤谁的记忆」chip 用）；person_id 为 NULL
+	// 或 person 已删（status 任意——软删的人保留历史记忆的显示名）时该列为 NULL → 空串。
 	var rows []MemoryRow
 	err := r.DB.SelectContext(ctx, &rows, fmt.Sprintf(`
-SELECT m.* FROM memory m
+SELECT m.*, COALESCE(p.display_name, '') AS person_name FROM memory m
+LEFT JOIN person p ON p.id = m.person_id
 WHERE %s
 ORDER BY m.event_at DESC, m.id DESC
 LIMIT ? OFFSET ?`, cond), args...)

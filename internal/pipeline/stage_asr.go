@@ -49,6 +49,13 @@ type StageDeps struct {
 	// VoiceprintCorrectMargin 幽灵历史声纹纠正的领先幅度门槛（ZW_VOICEPRINT_CORRECT_MARGIN）。
 	// 0 表示用默认 0.06。仅 speaker stage 的纠正 pass 使用。
 	VoiceprintCorrectMargin float64
+	// VoiceprintFragmentMS 「碎片组」判定阈值（ZW_VOICEPRINT_FRAGMENT_MS，毫秒，0=默认 10000）：
+	// 组内段总时长小于此值的 ASR 标签组视为 diarization 碎片——其库内命中/未命中都不可信，
+	// 优先并入「在场且更主要」的说话人（见 stage_speaker.go 碎片在场优先两机制）。
+	VoiceprintFragmentMS int64
+	// VoiceprintInSessionMin 碎片在场归并的最低相似度（ZW_VOICEPRINT_INSESSION_MIN，0=默认
+	// voiceprint.SoftMin 0.72）：碎片组段向量对在场说话人样本的 segMax 相似度达到此值才并入。
+	VoiceprintInSessionMin float64
 	// SpeakerEmbeddings 多条声纹样本 repo（自动登记时落样本行；nil = 兼容旧装配/测试，跳过）
 	SpeakerEmbeddings *repo.SpeakerEmbeddingRepo
 

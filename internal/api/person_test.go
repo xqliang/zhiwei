@@ -61,6 +61,7 @@ func setupPersonAPI(t *testing.T) (http.Handler, *profile.Service) {
 		Relationships: svc.Relationships, ChangeLogs: svc.ChangeLogs,
 		Events: svc.Events, Metrics: svc.Metrics, Cycles: svc.Cycles,
 		Activities: svc.Activities, Pets: svc.Pets, Service: svc,
+		Memories: &repo.MemoryRepo{DB: db}, // 人物页「相关记忆」（2026-08-31）
 	})
 	return r, svc
 }
@@ -1303,5 +1304,53 @@ func TestPetAPIFlow(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &listR)
 	if len(listR.Pets) != 1 {
 		t.Fatalf("dismissed 过滤应查回 1 行: %+v", listR.Pets)
+	}
+}
+
+// TestGetPersonMemories 人物详情的「相关记忆」：memory.person_id 反查（2026-08-31）。
+// 建人物思敏 + 两条归属记忆（一条 active 一条 dismissed）→ 详情只返回 active，
+// 且带 person_name；另一人物的记忆不串。
+func TestGetPersonMemories(t *testing.T) {
+	h, svc := setupPersonAPI(t)
+	ctx := context.Background()
+
+	simin := &repo.Person{DisplayName: "思敏", Source: "manual"}
+	if err := svc.Persons.Create(ctx, simin); err != nil {
+		t.Fatal(err)
+	}
+	other := &repo.Person{DisplayName: "路人", Source: "manual"}
+	if err := svc.Persons.Create(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = svc.Persons.DB.ExecContext(ctx, `DELETE FROM memory WHERE person_id IN (?, ?)`, simin.ID.Int64(), other.ID.Int64())
+		_, _ = svc.Persons.DB.ExecContext(ctx, `DELETE FROM person WHERE id IN (?, ?)`, simin.ID.Int64(), other.ID.Int64())
+	})
+	eventAt := time.Now()
+	memRepo := &repo.MemoryRepo{DB: svc.DB}
+	_ = memRepo.InsertExt(ctx, svc.DB, []*repo.Memory{
+		{Type: "idea", Title: "思敏想学Rust", Content: "思敏 提到她想学 Rust", EpistemicType: "observed",
+			Confidence: 0.9, EventAt: &eventAt, Status: "active", PersonID: &simin.ID},
+		{Type: "fact", Title: "被忽略的", Content: "dismissed 不展示", EpistemicType: "observed",
+			Confidence: 0.9, EventAt: &eventAt, Status: "dismissed", PersonID: &simin.ID},
+		{Type: "fact", Title: "路人的记忆", Content: "不串", EpistemicType: "observed",
+			Confidence: 0.9, EventAt: &eventAt, Status: "active", PersonID: &other.ID},
+	})
+
+	rec := doReq(t, h, "GET", "/api/persons/"+simin.ID.String(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get person: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Memories []struct {
+			Title      string `json:"title"`
+			PersonName string `json:"person_name"`
+		} `json:"memories"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Memories) != 1 || resp.Memories[0].Title != "思敏想学Rust" || resp.Memories[0].PersonName != "思敏" {
+		t.Fatalf("memories = %+v, want 1 条「思敏想学Rust」且 person_name=思敏", resp.Memories)
 	}
 }

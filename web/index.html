@@ -713,6 +713,8 @@
                 <!-- 类型标签 + 标题弹性换行：窄列下长标题整行换行，不再缩进错位 -->
                 <div style="min-width:0; display:flex; align-items:flex-start; gap:6px; flex-wrap:wrap">
                   <span class="type-tag" style="margin-right:0" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+                  <!-- 记忆归属人（2026-08-31）：来源段说话人绑定的 person——「思敏的记忆」而非一律当前用户 -->
+                  <span v-if="m.person_name" class="chip" style="font-size:11px" title="记忆归属人">👤 {{ m.person_name }}</span>
                   <b v-if="!editingMem || editingMem.id !== m.id" class="editable" @click="startEditMemory(m)" title="点击编辑">{{ m.title }}<span class="hint">✎</span></b>
                 </div>
                 <button v-if="dismissingMemId !== m.id" class="btn ghost" @click="askDismissMem(m)" title="忽略此记忆">✕</button>
@@ -1787,6 +1789,17 @@
               @click="jumpToSession(sid)" title="在时间线打开该录音">🎤</span>
       </div>
 
+      <!-- 相关记忆（memory.person_id 归属反查，2026-08-31：「思敏的记忆」而非一律当前用户的） -->
+      <div v-if="personDetail.memories && personDetail.memories.length" style="margin-bottom:10px">
+        <span class="muted" style="font-size:var(--fs-xs)">相关记忆</span>
+        <div v-for="m in personDetail.memories" :key="m.id" class="seg" style="cursor:pointer"
+             @click="jumpToSession(m.session_id)" :title="m.content">
+          <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+          <b style="margin-left:6px">{{ m.title }}</b>
+          <span v-if="m.event_at" class="muted" style="margin-left:6px; font-size:var(--fs-xs)">{{ fmtTime(m.event_at) }}</span>
+        </div>
+      </div>
+
       <!-- 分组属性区（后端已按 GroupOrder 分组、只含 active+pending） -->
       <div v-for="g in personDetail.groups" :key="g.group" style="margin-bottom:12px">
         <div class="muted" style="font-weight:600; margin-bottom:4px">{{ g.group }}</div>
@@ -2413,6 +2426,7 @@
         <div class="kv">
           <div style="min-width:0">
             <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+            <span v-if="m.person_name" class="chip" style="font-size:11px" title="记忆归属人">👤 {{ m.person_name }}</span>
             <b v-if="!editingMem || editingMem.id !== m.id" class="editable" @click="startEditMemory(m)" title="点击编辑">{{ m.title }}<span class="hint">✎</span></b>
           </div>
           <!-- 忽略（软删除）：与记忆 tab 同款 2 步行内确认 -->
@@ -2492,6 +2506,7 @@
       <div class="kv">
         <div style="min-width:0">
           <span class="type-tag" :style="{background: typeMeta(m.type).color}">{{ typeMeta(m.type).label }}</span>
+          <span v-if="m.person_name" class="chip" style="font-size:11px" title="记忆归属人">👤 {{ m.person_name }}</span>
           <b v-if="!editingMem || editingMem.id !== m.id" class="editable" @click="startEditMemory(m)" title="点击编辑">{{ m.title }}<span class="hint">✎</span></b>
         </div>
       </div>

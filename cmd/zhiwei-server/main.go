@@ -34,7 +34,9 @@ import (
 
 // promptPath 是抽取 prompt 的版本化文件路径；版本号 = 去掉扩展名的文件名
 // （如 extraction_v1），运行时从文件名推导并写进 job.trace。
-const promptPath = "prompts/extraction_v3.md"
+// v4（2026-08-31）：说话人归属（「思敏 提到…」取代泛称「用户」）+ 当前用户标注
+//（可能旁听/不在场）+ 事件旁听标注——配合 memory.person_id 归属（迁移 000027）。
+const promptPath = "prompts/extraction_v4.md"
 
 // nameInferPromptPath 说话人名字推断 prompt（speakername stage 用，版本号见文件名）。
 const nameInferPromptPath = "prompts/speaker_naming_v1.md"
@@ -258,6 +260,9 @@ func main() {
 		Gate:          memory.GateConfig{MinConf: cfg.QualityMinConf, TodoConf: cfg.QualityTodoConf},
 		Voiceprint:    voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
 		VoiceprintCorrectMargin: cfg.VoiceprintCorrectMargin,
+		// 碎片在场优先（2026-08-31）：碎片组判定阈值 + 在场归并最低相似度
+		VoiceprintFragmentMS:    cfg.VoiceprintFragmentMS,
+		VoiceprintInSessionMin:  cfg.VoiceprintInSessionMin,
 		SpeakerEmbeddings:       speakerEmbeddings,
 		NameInferPrompt:         string(nameInferBytes),
 		SpeakerNameCandidates:   nameCandidates,
@@ -353,6 +358,7 @@ func main() {
 		Persons: persons, Speakers: speakers, Attributes: personAttrs, Relationships: personRels,
 		Events: personEvents, Metrics: personMetrics, Cycles: personCycles,
 		Activities: personActivities, Pets: personPets, ChangeLogs: personLogs, Service: profileSvc,
+		Memories: memories, // 人物页「相关记忆」（memory.person_id 反查，2026-08-31）
 	})
 
 	// MCP 工具端点（仅供本机 dsh 边车经 streamable-http 连回；不对外）。

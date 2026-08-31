@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
@@ -23,11 +24,13 @@ import (
 //
 // 流程：按 ASR speaker_label 分组 → 逐段切片提向 → 组代表声纹 →
 // 每组（= 一个 ASR 说话人）做跨 session 1:N（先对全部组检索、再统一登记未命中的，见步骤 2 注释）
-// → 回填组内段 speaker_id（仅填 NULL，保留手动纠正）。
+// → 回填组内段 speaker_id（仅填 NULL，保留手动纠正）→ 纠正 pass（幽灵历史声纹/碎片在场/过短并入/逐段改判）。
 //
-// ASR 原生 diarization 已足够准，此处直接信任其说话人标签：不再用声纹在本地把不同 ASR 标签
-// 合并成同一人。是否同一人只由跨 session 1:N 判定——相似度 ≥ 阈值（默认 0.8）视为命中、复用该
-// speaker；否则登记为新声纹。登记向量优先取「干净段」（见 pickCleanSegVec）：时长最长、
+// ASR 原生 diarization 的标签**大体**可信，但过度切分（同一人被拆成第二标签的短碎片）是
+// 主要失败模式：碎片组要么误命中库里嗓音最像的他人、要么 gap 差一口气未命中而登记成新声纹
+// （库污染的自我强化源头）。2026-08-31「碎片在场优先」：同场内与本场更主要说话人声纹够像
+// （≥ InSessionMin 0.72，实测同人 0.76+、不同人 ≤0.67）的组并入该说话人，不再各标签各登记；
+// 跨 session 归并仍只认 1:N 检索。登记向量优先取「干净段」（见 pickCleanSegVec）：时长最长、
 // 与其他说话人段无时间交集且 ≥3s 的单段——聚合向量会被 diarization 切错/混入他人语音的段
 // 污染；无干净段才退回全组聚合（2026-08-26 需求）。
 func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *repo.Transcript) error {
@@ -152,55 +155,94 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 			break
 		}
 	}
-	// 第二趟：命中的复用；非过短未命中的登记新声纹；过短未命中的缓起(deferred)——不登记、段留 NULL，pass3 并入。
-	resolvedID := make([]ids.ID, len(reps)) // 每组最终 speaker（deferred 组留零值，不作目标）
+	// 过短噪声组预标记（与处理顺序无关，先行判定）：不建 speaker/不入 FAISS，pass3 并入最近在场说话人。
 	deferred := make([]bool, len(reps))
 	for i, g := range reps {
 		if !matched[i] && hasTarget && g.durMS < minCleanSegMS {
-			deferred[i] = true // 过短噪声组：不建 speaker/不入 FAISS，pass3 并入最近在场说话人
+			deferred[i] = true
+		}
+	}
+	fragmentMS := d.VoiceprintFragmentMS
+	if fragmentMS <= 0 {
+		fragmentMS = defaultFragmentMS
+	}
+	inSessionMin := d.VoiceprintInSessionMin
+	if inSessionMin <= 0 {
+		inSessionMin = defaultInSessionMin
+	}
+
+	// 第二趟分两步走（2026-08-31「碎片在场优先」需求）：
+	// 2a) 命中组先解析——在场锚点说话人（库内确认身份）先就位；
+	// 2b) 未命中非 deferred 组再处理，按 durMS **降序**（主要说话人先登记，碎片才有锚点可并）。
+	// 2b 里登记新声纹前先做在场锚点守门（见 mergeIntoInSessionAnchor）：碎片组的 rep 检索
+	// 常因 gap 差一口气（实测 0.059 vs GapMin 0.06）而未命中，若其声纹与本场已确认说话人
+	// 足够像（segMax ≥ InSessionMin），并入该说话人而不是登记新声纹——否则库里会不断
+	// 积累「同人碎片声纹」（铉晔/未知同事/说话人ghqhg 均为此污染），且越积越难命中。
+	resolvedID := make([]ids.ID, len(reps)) // 每组最终 speaker（deferred 组留零值，不作目标）
+	for i, g := range reps {
+		if deferred[i] || !matched[i] {
 			continue
 		}
-		var speakerID ids.ID
-		if matched[i] {
-			speakerID = matchedID[i]
-		} else {
-			// 自动登记：name=说话人{5位随机串}，向量 BLOB 灾备。
-			// 登记向量优先用干净段（pickCleanSegVec 的结果）：混入他人语音的段会污染
-			// 聚合向量，新声纹「出厂即脏」；无干净段才退回聚合代表。
-			embVec, sampleN := g.rep, g.vecN
-			if g.clean != nil {
-				embVec, sampleN = g.clean, 1
-			}
-			sp := &repo.Speaker{Name: "说话人" + rand5(), Source: "auto", Embedding: float32Blob(embVec), SampleCount: sampleN}
-			if err := d.Speakers.Create(ctx, sp); err != nil {
-				return fmt.Errorf("登记 speaker: %w", err)
-			}
-			if err := d.Voiceprint.Add(ctx, embVec, sp.ID); err != nil {
-				return fmt.Errorf("voiceprint add: %w", err)
-			}
-			// 样本行落库（多条声纹模型；nil = 旧装配跳过。失败仅 log 不致命——speaker/FAISS
-			// 已就绪，样本行缺失只影响后续聚合重算来源，可用启动 bootstrap 兜底补齐）
-			if d.SpeakerEmbeddings != nil {
-				e := &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: float32Blob(embVec), SampleCount: sampleN, Source: "auto"}
-				if err := d.SpeakerEmbeddings.Create(ctx, e); err != nil {
-					log.Printf("[speaker] 自动登记后样本行落库失败 speaker=%s: %v", sp.ID, err)
-				}
-			}
-			speakerID = sp.ID
+		resolvedID[i] = matchedID[i]
+		if err := d.Transcripts.SetSegmentSpeaker(ctx, tr.ID, g.label, resolvedID[i]); err != nil {
+			return fmt.Errorf("回填 speaker_id: %w", err)
 		}
-		resolvedID[i] = speakerID
-		if err := d.Transcripts.SetSegmentSpeaker(ctx, tr.ID, g.label, speakerID); err != nil {
+	}
+	// 2b 处理顺序：未命中非 deferred 组按总时长降序（下标排序，resolvedID 仍按原下标写）。
+	unmatched := make([]int, 0, len(reps))
+	for i := range reps {
+		if !matched[i] && !deferred[i] {
+			unmatched = append(unmatched, i)
+		}
+	}
+	sort.Slice(unmatched, func(a, b int) bool { return reps[unmatched[a]].durMS > reps[unmatched[b]].durMS })
+	for _, i := range unmatched {
+		g := reps[i]
+		// 在场锚点守门：与本场已解析说话人（锚点须 durMS 更大=更主要）声纹足够像 → 并入，
+		// 不登记新声纹（修「思敏碎片登记成 说话人ghqhg」类 case）。
+		if anchorID, anchorSim := bestInSessionAnchor(ctx, d, reps, resolvedID, i); anchorID != 0 && anchorSim >= inSessionMin {
+			log.Printf("[speaker] 未命中碎片并入在场说话人 label=%s speaker=%s sim=%.4f（不登记新声纹）", g.label, anchorID, anchorSim)
+			resolvedID[i] = anchorID
+			if err := d.Transcripts.SetSegmentSpeaker(ctx, tr.ID, g.label, anchorID); err != nil {
+				return fmt.Errorf("回填 speaker_id: %w", err)
+			}
+			continue
+		}
+		// 自动登记：name=说话人{5位随机串}，向量 BLOB 灾备。
+		// 登记向量优先用干净段（pickCleanSegVec 的结果）：混入他人语音的段会污染
+		// 聚合向量，新声纹「出厂即脏」；无干净段才退回聚合代表。
+		embVec, sampleN := g.rep, g.vecN
+		if g.clean != nil {
+			embVec, sampleN = g.clean, 1
+		}
+		sp := &repo.Speaker{Name: "说话人" + rand5(), Source: "auto", Embedding: float32Blob(embVec), SampleCount: sampleN}
+		if err := d.Speakers.Create(ctx, sp); err != nil {
+			return fmt.Errorf("登记 speaker: %w", err)
+		}
+		if err := d.Voiceprint.Add(ctx, embVec, sp.ID); err != nil {
+			return fmt.Errorf("voiceprint add: %w", err)
+		}
+		// 样本行落库（多条声纹模型；nil = 旧装配跳过。失败仅 log 不致命——speaker/FAISS
+		// 已就绪，样本行缺失只影响后续聚合重算来源，可用启动 bootstrap 兜底补齐）
+		if d.SpeakerEmbeddings != nil {
+			e := &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: float32Blob(embVec), SampleCount: sampleN, Source: "auto"}
+			if err := d.SpeakerEmbeddings.Create(ctx, e); err != nil {
+				log.Printf("[speaker] 自动登记后样本行落库失败 speaker=%s: %v", sp.ID, err)
+			}
+		}
+		resolvedID[i] = sp.ID
+		if err := d.Transcripts.SetSegmentSpeaker(ctx, tr.ID, g.label, resolvedID[i]); err != nil {
 			return fmt.Errorf("回填 speaker_id: %w", err)
 		}
 	}
 
-	// 3) 纠正 pass：先幽灵历史声纹纠正，再过短段并入。两者共享「各在场说话人样本向量」。
+	// 3) 纠正 pass：先幽灵历史声纹纠正（含碎片在场改判），再过短段并入。两者共享「各在场说话人样本向量」。
 	samples := buildGroupSamples(ctx, d, reps, matched, resolvedID)
 	margin := d.VoiceprintCorrectMargin
 	if margin == 0 {
 		margin = defaultCorrectMargin
 	}
-	if err := correctPhantomHistoricalMatches(ctx, d, tr, reps, matched, deferred, resolvedID, samples, margin); err != nil {
+	if err := correctPhantomHistoricalMatches(ctx, d, tr, reps, matched, deferred, resolvedID, samples, margin, fragmentMS, inSessionMin); err != nil {
 		return err
 	}
 	if err := mergeShortGroups(ctx, d, tr, reps, deferred, resolvedID, samples); err != nil {
@@ -215,6 +257,16 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 
 // minCleanSegMS 干净段（登记声纹优先来源）的最短时长：3s——太短的段声纹特征不稳。
 const minCleanSegMS = 3000
+
+// defaultFragmentMS 「碎片组」判定默认阈值（10s）：组内段总时长小于此值视为 ASR diarization
+// 碎片（同一人被切成第二标签的短句，或噪声句）。实测两个误判 case 的碎片组分别为 3.9s/6.3s，
+// 而同场真身组 ≥11s——10s 居中留裕。过大会把真人的简短发言也当碎片并入他人，宁小勿大。
+const defaultFragmentMS = 10000
+
+// defaultInSessionMin 碎片在场归并的默认最低相似度：与 voiceprint.SoftMin 同值（0.72）——
+// 「分数略低于强命中但明确是同一人」的既有语义复用到同场判定。实测依据：同场同人组间
+// segMax 0.76~0.83，同场不同人 ≤0.67，0.72 两侧均有余量。
+const defaultInSessionMin = voiceprint.SoftMin
 
 // defaultCorrectMargin 幽灵历史声纹纠正的默认领先幅度门槛（沿用 voiceprint.GapMin 经验值）。
 // max 相似度口径下，真人在幽灵段上需比历史人自身 max 领先该幅度才改判，挡住接近平局的噪声翻转。
@@ -233,14 +285,23 @@ const correctScoreEps = 1e-6
 // 改它会影响声纹匹配与 phantom 判定，故 pass4 用独立常量。
 const segReattributeMinSim = 0.6
 
-// correctPhantomHistoricalMatches 幽灵历史声纹纠正（2026-08-27 需求）：
-// ASR 过度切分出的幽灵组常命中历史库某真人；若该组名下的段被同录音另一在场说话人
+// correctPhantomHistoricalMatches 幽灵历史声纹纠正（2026-08-27 需求）+ 碎片在场改判（2026-08-31 需求）：
+//
+// 幽灵纠正：ASR 过度切分出的幽灵组常命中历史库某真人；若该组名下的段被同录音另一在场说话人
 // 匹配得更好（max 相似度口径，与详情页 topVoiceMatchesVec 同口径），判为幽灵、整组改判
 // 给那个人，段写 corrected_from。仅**历史命中组**（matched[i]）参与——新登记组的声纹是
-// 从自己段建出来的、天生在自己段上最高，不可能被判幽灵。先算全部判定（基于本趟归属快照）、
-// 再统一应用，避免链式/互换改判抖动。
+// 从自己段建出来的、天生在自己段上最高，不可能被判幽灵。
+//
+// 碎片在场改判：durMS < fragmentMS 的**命中**碎片组，其库内命中本身不可信（紧声纹 cohort 里
+// 碎片向量常命中嗓音最像的库内他人而非真身，如「铉晔组实为杰辉」case：vs 铉晔 0.7354、
+// vs 在场杰辉 0.7395）——若某在场锚点（durMS 更大=更主要的说话人）的 segMax 不低于归属
+// 自己的得分且 ≥ inSessionMin，整组改判给锚点。锚点须 durMS 更大：主要说话人吸收碎片，
+// 反向（长组并入碎片）无意义。
+//
+// 两条规则先算全部判定（基于本趟归属快照）、再统一应用，避免链式/互换改判抖动。
 func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.Transcript,
-	reps []groupRep, matched []bool, deferred []bool, resolvedID []ids.ID, samples [][][]float32, margin float64) error {
+	reps []groupRep, matched []bool, deferred []bool, resolvedID []ids.ID, samples [][][]float32,
+	margin float64, fragmentMS int64, inSessionMin float64) error {
 	if len(reps) < 2 {
 		return nil // 少于两个在场说话人无可比对象
 	}
@@ -260,11 +321,15 @@ func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.
 				self = s
 			}
 		}
-		// 找在场其他说话人里，在本组段上得分最高者
+		isFragment := g.durMS < fragmentMS
+		// 找在场其他说话人里，在本组段上得分最高者（碎片候选的锚点额外要求 durMS 更大）
 		bestScore, bestJ := -1.0, -1
 		for j := range reps {
 			if j == i || deferred[j] || resolvedID[j] == resolvedID[i] {
 				continue // 跳过自己、过短缓起组(无有效 speaker)、解析到同一 speaker 的组
+			}
+			if isFragment && reps[j].durMS <= g.durMS {
+				continue // 碎片改判的锚点必须是更主要（总时长更长）的说话人
 			}
 			sc := 0.0
 			for _, sv := range g.segVecs {
@@ -276,7 +341,18 @@ func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.
 				bestScore, bestJ = sc, j
 			}
 		}
-		if bestJ >= 0 && bestScore > self+margin+correctScoreEps {
+		fire := false
+		if bestJ >= 0 {
+			if isFragment {
+				// 碎片：锚点不比归属差（容差同 correctScoreEps，平局=无显著区别→在场优先）
+				// 且达到在场归并最低相似度，即改判。
+				fire = bestScore >= inSessionMin && bestScore >= self-correctScoreEps
+			} else {
+				// 幽灵：须明显更好（> self + margin），规则不变。
+				fire = bestScore > self+margin+correctScoreEps
+			}
+		}
+		if fire {
 			fixes = append(fixes, fix{label: g.label, from: resolvedID[i], to: resolvedID[bestJ]})
 		}
 	}
@@ -285,10 +361,45 @@ func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.
 			// best-effort：纠正失败仅 log 不致命。此时段已回填到（幽灵）说话人、并非无归属；
 			// 若返回错误让 job 重试，重试时段已 assigned → reps 为空 → 纠正永不重跑，反而是「既失败又丢纠正」
 			// 的最坏情况。与本 stage 样本行落库失败(SpeakerEmbeddings.Create)的 best-effort+log 处理一致。
-			log.Printf("[speaker] 幽灵历史声纹纠正失败 label=%s from=%s to=%s: %v", f.label, f.from, f.to, err)
+			log.Printf("[speaker] 幽灵历史声纹/碎片在场纠正失败 label=%s from=%s to=%s: %v", f.label, f.from, f.to, err)
+			continue
+		}
+		// 改判生效后同步内存 resolvedID：后续 mergeShortGroups 等 pass 以最新归属为准
+		//（否则过短组会并入已被搬空的旧说话人）。
+		for i, g := range reps {
+			if g.label == f.label {
+				resolvedID[i] = f.to
+				break
+			}
 		}
 	}
 	return nil
+}
+
+// bestInSessionAnchor 找未命中组（2b）的「在场锚点」：已解析组中 durMS 大于本组者，取与本组
+// 段向量 segMax 相似度最高的锚点说话人。返回 (speakerID, 相似度)；无锚点返回 (0, 0)。
+// 锚点样本与 phantom/详情页同口径（loadSpeakerSampleVecs：多条样本回退聚合代表）。
+func bestInSessionAnchor(ctx context.Context, d StageDeps, reps []groupRep, resolvedID []ids.ID, i int) (ids.ID, float64) {
+	bestID, bestSim := ids.ID(0), 0.0
+	for j := range reps {
+		if j == i || resolvedID[j] == 0 || reps[j].durMS <= reps[i].durMS {
+			continue // 锚点须已解析且比本组更主要
+		}
+		sv := loadSpeakerSampleVecs(ctx, d, resolvedID[j])
+		if len(sv) == 0 {
+			continue
+		}
+		sc := 0.0
+		for _, seg := range reps[i].segVecs {
+			if s := segMaxScore(seg.vec, sv); s > sc {
+				sc = s
+			}
+		}
+		if sc > bestSim {
+			bestSim, bestID = sc, resolvedID[j]
+		}
+	}
+	return bestID, bestSim
 }
 
 // buildGroupSamples 为每组构造「该说话人的样本向量集合」（详情页同口径打分用）：

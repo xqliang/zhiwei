@@ -24,6 +24,10 @@ type Extractor struct {
 	Model  string // 模型名（Tier 1 flash）
 	Prompt string // 系统指令（prompts/extraction_v1.md 内容，含版本说明）
 	Window int    // 窗口大小（块数），<=0 时 SplitWindows 内部回退默认
+	// OwnerName 当前用户名（可空，2026-08-31）：注入 user message 首行「当前用户：X」，
+	// 供 extraction_v4 的说话人归属/旁听规则（用户可能参与对话、旁听或不在场）。
+	// 空 = 不注入（问知微对话抽取等场景：对话双方就是用户与知微，无需标注）。
+	OwnerName string
 
 	// stats 记录最近一次 Extract 的调用统计。
 	// 并发说明：每个 stage 调用各自 new 一个 Extractor（handler 内构造），
@@ -48,7 +52,7 @@ func (e *Extractor) Extract(ctx context.Context, blocks []Block, topics []repo.T
 		resp, err := e.LLM.Chat(ctx, provider.ChatRequest{
 			Model:  e.Model,
 			System: e.Prompt,
-			User:   buildUserMessage(win, topics),
+			User:   buildUserMessage(win, topics, e.OwnerName),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("LLM 调用: %w", err)
@@ -96,8 +100,12 @@ func blockProvenance(win []Block, idx int, base time.Time) ([]ids.ID, time.Time)
 }
 
 // buildUserMessage 组装用户消息：对话块列表 + 已有主题列表。
-func buildUserMessage(win []Block, topics []repo.Topic) string {
+// ownerName 非空时首行注入「当前用户：X」（extraction_v4 的归属/旁听规则用）。
+func buildUserMessage(win []Block, topics []repo.Topic, ownerName string) string {
 	var sb strings.Builder
+	if ownerName != "" {
+		sb.WriteString("当前用户：" + ownerName + "（他/她可能参与对话、旁听或不在场）\n\n")
+	}
 	sb.WriteString("对话块列表（格式：序号|说话人|时间偏移|文本）：\n")
 	for i, b := range win {
 		speaker := b.SpeakerLabel
