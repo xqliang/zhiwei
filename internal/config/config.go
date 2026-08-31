@@ -47,6 +47,11 @@ type Config struct {
 	VoiceprintSidecarURL    string  // 声纹 sidecar 地址（http://127.0.0.1:8010）
 	VoiceprintThreshold     float64 // 1:N 余弦匹配阈值，低于则视为未命中→自动登记
 	VoiceprintCorrectMargin float64 // 幽灵历史声纹纠正领先幅度门槛，0→默认 0.06
+	// VoiceprintFragmentMS 「碎片组」判定阈值（毫秒）：组内段总时长小于此值视为 ASR diarization
+	// 碎片，其库内命中/未命中都不可信，优先并入在场更主要的说话人（碎片在场优先，2026-08-31）。
+	VoiceprintFragmentMS int64
+	// VoiceprintInSessionMin 碎片在场归并的最低相似度（实测同人 0.76+、不同人 ≤0.67）。
+	VoiceprintInSessionMin float64
 	EnrollMinDurationMS     int64   // 从转写段音频录入声纹的最小时长（毫秒，默认 3000=3s；WeSpeaker LM 对 >3s 更稳）
 
 	// ---- Agent / Chatbot（P1；设计见 agent-chatbot spec §14）----
@@ -151,6 +156,8 @@ func Load() (*Config, error) {
 		VoiceprintSidecarURL:    getenv("ZW_VOICEPRINT_SIDECAR_URL", "http://127.0.0.1:8010"),
 		VoiceprintThreshold:     getenvFloat("ZW_VOICEPRINT_THRESHOLD", 0.8),
 		VoiceprintCorrectMargin: getenvFloat("ZW_VOICEPRINT_CORRECT_MARGIN", 0.06),
+		VoiceprintFragmentMS:    int64(getenvInt("ZW_VOICEPRINT_FRAGMENT_MS", 10000)),
+		VoiceprintInSessionMin:  getenvFloat("ZW_VOICEPRINT_INSESSION_MIN", 0.72),
 		EnrollMinDurationMS:     int64(getenvInt("ZW_ENROLL_MIN_DURATION_MS", 3000)),
 
 		// ---- Agent / Chatbot ----

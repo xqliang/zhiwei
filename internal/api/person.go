@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ type PersonHandler struct {
 	Activities    *repo.PersonActivityRepo
 	Pets          *repo.PersonPetRepo
 	ChangeLogs    *repo.PersonChangeLogRepo
+	Memories      *repo.MemoryRepo // 相关记忆（记忆归属人 person_id 的反查；nil=不返回该字段）
 	Service       *profile.Service
 }
 
@@ -211,15 +213,17 @@ type metricPoint struct {
 }
 
 type personDetailResp struct {
-	Person           *repo.Person              `json:"person"`
-	SpeakerName      string                    `json:"speaker_name,omitempty"` // 绑定声纹的显示名（详情页徽标直接展示，免前端二次查表）
-	Groups           []attrGroup               `json:"groups"`
-	Relationships    []repo.PersonRelationship `json:"relationships"`
-	Events           []repo.PersonEvent        `json:"events"`
-	Metrics          []metricGroup             `json:"metrics"`
-	Pets             []repo.PersonPet          `json:"pets"`
-	RecentSessionIDs []ids.ID                  `json:"recent_session_ids"`
-	PendingCount     int                       `json:"pending_count"`
+	Person        *repo.Person              `json:"person"`
+	SpeakerName   string                    `json:"speaker_name,omitempty"` // 绑定声纹的显示名（详情页徽标直接展示，免前端二次查表）
+	Groups        []attrGroup               `json:"groups"`
+	Relationships []repo.PersonRelationship `json:"relationships"`
+	Events        []repo.PersonEvent        `json:"events"`
+	Metrics       []metricGroup             `json:"metrics"`
+	Pets          []repo.PersonPet          `json:"pets"`
+	// Memories 归属该人物的最近记忆（「相关记忆」小节；memory.person_id 反查，迁移 000028）。
+	Memories         []repo.MemoryRow `json:"memories,omitempty"`
+	RecentSessionIDs []ids.ID         `json:"recent_session_ids"`
+	PendingCount     int              `json:"pending_count"`
 }
 
 func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -350,9 +354,19 @@ func (h *PersonHandler) Get(w http.ResponseWriter, r *http.Request) {
 			speakerName = sp.Name
 		}
 	}
+	// 相关记忆：该人物名下的最近 10 条（「思敏的记忆」）。Memories 未装配（旧测试装配）时
+	// 省略该字段；查询失败不阻断详情（记忆小节是辅助信息，500 掉整个画像详情不值当）。
+	var memRows []repo.MemoryRow
+	if h.Memories != nil {
+		if ms, err := h.Memories.ListByPerson(r.Context(), id, 10); err == nil {
+			memRows = ms
+		} else {
+			log.Printf("[person] 相关记忆读取失败 person=%s: %v", id, err)
+		}
+	}
 	writeJSON(w, personDetailResp{
 		Person: p, SpeakerName: speakerName, Groups: groups, Relationships: relShown, Events: evShown,
-		Metrics: metricGroups, Pets: petShown, RecentSessionIDs: sids, PendingCount: pending,
+		Metrics: metricGroups, Pets: petShown, Memories: memRows, RecentSessionIDs: sids, PendingCount: pending,
 	})
 }
 

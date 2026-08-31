@@ -60,7 +60,15 @@ func stageExtract(d StageDeps) Handler {
 		if err != nil {
 			return fmt.Errorf("读取 topics: %w", err)
 		}
-		ex := &memory.Extractor{LLM: d.LLM, Model: d.LLMModel, Prompt: d.Prompt, Window: d.ExtractWindow}
+		// 当前用户名（extraction_v4 的归属/旁听规则用）：owner person 的显示名。
+		// 读不到（未装配/无 owner）→ 空串，prompt 里不注入「当前用户」行，规则自动退化为不标注。
+		ownerName := ""
+		if d.Persons != nil {
+			if op, err := d.Persons.GetOwner(ctx, s.UserID); err == nil && op != nil {
+				ownerName = op.DisplayName
+			}
+		}
+		ex := &memory.Extractor{LLM: d.LLM, Model: d.LLMModel, Prompt: d.Prompt, Window: d.ExtractWindow, OwnerName: ownerName}
 		llmBegin := time.Now()
 		cands, err := ex.Extract(ctx, blocks, topics, s.CreatedAt)
 		if err != nil {
@@ -75,10 +83,15 @@ func stageExtract(d StageDeps) Handler {
 		// ④ 质量闸门
 		gated := memory.ApplyGate(cands, d.Gate)
 
+		// 归属人解析（2026-08-31 需求）：候选的来源段多数 speaker → 该 speaker 绑定的 person。
+		// 「思敏说的话是思敏的记忆」，而不是一律算当前用户的；speaker 未绑 person / 段无归属
+		// → 记忆不归属任何人。Persons 未装配（旧装配/测试）同样置空，不影响抽取主链路。
+		personIDs := resolveMemoryPersons(gated, segs, d.Persons)
+
 		// ⑤ Topic 归属决策（纯逻辑）+ 单事务提交
 		refs, newNames := memory.ResolveTopics(gated, topics)
 		commitBegin := time.Now()
-		err = commitExtract(ctx, d, sessionID, s.UserID, gated, refs, newNames)
+		err = commitExtract(ctx, d, sessionID, s.UserID, gated, refs, newNames, personIDs)
 		if err != nil {
 			return fmt.Errorf("commit: %w", err)
 		}
@@ -106,12 +119,58 @@ func buildSpeakerNameMap(ctx context.Context, speakers *repo.SpeakerRepo) (map[i
 	return m, nil
 }
 
+// resolveMemoryPersons 为每个通过闸门的候选解析归属人：来源段（TranscriptSegmentIDs）的
+// speaker_id 多数投票（平票取 SegmentIDs 中先出现者）→ 该 speaker 绑定的 person。
+// persons 为 nil（未装配）或多数段无 speaker / speaker 未绑 person 时对应位为 nil。
+// 纯函数（persons 只读 MapBySpeakers），可单测。
+func resolveMemoryPersons(gated []memory.Candidate, segs []repo.TranscriptSegment, persons *repo.PersonRepo) []*ids.ID {
+	out := make([]*ids.ID, len(gated))
+	if persons == nil || len(gated) == 0 {
+		return out
+	}
+	personBySpeaker, err := persons.MapBySpeakers(context.Background())
+	if err != nil {
+		return out // 名册读失败按无归属降级，不阻断抽取
+	}
+	if len(personBySpeaker) == 0 {
+		return out
+	}
+	segSpeaker := make(map[ids.ID]ids.ID, len(segs))
+	for _, s := range segs {
+		if s.SpeakerID != nil {
+			segSpeaker[s.ID] = *s.SpeakerID
+		}
+	}
+	for i, c := range gated {
+		var bestSpeaker ids.ID
+		counts := map[ids.ID]int{}
+		best := 0
+		for _, segID := range c.SegmentIDs {
+			sp, ok := segSpeaker[segID]
+			if !ok {
+				continue
+			}
+			counts[sp]++
+			if counts[sp] > best { // 严格大于：平票保持先出现者
+				best, bestSpeaker = counts[sp], sp
+			}
+		}
+		if bestSpeaker != 0 {
+			if p, ok := personBySpeaker[bestSpeaker]; ok && p != nil {
+				pid := p.ID
+				out[i] = &pid
+			}
+		}
+	}
+	return out
+}
+
 // commitExtract 在单事务内完成幂等清理与落库（多对多版）。
 // 顺序：快照手动关联(source=user) → 删 todo_topic → 删 todo → 删 memory_topic → 删 memory
 // → 建建议 topic → 插 memory + memory_topic(ai) + 重链 user → 插 todo + todo_topic(ai) + 重链 user。
 // topic 归属仅写关联表 memory_topic/todo_topic，legacy topic_id 列已无人写（T6 删列）。
 func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID int64,
-	gated []memory.Candidate, refs [][]memory.TopicRef, newNames []string) error {
+	gated []memory.Candidate, refs [][]memory.TopicRef, newNames []string, personIDs []*ids.ID) error {
 
 	tx, err := d.DB.BeginTxx(ctx, nil)
 	if err != nil {
@@ -225,6 +284,7 @@ func commitExtract(ctx context.Context, d StageDeps, sessionID ids.ID, userID in
 			Importance:    c.Importance, Confidence: c.Confidence,
 			SessionID: &sessionID, TranscriptSegmentIDs: ids.List(c.SegmentIDs),
 			EventAt: &c.EventAt, Status: "active",
+			PersonID: personIDs[i], // 归属人（来源段多数 speaker 的 person；可 nil）
 		}
 		memories[i] = m
 		kept = append(kept, m)

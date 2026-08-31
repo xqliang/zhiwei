@@ -684,3 +684,79 @@ func TestStageExtractMemoryCorroboration(t *testing.T) {
 		t.Fatalf("session B todos = %d, want 0（佐证跳过的候选不产 todo）", len(todos))
 	}
 }
+
+// TestStageExtractPersonAttribution 记忆归属人（2026-08-31 需求）：候选按「来源段多数
+// speaker → 绑定的 person」归属——块 1 段属说话人思敏（绑 person 思敏）→ memory 归思敏；
+// 块 2 段属未绑定 person 的说话人 → memory 不归属。ListBySession 富化出 person_name。
+func TestStageExtractPersonAttribution(t *testing.T) {
+	ctx := context.Background()
+	d := newExtractDeps(t, &fakeExtractLLM{})
+	d.Persons = &repo.PersonRepo{DB: d.DB}
+	sid, _ := setupExtractFixture(t, &d)
+
+	// 说话人思敏（绑 person）+ 说话人路人甲（未绑 person）
+	spSimin := &repo.Speaker{Name: "思敏", Source: "auto"}
+	if err := d.Speakers.Create(ctx, spSimin); err != nil {
+		t.Fatal(err)
+	}
+	spPasserby := &repo.Speaker{Name: "路人甲", Source: "auto"}
+	if err := d.Speakers.Create(ctx, spPasserby); err != nil {
+		t.Fatal(err)
+	}
+	personSimin := &repo.Person{DisplayName: "思敏", SpeakerID: &spSimin.ID, Source: "manual"}
+	if err := d.Persons.Create(ctx, personSimin); err != nil {
+		t.Fatal(err)
+	}
+	// 收尾清理：未绑定 person 的 active speaker 会被 repo 包 EnsurePersonBootstrap 物化成
+	// person（共享测试库跨包污染），删掉物化来源（对齐 speaker 测试的 cleanup 惯例）。
+	t.Cleanup(func() {
+		_, _ = d.Speakers.DB.ExecContext(ctx, `DELETE FROM speaker WHERE id IN (?, ?)`, spSimin.ID.Int64(), spPasserby.ID.Int64())
+		_, _ = d.Persons.DB.ExecContext(ctx, `DELETE FROM person WHERE id = ?`, personSimin.ID.Int64())
+	})
+
+	// seq1（块1）归思敏；seq2（块2）归路人甲。fixture 两段同 label "1"，
+	// 逐段回填用 SetSegmentSpeaker 按 label 会同时覆盖——改为直接 UPDATE 单段。
+	tr, _ := d.Transcripts.GetBySession(ctx, sid)
+	segs, _ := d.Transcripts.ListSegments(ctx, tr.ID)
+	bySeq := map[int]repo.TranscriptSegment{}
+	for _, s := range segs {
+		bySeq[s.SequenceNo] = s
+	}
+	if _, err := d.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ? WHERE id = ?`, spSimin.ID.Int64(), bySeq[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ? WHERE id = ?`, spPasserby.ID.Int64(), bySeq[2].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := BuildStages(d)["extract"]
+	j := &repo.Job{SessionID: sid, Stage: "extract", Status: "running"}
+	if err := handler(ctx, j, sid); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	rows, err := d.Memories.ListBySession(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byTitle := map[string]repo.MemoryRow{}
+	for _, r := range rows {
+		byTitle[r.Title] = r
+	}
+	// 块 1（思敏说的）→ 归思敏，且列表富化出 person_name
+	if m, ok := byTitle["给 Tom 发邮件"]; !ok {
+		t.Fatalf("缺候选「给 Tom 发邮件」: %+v", rows)
+	} else if m.PersonID == nil || *m.PersonID != personSimin.ID {
+		t.Fatalf("「给 Tom 发邮件」应归属思敏 person=%v，实际 %+v", personSimin.ID, m.PersonID)
+	} else if m.PersonName != "思敏" {
+		t.Fatalf("person_name=%q, want 思敏", m.PersonName)
+	}
+	// 块 2（路人甲说的，speaker 未绑 person）→ 不归属
+	if m, ok := byTitle["学习 Rust"]; !ok {
+		t.Fatalf("缺候选「学习 Rust」: %+v", rows)
+	} else if m.PersonID != nil {
+		t.Fatalf("「学习 Rust」说话人未绑 person，应无归属，实际 %+v", m.PersonID)
+	}
+}

@@ -226,15 +226,20 @@ func TestStageSpeakerIdempotentSkip(t *testing.T) {
 // 合并 ASR 返回的说话人。即便两个 ASR 标签声纹完全相同（fake 各段返回同一向量），只要 ASR
 // 标成两个说话人（标签 1 和 2），就各自独立做跨 session 1:N（此处均未命中）→ 分别登记，
 // 而不是像旧逻辑那样按声纹相似度本地聚成 1 个。
-func TestStageSpeakerNoLocalMergeSameVoiceprint(t *testing.T) {
+// TestStageSpeakerSameVoiceLabelsMergeInSession 同声 ASR 标签在场归并（2026-08-31 需求，反转旧语义）：
+// 旧设计「信任 ASR diarization、本录音内不同标签一律不本地合并」在过度切分场景会为同一人
+// 重复登记声纹（库污染源头）。新语义：未命中组与本场更主要（durMS 更长）说话人的声纹
+// 够像（≥ InSessionMin 0.72）→ 并入，不登记新声纹。本用例各段同向量（cos=1.0）：
+// 空库下 label1(3.5s 主) 先登记 1 个，label2(3.1s) 并入 → added==1、两组段同一 speaker。
+func TestStageSpeakerSameVoiceLabelsMergeInSession(t *testing.T) {
 	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
-	fv := &fakeVoiceprint{matched: false, sameVec: true} // 各段同向量：即便同人也不应本地合并
+	fv := &fakeVoiceprint{matched: false, sameVec: true} // 各段同向量：同一个人的声音被 ASR 拆成两个标签
 	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
 	if err := runSpeakerStage(context.Background(), d, sid, tr); err != nil {
 		t.Fatalf("stage: %v", err)
 	}
-	if len(fv.added) != 2 { // 2 个 ASR 标签 → 各自独立登记，不再本地合并
-		t.Fatalf("不应本地合并，应按 ASR 标签登记 2 个，实际 %d", len(fv.added))
+	if len(fv.added) != 1 { // 只登记主要说话人 1 个（label2 并入，不再各标签各建）
+		t.Fatalf("同人标签应归并只登记 1 个，实际 %d", len(fv.added))
 	}
 	segs, _ := transcripts.ListSegments(context.Background(), tr.ID)
 	speakerIDs := map[ids.ID]bool{}
@@ -244,8 +249,8 @@ func TestStageSpeakerNoLocalMergeSameVoiceprint(t *testing.T) {
 		}
 		speakerIDs[*s.SpeakerID] = true
 	}
-	if len(speakerIDs) != 2 { // 标签 1 的两段归一个人、标签 2 归另一个人 → 2 个 speaker
-		t.Fatalf("应回填到 2 个不同 speaker，实际 %d", len(speakerIDs))
+	if len(speakerIDs) != 1 {
+		t.Fatalf("两组同人标签应归并到同一 speaker，实际 %d 个", len(speakerIDs))
 	}
 }
 
@@ -594,17 +599,18 @@ func cosineSim(a, b []float32) float64 {
 }
 
 // TestStageSpeakerFirstMultiSpeakerEmptyLibrary 复现并守护「声纹库为空时首次多人录入只建 1 个声纹」的 bug：
-// 空库 + 两个 ASR 标签（不同人，互相余弦 0.75，落在弱命中 [0.72,0.8) 区间）。
-// 旧逻辑（边搜边登记）：label1 先登记 → label2 的 Search 看到 label1 刚登记的声纹、top2=0，令弱命中门槛
+// 空库 + 两个 ASR 标签（不同人）。旧逻辑（边搜边登记）：label1 先登记 → label2 的 Search 看到 label1 刚登记的声纹、top2=0，令弱命中门槛
 // 退化成 0.72 → label2 被并入 label1 → 只建 1 个。
 // 修复（先全部检索、再统一登记）：两组都只对「本 run 开始前的库」检索（此处为空）→ 均未命中 → 各建 1 个。
+// 注：两向量余弦取 0.6（2026-08-31 调整，原 0.75）：「碎片在场优先」上线后 ≥0.72 的同场组会被视为
+// 同一人并入（实测同场不同人 ≤0.67、同人 0.76+），0.75 属同人区间不再代表「两个不同人」。
 func TestStageSpeakerFirstMultiSpeakerEmptyLibrary(t *testing.T) {
 	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
 	vA := make([]float32, 256)
 	vA[0] = 1
 	vB := make([]float32, 256)
-	vB[0] = 0.75
-	vB[1] = float32(math.Sqrt(1 - 0.75*0.75)) // cos(vA,vB)=0.75
+	vB[0] = 0.6
+	vB[1] = float32(math.Sqrt(1 - 0.6*0.6)) // cos(vA,vB)=0.6（不同人区间）
 	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vA, 2: vA, 3: vB}}
 	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
 	if err := runSpeakerStage(context.Background(), d, sid, tr); err != nil {
@@ -766,14 +772,16 @@ func TestStageSpeakerKeepsHistoricalMatchWhenSelfHighest(t *testing.T) {
 
 // TestStageSpeakerNeverCorrectsAutoRegistered 空历史库 → 两组都是新登记(非历史命中)：
 // 即使一组段更像另一组，也不参与纠正（只有历史命中组是候选）。断言无任何 corrected_from。
+// 注：vB·vA 取 0.6（2026-08-31 调整，原 0.9）：≥0.72 的同场组现会被「在场归并」并入
+// （同人语义），0.9 属同人区间；0.6 代表真实的两个不同人。
 func TestStageSpeakerNeverCorrectsAutoRegistered(t *testing.T) {
 	ctx := context.Background()
 	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
 	vA := make([]float32, 256)
 	vA[0] = 1
 	vB := make([]float32, 256)
-	vB[0] = 0.9
-	vB[1] = float32(math.Sqrt(1 - 0.81))                                   // cos(vA,vB)=0.9
+	vB[0] = 0.6
+	vB[1] = float32(math.Sqrt(1 - 0.36))                                   // cos(vA,vB)=0.6（不同人区间）
 	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vA, 2: vA, 3: vB}} // 空历史库
 	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
 	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
@@ -794,7 +802,14 @@ func TestStageSpeakerNeverCorrectsAutoRegistered(t *testing.T) {
 // self(铉晔)=0.73，margin=0.06 → 真人=0.79 恰好不触发。
 func TestStageSpeakerCorrectionMarginBoundary(t *testing.T) {
 	ctx := context.Background()
-	sid, tr, dataDir, transcripts, speakers := seedSpeakerStage(t)
+	// 幽灵组用长段（12s，非碎片）：「碎片在场改判」（2026-08-31）对 <10s 的碎片组用
+	// 「锚点不比归属差即改判」的宽松判据，会吃掉本用例的 margin 边界——边界纪律只对
+	// 非碎片组生效，故本用例须把幽灵组造长。
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "真人说话一", StartMS: 0, EndMS: 2000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "真人说话二", StartMS: 2100, EndMS: 4100},
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "幽灵长段", StartMS: 4200, EndMS: 16200}, // 12s：非碎片
+	})
 	vR, vHist, vSeg := buildCorrectionVecs(t, 0.7, 0.79, 0.73)
 	ghost := &repo.Speaker{Name: "铉晔", Source: "auto", Embedding: float32Blob(vHist), SampleCount: 1}
 	if err := speakers.Create(ctx, ghost); err != nil {
@@ -813,6 +828,236 @@ func TestStageSpeakerCorrectionMarginBoundary(t *testing.T) {
 	for _, s := range segs {
 		if s.SequenceNo == 3 && s.CorrectedFromSpeakerID != nil {
 			t.Fatalf("恰好等于 self+margin 不应触发（需严格大于），实际标记 %+v", s.CorrectedFromSpeakerID)
+		}
+	}
+}
+
+// ---------- 碎片在场优先（2026-08-31 需求） ----------
+
+// mkUnitVec 造 256 维单位向量，给定前三个分量（其余 0）。碎片在场用例的相似度几何构造用。
+func mkUnitVec(x, y, z float64) []float32 {
+	return mkVec([2]float64{0, x}, [2]float64{1, y}, [2]float64{2, z})
+}
+
+// TestStageSpeakerUnmatchedFragmentMergesIntoAnchor 未命中碎片并入在场锚点（思敏/说话人ghqhg case）：
+// 主组(8s) 强命中历史人思敏；碎片组(4s) rep 检索 top1=思敏 0.76、top2=干扰人文生 0.71，
+// gap=0.05 < 0.06 弱命中差一口气 → 未命中。守门：碎片 vs 思敏样本 segMax=0.76 ≥ 0.72 →
+// 并入思敏、不登记新声纹（旧逻辑正是这里登记出「说话人ghqhg」类脏声纹）。
+func TestStageSpeakerUnmatchedFragmentMergesIntoAnchor(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "思敏主讲一", StartMS: 0, EndMS: 5000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "思敏主讲二", StartMS: 5100, EndMS: 8100}, // 组 8.1s = 锚点
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "碎片短句", StartMS: 8200, EndMS: 12200}, // 4s 碎片
+	})
+	vSimin := mkUnitVec(1, 0, 0)                                            // 历史人思敏 = e0
+	vMain := mkUnitVec(0.95, math.Sqrt(1-0.95*0.95), 0)                     // 主组段：vs 思敏 0.95 强命中
+	// 碎片段：vs 思敏 0.76（≥0.72 守门过）、vs 干扰人 0.71（gap 0.05 令检索弱命中失败）。
+	// 干扰人 decoy 须贴近碎片（构成 top2）但远离主组（0.715）与思敏（0.508），
+	// 否则会变成主组检索的幽灵 top1（DB 无此人 → 主组被误判未命中）。
+	vFrag := mkUnitVec(0.76, 0.0596, math.Sqrt(1-0.76*0.76-0.0596*0.0596))
+	vOther := mkUnitVec(0.5076, 0.7453, 0.4323)
+	if s := cosineSim(vFrag, vOther); math.Abs(s-0.71) > 0.01 {
+		t.Fatalf("几何构造误差: vFrag·vOther=%.4f want 0.71", s)
+	}
+	if s := cosineSim(vMain, vOther); s > 0.8 {
+		t.Fatalf("decoy 离主组太近(%.4f)，会变成主组检索的幽灵 top1", s)
+	}
+	simin := &repo.Speaker{Name: "思敏", Source: "auto", Embedding: float32Blob(vSimin), SampleCount: 1}
+	if err := speakers.Create(ctx, simin); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), simin.ID) })
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vMain, 2: vMain, 3: vFrag},
+		entries:  []libEntry{{id: simin.ID, vec: vSimin}, {id: ids.New(), vec: vOther}},
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 0 {
+		t.Fatalf("碎片应并入在场思敏、不登记新声纹，实际登记 %d 个", len(fv.added))
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SpeakerID == nil || *s.SpeakerID != simin.ID {
+			t.Fatalf("段 %d 应并入思敏 %v，实际 %+v", s.SequenceNo, simin.ID, s.SpeakerID)
+		}
+	}
+}
+
+// TestStageSpeakerUnmatchedFragmentRegistersWhenDissimilar 负例：碎片与在场说话人不够像
+//（0.65 < 0.72，真实不同人区间）→ 照常登记新声纹（在场归并不能吞掉真人新说话人）。
+func TestStageSpeakerUnmatchedFragmentRegistersWhenDissimilar(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "思敏主讲一", StartMS: 0, EndMS: 5000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "思敏主讲二", StartMS: 5100, EndMS: 8100},
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "另一位短句", StartMS: 8200, EndMS: 12200},
+	})
+	vSimin := mkUnitVec(1, 0, 0)
+	vMain := mkUnitVec(0.95, math.Sqrt(1-0.95*0.95), 0)
+	vFrag := mkUnitVec(0.65, math.Sqrt(1-0.65*0.65), 0) // vs 思敏 0.65：既不命中也过不了守门
+	simin := &repo.Speaker{Name: "思敏", Source: "auto", Embedding: float32Blob(vSimin), SampleCount: 1}
+	if err := speakers.Create(ctx, simin); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), simin.ID) })
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vMain, 2: vMain, 3: vFrag},
+		entries:  []libEntry{{id: simin.ID, vec: vSimin}},
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 1 {
+		t.Fatalf("不够像的短组应照常登记新声纹，实际登记 %d 个", len(fv.added))
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	bySeq := map[int]repo.TranscriptSegment{}
+	for _, s := range segs {
+		bySeq[s.SequenceNo] = s
+	}
+	if s := bySeq[3]; s.SpeakerID == nil || *s.SpeakerID == simin.ID {
+		t.Fatalf("碎片应属新说话人，实际 %+v", s.SpeakerID)
+	}
+}
+
+// TestStageSpeakerFragmentOrderIndependence 碎片标签在前也能并入：2b 按总时长降序处理，
+// 主说话人（无论 ASR 标签顺序）先解析/登记，碎片随后才有锚点可并。空库场景。
+func TestStageSpeakerFragmentOrderIndependence(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "碎片在前", StartMS: 0, EndMS: 4000},      // 碎片 4s（标签靠前）
+		{SequenceNo: 2, SpeakerLabel: "2", Text: "主讲一", StartMS: 4100, EndMS: 10000},   // 主 5.9s
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "主讲二", StartMS: 10100, EndMS: 16000},  // 主共 11.8s
+	})
+	vMain := mkUnitVec(1, 0, 0)
+	vFrag := mkUnitVec(0.8, 0.6, 0) // cos(vFrag,vMain)=0.8 ≥ 0.72（同人碎片）
+	fv := &libVoiceprint{vecBySeq: map[int][]float32{1: vFrag, 2: vMain, 3: vMain}}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 1 {
+		t.Fatalf("空库主+同人碎片应只登记主说话人 1 个，实际 %d", len(fv.added))
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	speakerIDs := map[ids.ID]bool{}
+	for _, s := range segs {
+		if s.SpeakerID == nil {
+			t.Fatalf("段 %d 未回填", s.SequenceNo)
+		}
+		speakerIDs[*s.SpeakerID] = true
+	}
+	if len(speakerIDs) != 1 {
+		t.Fatalf("碎片应并入主说话人（标签顺序无关），实际 %d 个 speaker", len(speakerIDs))
+	}
+}
+
+// TestStageSpeakerFragmentOverrideToPresentSpeaker 命中碎片被在场锚点改判（铉晔/杰辉 case）：
+// 紧声纹 cohort——库内杰辉与铉晔互 0.75。主组(12.1s)强命中杰辉；碎片组(3s) rep（两段均值）
+// 检索弱命中铉晔（rep vs 铉晔 0.763、vs 杰辉 0.572，gap 大），但段级 vs 杰辉 0.74 ≥ vs 铉晔
+// (归属) 0.73 → 「锚点不比归属差」整组改判给在场杰辉（旧逻辑命中即定终身，正是误判 case）。
+// 两段碎片镜像构造：均值指向铉晔（rep 检索命中它）、单段微倾杰辉（段级改判依据）。
+func TestStageSpeakerFragmentOverrideToPresentSpeaker(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "杰辉主讲一", StartMS: 0, EndMS: 6000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "杰辉主讲二", StartMS: 6100, EndMS: 12100}, // 主组 12.1s 锚点
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "碎片句一", StartMS: 12200, EndMS: 13700}, // 碎片 1.5s
+		{SequenceNo: 4, SpeakerLabel: "2", Text: "碎片句二", StartMS: 13800, EndMS: 15300}, // 碎片组共 3s
+	})
+	vXuanye := mkUnitVec(1, 0, 0)                                                    // 铉晔 = e0
+	vJiehui := mkUnitVec(0.75, 0.6614, 0)                                            // 杰辉：与铉晔互 0.75（紧 cohort）
+	vMainJ := mkUnitVec(0.82, 0.431, math.Sqrt(1-0.82*0.82-0.431*0.431))             // vs 杰辉 0.9 强命中
+	vF1 := mkUnitVec(0.73, 0.291, math.Sqrt(1-0.73*0.73-0.291*0.291))                // 段级 vs 铉晔 0.73 / vs 杰辉 0.74
+	vF2 := mkUnitVec(0.73, -0.291, math.Sqrt(1-0.73*0.73-0.291*0.291))               // e1 分量镜像：均值 rep 指向铉晔
+	if s := cosineSim(vF1, vJiehui); math.Abs(s-0.74) > 0.01 {
+		t.Fatalf("几何构造误差: vF1·vJiehui=%.4f want 0.74", s)
+	}
+	xuanye := &repo.Speaker{Name: "铉晔", Source: "auto", Embedding: float32Blob(vXuanye), SampleCount: 1}
+	jiehui := &repo.Speaker{Name: "杰辉", Source: "auto", Embedding: float32Blob(vJiehui), SampleCount: 1}
+	for _, sp := range []*repo.Speaker{xuanye, jiehui} {
+		if err := speakers.Create(ctx, sp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = speakers.Delete(context.Background(), xuanye.ID)
+		_ = speakers.Delete(context.Background(), jiehui.ID)
+	})
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vMainJ, 2: vMainJ, 3: vF1, 4: vF2},
+		entries:  []libEntry{{id: xuanye.ID, vec: vXuanye}, {id: jiehui.ID, vec: vJiehui}},
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 0 {
+		t.Fatalf("两组都命中库内声纹，不应新登记，实际 %d", len(fv.added))
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SequenceNo >= 3 {
+			if s.SpeakerID == nil || *s.SpeakerID != jiehui.ID {
+				t.Fatalf("碎片段 %d 应改判给在场杰辉 %v，实际 %+v", s.SequenceNo, jiehui.ID, s.SpeakerID)
+			}
+			if s.CorrectedFromSpeakerID == nil || *s.CorrectedFromSpeakerID != xuanye.ID {
+				t.Fatalf("碎片段 %d 应有 corrected_from=铉晔，实际 %+v", s.SequenceNo, s.CorrectedFromSpeakerID)
+			}
+		}
+	}
+}
+
+// TestStageSpeakerFragmentKeepsOwnMatchWhenSelfHigher 负例：真身碎片段级仍显著更像归属
+//（vs 归属 0.80 > vs 在场 0.70）→ 保持归属，不被在场改判吞掉。
+func TestStageSpeakerFragmentKeepsOwnMatchWhenSelfHigher(t *testing.T) {
+	ctx := context.Background()
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "杰辉主讲一", StartMS: 0, EndMS: 6000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "杰辉主讲二", StartMS: 6100, EndMS: 12100},
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "铉晔本人碎片", StartMS: 12200, EndMS: 15200}, // 3s 碎片
+	})
+	vXuanye := mkUnitVec(1, 0, 0)
+	vJiehui := mkUnitVec(0.75, 0.6614, 0)
+	vMainJ := mkUnitVec(0.82, 0.431, math.Sqrt(1-0.82*0.82-0.431*0.431))
+	// 铉晔本人碎片：vs 铉晔 0.80（强命中）、vs 杰辉 0.70 → self 高于锚点，保持
+	vFrag := mkUnitVec(0.80, 0.1513, math.Sqrt(1-0.80*0.80-0.1513*0.1513))
+	if s := cosineSim(vFrag, vJiehui); math.Abs(s-0.70) > 0.01 {
+		t.Fatalf("几何构造误差: vFrag·vJiehui=%.4f want 0.70", s)
+	}
+	xuanye := &repo.Speaker{Name: "铉晔", Source: "auto", Embedding: float32Blob(vXuanye), SampleCount: 1}
+	jiehui := &repo.Speaker{Name: "杰辉", Source: "auto", Embedding: float32Blob(vJiehui), SampleCount: 1}
+	for _, sp := range []*repo.Speaker{xuanye, jiehui} {
+		if err := speakers.Create(ctx, sp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = speakers.Delete(context.Background(), xuanye.ID)
+		_ = speakers.Delete(context.Background(), jiehui.ID)
+	})
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vMainJ, 2: vMainJ, 3: vFrag},
+		entries:  []libEntry{{id: xuanye.ID, vec: vXuanye}, {id: jiehui.ID, vec: vJiehui}},
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SequenceNo == 3 {
+			if s.SpeakerID == nil || *s.SpeakerID != xuanye.ID {
+				t.Fatalf("铉晔本人碎片应保持铉晔，实际 %+v", s.SpeakerID)
+			}
+			if s.CorrectedFromSpeakerID != nil {
+				t.Fatalf("不应改判，实际标记 %+v", s.CorrectedFromSpeakerID)
+			}
 		}
 	}
 }

@@ -35,5 +35,10 @@ func Matched(top1, top2, threshold float64) bool {
 	if top1 >= SoftMin && top1-top2 >= GapMin {
 		return true // ② 区分性弱命中
 	}
-	return top1 >= LooseMin && top1-top2 >= LooseGap // ③ 宽松命中（低分但区分度够）
+	// ③ 宽松命中（低分但区分度够）。top2=0（库中仅 1 人）时**不生效**：没有第二名就谈不上
+	// 「相对第二名区分度足够」，规则退化为「≥0.4 即命中」——而实测不同人声纹互余弦
+	// 0.55~0.79 很常见，单声纹库会把新出现的不同人误归并给库里唯一那个人（2026-08-31
+	// 修复：曾令 main 的 phantom/过短并入两用例回归失红）。弱命中②的 top2=0 语义保留
+	//（≥0.72 本就是同人区间，单声纹库无混淆对象）。
+	return top2 > 0 && top1 >= LooseMin && top1-top2 >= LooseGap
 }
