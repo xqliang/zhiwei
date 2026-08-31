@@ -173,7 +173,15 @@ const app = createApp({
     // 实体摘要：new_value 是带引号的 JSON 字符串，parse 去引号；失败原样显示。
     function fmtChangeSummary(log) {
       if (!log.new_value) return profilePlaneMeta(log.entity_kind).label + '变更';
-      try { return JSON.parse(log.new_value); } catch (e) { return log.new_value; }
+      let s;
+      try { s = JSON.parse(log.new_value); } catch (e) { s = log.new_value; }
+      // metric 平面：摘要形如「key=值[/文本]」（后端 metricSummary 拼接），把英文 key 换成中文名
+      // （height→身高、weight→体重、mood_energy→精力…）。存量审计行里固化的英文 key 也在此更正。
+      if (log.entity_kind === 'metric' && typeof s === 'string') {
+        const i = s.indexOf('=');
+        if (i > 0) s = metricLabel(s.slice(0, i)) + s.slice(i);
+      }
+      return s;
     }
     // 按 entity_kind 分组（组内后端已按 id 正序）。
     const profileChangeGroups = computed(() => {
