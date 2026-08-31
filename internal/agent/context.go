@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -101,11 +102,22 @@ func AssemblePersona(identity, soul string) string {
 	return strings.Join(b, "\n\n")
 }
 
-// Seeds 按本轮 query 召回 top-k 相关记忆，拼成上下文头的「相关记忆」块；
-// 无 Retrieve / query 空 / 无命中 → ""。每轮一次 query 向量化（未配 embedder 时 Retrieve=nil 不触发）。
+// personalSignal 命中「问题关于用户本人」的信号；仅当 query 命中时才跑召回+注入种子。
+// 常识/名词解释/一般知识题（如「ASL 是什么」「猫的习性」）不含这些词 → 不注入，
+// 从源头避免「啥都跟你数据有关」的误导，也顺带省一次 embedding 调用。
+var personalSignal = regexp.MustCompile(`我|咱|自己|本人`)
+
+// Seeds 按本轮 query 召回 top-k 相关记忆，拼成上下文头的「相关记忆」块。
+// 门控：仅当 query 命中个人信号（我/咱/自己/本人）时才召回——常识/名词解释题不注入，
+// 避免「啥都跟你数据有关」的误导，也省一次 embedding 调用。
+// 无 Retrieve / query 空 / query 无个人信号 / 无命中 → ""。每轮一次 query 向量化（未配 embedder 时 Retrieve=nil 不触发）。
 // userID 指定「谁」的记忆（2B-B：由 runTurn 传 conv.UserID，多用户隔离，绝不召回别人的记忆）。
 func (pc *ProfileContext) Seeds(ctx context.Context, userID int64, query string) string {
 	if pc == nil || pc.Retrieve == nil || strings.TrimSpace(query) == "" {
+		return ""
+	}
+	// 个人信号门控：仅当 query 关于用户本人时才召回；否则不注入。
+	if !personalSignal.MatchString(query) {
 		return ""
 	}
 	ms, err := pc.Retrieve.Search(ctx, userID, query, "", 0) // limit=0 → Retriever.TopK
@@ -113,7 +125,7 @@ func (pc *ProfileContext) Seeds(ctx context.Context, userID int64, query string)
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("可能相关的我的记忆（供参考，不必逐条复述）：")
+	b.WriteString("与该问题可能相关的背景记忆（仅供参考，不相关请忽略）：")
 	for _, m := range ms {
 		b.WriteString("\n- " + m.Title)
 	}
