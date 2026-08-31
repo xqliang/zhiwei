@@ -244,19 +244,18 @@ func main() {
 		EntitySeed:              entitySeed,
 		CorrectPrompt:           string(correctPromptBytes),
 		CorrectPromptVersion:    "asr_correction_v1",
+		CorrectEnabled:          cfg.EntityCorrectEnabled,
 		CorrectWindow:           cfg.EntityCorrectWindow,
 		CorrectTopK:             cfg.EntityCorrectTopK,
 		CorrectMinSim:           cfg.EntityCorrectMinSim,
 		CorrectMaxLLMCalls:      cfg.EntityCorrectMaxLLM,
 	})
 	// profile stage 按开关追加（ZW_PROFILE_EXTRACT_ENABLED=false 时仅手动+回填端点）
-	// correct stage 按开关插入 asr 之后（ZW_ENTITY_CORRECT_ENABLED=false 时跳过，
-	// 流水线退化为原 asr→segment 顺序；已在途的 job 不受影响——state 机按 stage 名推进）。
-	stagesList := []string{"asr"}
-	if cfg.EntityCorrectEnabled {
-		stagesList = append(stagesList, "correct")
-	}
-	stagesList = append(stagesList, "segment", "speaker", "speakername", "extract")
+	// correct stage 常驻 stagesList、开关在 stage 内部生效（CorrectEnabled=false → no-op）：
+	// 它是**中段** stage，若按开关从列表移除，恰停在该 stage 的在途 job 会在
+	// Flow.Next 找不到后继而直接判完成，静默跳过 segment/speaker/extract（末段
+	// profile 无此问题）。常驻+内部 no-op 让开关随时翻转、在途 job 无损。
+	stagesList := []string{"asr", "correct", "segment", "speaker", "speakername", "extract"}
 	if cfg.ProfileExtractEnabled {
 		stagesList = append(stagesList, "profile")
 	}

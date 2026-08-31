@@ -65,9 +65,13 @@ type StageDeps struct {
 	CorrectPrompt  string                   // prompts/asr_correction_v1.md 内容（system prompt）
 	// CorrectPromptVersion prompt 文件版本名（如 asr_correction_v1），写 trace 用。
 	CorrectPromptVersion string
-	CorrectWindow        int     // 上下文前后段数，0 = 默认 2
-	CorrectTopK          int     // 召回 Top-K，0 = 默认 5
-	CorrectMinSim        float64 // 召回相似度下限，0 = 默认 0.6
+	// CorrectEnabled 总开关（ZW_ENTITY_CORRECT_ENABLED）。stage 常驻 stagesList、
+	// 开关在此生效（false → no-op）——中段 stage 不能按开关从 stagesList 移除，
+	// 否则恰停在该 stage 的在途 job 会因 Flow.Next 无后继直接判完成、静默丢后续。
+	CorrectEnabled   bool    // false = stage no-op（流水线照常推进）
+	CorrectWindow    int     // 上下文前后段数，0 = 默认 2
+	CorrectTopK      int     // 召回 Top-K，0 = 默认 5
+	CorrectMinSim    float64 // 召回相似度下限，0 = 默认 0.6
 	// CorrectMaxLLMCalls 逐段 LLM 调用的会话级上限（成本护栏），0 = 默认 500。
 	CorrectMaxLLMCalls int
 

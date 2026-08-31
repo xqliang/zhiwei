@@ -165,6 +165,7 @@ func newCorrectDeps(fx *correctFixture, llm provider.LLMProvider) StageDeps {
 		Sessions: fx.sessions, Transcripts: fx.transcripts,
 		EntityKB: fx.entityKB, EntitySettings: fx.settings,
 		LLM: llm, LLMModel: "fake-model", CorrectPrompt: "测试纠错 prompt",
+		CorrectEnabled: true, // 测试默认开（零值 false 会让所有用例 no-op）
 	}
 }
 
@@ -408,6 +409,7 @@ func TestStageCorrectDisabled(t *testing.T) {
 	}
 }
 
+// TestStageCorrectNoDeps 依赖缺失（旧装配）与 env 总开关关闭 → 均为 no-op。
 func TestStageCorrectNoDeps(t *testing.T) {
 	fx := setupCorrectFixture(t)
 	ctx := context.Background()
@@ -423,5 +425,15 @@ func TestStageCorrectNoDeps(t *testing.T) {
 	seg2 := getSeg(t, fx.transcripts, fx.tr.ID, 2)
 	if seg2.Text != "常梦瑜你看到我的邮件了吗" || seg2.CorrectedReason != nil {
 		t.Fatalf("依赖缺失时 seg2 不应变，text=%q reason=%v", seg2.Text, seg2.CorrectedReason)
+	}
+
+	// env 总开关关闭（CorrectEnabled=false）→ 同样 no-op（stage 常驻流水线、开关在内部生效）。
+	d2 := newCorrectDeps(fx, llm)
+	d2.CorrectEnabled = false
+	if err := runCorrectStage(ctx, d2, &repo.Job{}, fx.sid); err != nil {
+		t.Fatalf("开关关闭应 no-op 返回 nil，实际 err=%v", err)
+	}
+	if len(llm.calls) != 0 {
+		t.Fatalf("开关关闭不应调 LLM，实际 %d 次", len(llm.calls))
 	}
 }

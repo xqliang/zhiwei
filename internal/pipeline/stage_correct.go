@@ -65,6 +65,9 @@ func ParseCorrectionEdits(raw string) ([]correctionEdit, error) {
 // 全程 best-effort（同 speakername）：LLM/解析失败 log+trace 后继续，不 fail session；
 // 真 DB 错误（读段/写段/读设置）返回 error 交 pool 重试。
 func runCorrectStage(ctx context.Context, d StageDeps, j *repo.Job, sessionID ids.ID) error {
+	if !d.CorrectEnabled {
+		return nil // env 总开关关闭 → no-op（stage 常驻流水线，见 StageDeps.CorrectEnabled 注释）
+	}
 	if d.EntityKB == nil || d.EntitySettings == nil || d.LLM == nil {
 		return nil // 依赖未装配（测试/降级）→ no-op
 	}
