@@ -308,6 +308,83 @@ func TestStageCorrectGate(t *testing.T) {
 	}
 }
 
+// TestStageCorrectCrossCandidateGate 跨候选拼接错位：白名单同时含 张梦瑜 与 王芳，
+// LLM 返回 corrected=张梦瑜 但 entity_id=王芳 的 id——两个都在白名单、却不是同一个
+// 候选。门控须拦下（idToCanon 同候选校验），文本不动。
+func TestStageCorrectCrossCandidateGate(t *testing.T) {
+	fx := setupCorrectFixture(t)
+	ctx := context.Background()
+	// 追加第二个实体 王芳 + 一段同时召回两者的段（「常梦瑜和王房聊天」：
+	// 常梦瑜→zhang meng yu 精确命中张梦瑜；王房→wang fang 精确命中王芳）。
+	wf := "wang fang"
+	if err := fx.entityKB.ReplaceAuto(ctx, 1, repo.EntityKindPerson, []repo.Entity{{Canonical: "王芳", Pinyin: &wf}}); err != nil {
+		t.Fatal(err)
+	}
+	segs := []repo.TranscriptSegment{{
+		TranscriptID: fx.tr.ID, SequenceNo: 3, SpeakerLabel: "1",
+		Text: "常梦瑜和王房聊天", StartMS: 6000, EndMS: 9000,
+	}}
+	if err := fx.transcripts.InsertSegments(ctx, segs); err != nil {
+		t.Fatal(err)
+	}
+	// 取两个实体的真实 id：张梦瑜（fx.ent）与王芳（按 canonical List 查）。
+	list, err := fx.entityKB.ListEnabled(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wID string
+	for _, e := range list {
+		if e.Canonical == "王芳" {
+			wID = e.ID.String()
+		}
+	}
+	if wID == "" {
+		t.Fatal("实体 王芳 未入库")
+	}
+	// seq2 先处理（返回空 edits 省一次响应对齐），seq3 返回拼接错位的 edit。
+	llm := &fakeCorrectLLM{resps: []string{
+		`{"edits":[]}`,
+		fmt.Sprintf(`{"edits":[{"orig":"常梦瑜","corrected":"张梦瑜","entity_id":"%s","confidence":0.95,"reason":"拼接错位"}]}`, wID),
+	}}
+	d := newCorrectDeps(fx, llm)
+	if err := runCorrectStage(ctx, d, &repo.Job{}, fx.sid); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	seg3 := getSeg(t, fx.transcripts, fx.tr.ID, 3)
+	if seg3.Text != "常梦瑜和王房聊天" || seg3.CorrectedReason != nil || len(seg3.EntityEdits) != 0 {
+		t.Fatalf("跨候选拼接错位应被门控拦下: text=%q reason=%v edits=%s", seg3.Text, seg3.CorrectedReason, seg3.EntityEdits)
+	}
+}
+
+// TestStageCorrectLLMCallCap 成本护栏：CorrectMaxLLMCalls=1 时，两个有候选的段
+// 只处理第一个，第二个不再调 LLM（calls==1）、文本不动。
+func TestStageCorrectLLMCallCap(t *testing.T) {
+	fx := setupCorrectFixture(t)
+	ctx := context.Background()
+	segs := []repo.TranscriptSegment{{
+		TranscriptID: fx.tr.ID, SequenceNo: 3, SpeakerLabel: "1",
+		Text: "常梦瑜也在场", StartMS: 6000, EndMS: 9000,
+	}}
+	if err := fx.transcripts.InsertSegments(ctx, segs); err != nil {
+		t.Fatal(err)
+	}
+	llm := &fakeCorrectLLM{resps: []string{`{"edits":[]}`}} // 只给 1 个响应：第二个调用本就不该发生
+	d := newCorrectDeps(fx, llm)
+	d.CorrectMaxLLMCalls = 1
+	j := &repo.Job{}
+	if err := runCorrectStage(ctx, d, j, fx.sid); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if len(llm.calls) != 1 {
+		t.Fatalf("上限 1 时应恰好 1 次 LLM 调用，实际 %d", len(llm.calls))
+	}
+	seg3 := getSeg(t, fx.transcripts, fx.tr.ID, 3)
+	if seg3.Text != "常梦瑜也在场" || seg3.CorrectedReason != nil {
+		t.Fatalf("超上限的段不应被处理: %+v", seg3)
+	}
+}
+
+// TestStageCorrectDisabled 功能总开关关闭：不调 LLM、文本不动。
 func TestStageCorrectDisabled(t *testing.T) {
 	fx := setupCorrectFixture(t)
 	ctx := context.Background()

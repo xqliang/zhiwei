@@ -112,6 +112,14 @@ func runCorrectStage(ctx context.Context, d StageDeps, j *repo.Job, sessionID id
 	if minSim <= 0 {
 		minSim = 0.6 // 召回下限默认（实测同音错≈0.95、无关≈0.57）
 	}
+	// 成本护栏：逐段 LLM 调用的会话级上限。长录音（数百段）即便三成段有候选，
+	// 也是上百次串行调用——token 花费随录音长度线性无界。达上限后余下段本轮跳过
+	// （不落标记，下轮重跑会自然续上——幂等跳过已纠正段，从第一个未纠正候选段继续）。
+	maxLLMCalls := d.CorrectMaxLLMCalls
+	if maxLLMCalls <= 0 {
+		maxLLMCalls = 500
+	}
+	llmCalls := 0
 
 	changed := false
 	for i := range segs {
@@ -126,7 +134,12 @@ func runCorrectStage(ctx context.Context, d StageDeps, j *repo.Job, sessionID id
 		if len(cands) == 0 {
 			continue // 白名单为空 → 不调 LLM（省成本 + 避免无约束改写）
 		}
+		if llmCalls >= maxLLMCalls {
+			appendTrace(j, repo.TraceEntry{Stage: "correct", Error: fmt.Sprintf("LLM 调用达会话上限 %d，余下段本轮跳过（成本护栏，非错误）", maxLLMCalls)})
+			break
+		}
 		edits := correctSegment(ctx, d, j, sessionID, sg, cands, segs, i, window, st.ConfidenceThreshold)
+		llmCalls++
 		if len(edits) == 0 {
 			continue
 		}
@@ -180,15 +193,15 @@ func correctSegment(ctx context.Context, d StageDeps, j *repo.Job, sessionID ids
 	sg *repo.TranscriptSegment, cands []entity.Candidate, segs []repo.TranscriptSegment,
 	i, window int, threshold float64) []correctionEdit {
 
-	// 白名单索引（门控校验用）。
-	byCanonical := make(map[string]bool, len(cands))
-	byID := make(map[string]bool, len(cands))
+	// 白名单索引（门控校验用）：entity_id → canonical。门控要求 corrected 与
+	// entity_id 指向**同一个候选**（分立双 map 会放过「corrected 取自候选 A、
+	// entity_id 取自候选 B」的拼接错位——虽无害但不严谨）。
+	idToCanon := make(map[string]string, len(cands))
 	var sb strings.Builder
 	sb.WriteString("合法实体白名单（corrected 只能取自这里）：\n")
 	for _, c := range cands {
 		fmt.Fprintf(&sb, "- id=%s canonical=%s kind=%s\n", c.EntityID, c.Canonical, c.Kind)
-		byCanonical[c.Canonical] = true
-		byID[c.EntityID.String()] = true
+		idToCanon[c.EntityID.String()] = c.Canonical
 	}
 	sb.WriteString("\n对话转写（【本段】是要纠错的段落，其余为上下文参考）：\n")
 	for k := i - window; k <= i+window; k++ {
@@ -208,14 +221,14 @@ func correctSegment(ctx context.Context, d StageDeps, j *repo.Job, sessionID ids
 		appendTrace(j, repo.TraceEntry{Stage: "correct", Error: fmt.Sprintf("段%d LLM 失败（尽力而为）: %v", sg.SequenceNo, err)})
 		return nil
 	}
-	appendTrace(j, repo.TraceEntry{Stage: "correct:llm", Model: d.LLMModel, MS: msSince(begin), Tokens: resp.TotalTokens})
+	appendTrace(j, repo.TraceEntry{Stage: "correct:llm", Model: d.LLMModel, MS: msSince(begin), Tokens: resp.TotalTokens, PromptVersion: d.CorrectPromptVersion})
 	edits, err := ParseCorrectionEdits(resp.Content)
 	if err != nil {
 		log.Printf("[correct] session=%s 段%d 解析失败（尽力而为）: %v", sessionID, sg.SequenceNo, err)
 		appendTrace(j, repo.TraceEntry{Stage: "correct", Error: fmt.Sprintf("段%d 解析失败（尽力而为）: %v", sg.SequenceNo, err)})
 		return nil
 	}
-	// 双重门控：阈值 + orig 在段内 + corrected/entity_id 在白名单内。
+	// 双重门控：阈值 + orig 在段内 + corrected/entity_id 同属白名单内同一候选。
 	var pass []correctionEdit
 	for _, e := range edits {
 		if e.Confidence < threshold {
@@ -224,8 +237,8 @@ func correctSegment(ctx context.Context, d StageDeps, j *repo.Job, sessionID ids
 		if !strings.Contains(sg.Text, e.Orig) {
 			continue // 幻觉 orig：段里根本没有这个片段
 		}
-		if !byCanonical[e.Corrected] || !byID[e.EntityID] {
-			continue // 幻觉实体：白名单里没有
+		if canon, ok := idToCanon[e.EntityID]; !ok || canon != e.Corrected {
+			continue // 幻觉实体：白名单里没有，或 corrected 与 entity_id 指向不同候选（拼接错位）
 		}
 		pass = append(pass, e)
 	}
