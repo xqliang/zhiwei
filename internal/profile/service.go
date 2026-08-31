@@ -82,11 +82,34 @@ type ApplyStats struct {
 	Reaffirmed int // 同值佐证（置信度上调）
 	Conflicts  int // Pending 中的冲突条数
 	Skipped    int // 幂等跳过 / 主体解析不到
+	// StaleRemoved 残留清理删除的本 session 旧行数（见 ApplyFacts 的残留清理：
+	// 用户改 ASR 重新提取后，旧文本独有、未被新事实命中的画像行）。
+	StaleRemoved int
+
+	// touched 残留清理的「保留白名单」：本次落库过程中被读到的已有行 id
+	//（dedup 命中 / refine 目标 / reaffirm 目标——含跨 session 行，多收只多不少删）。
+	// key=表名（person_attribute 等）。unexported：不参与 API 序列化，纯内部机制。
+	touched map[string]map[ids.ID]bool
+}
+
+// touch 记录一个被本次事实处理过的已有行（残留清理时不删）。惰性初始化。
+func (st *ApplyStats) touch(table string, id ids.ID) {
+	if st.touched == nil {
+		st.touched = map[string]map[ids.ID]bool{}
+	}
+	if st.touched[table] == nil {
+		st.touched[table] = map[ids.ID]bool{}
+	}
+	st.touched[table][id] = true
 }
 
 // ApplyFacts 把一批 LLM 事实应用到库：人物归属解析 → 闸门 → 单事务写入
-// （含 change_log）。幂等靠自然键去重（spec §6.3）——同 session 重跑不重复
-// 建 pending、不重复 bump；用户此前的 confirm/dismiss 决定保留。
+// （含 change_log）。幂等三层（spec §6.3）：① 自然键去重——同 session 重跑不重复
+// 建 pending、不重复 bump；② 同键变化 refine / 敏感平面 pending-supersedes
+// （reextract_dedup 契约）；③ 残留清理——同 session 重跑时，旧文本独有、未被本次
+// 事实命中的行连同 change_log 删除（改 ASR 重新提取后画像以最新文本为准）。
+// 用户此前的 confirm/dismiss 决定只对「仍被新事实命中的行」保留；随旧文本消失的
+// 行（含其上的确认状态）一并删除——源头文本已改，确认失去依据。
 func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64, facts []Fact) (ApplyStats, error) {
 	var st ApplyStats
 	st.Total = len(facts)
@@ -95,6 +118,15 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 		return st, err
 	}
 	defer func() { _ = tx.Rollback() }() // Commit 后 Rollback 是 no-op
+
+	// 残留清理（快照步）：先快照本 session 在各画像平面的现有行 id；落库后与
+	// 白名单（本次事实触碰过的行，见 ApplyStats.touch）求差，差集 = 旧文本独有、
+	// 新文本下已消失的事实 → 删除（连同 change_log）。用户改 ASR 重新提取后，
+	// 画像与 memory/todo 一样以最新文本为准（2026-08-31「划船→化妆」实录 bug）。
+	snapRows, err := snapshotSessionRows(ctx, tx, sessionID)
+	if err != nil {
+		return st, fmt.Errorf("快照 session 画像行: %w", err)
+	}
 
 	// 本 session 的 memories：供 memory_id 溯源（按 segment 交集最大匹配）。
 	// 事务外读即可（只读，不依赖事务内一致性）。
@@ -152,6 +184,16 @@ func (s *Service) ApplyFacts(ctx context.Context, sessionID ids.ID, userID int64
 			return st, err
 		}
 	}
+
+	// 残留清理（删除步）：快照 - 白名单 = 旧文本独有行 → 删除（含 change_log 级联）。
+	// 放两趟落库之后：refine/supersedes 路径可能新建行或更新旧行，先落完再算差集，
+	// 白名单在 applyXXX 内随 dedup/existing 命中实时收集。
+	if n, err := deleteStaleRows(ctx, tx, sessionID, snapRows, st.touched); err != nil {
+		return st, err
+	} else if n > 0 {
+		st.StaleRemoved = n
+	}
+
 	if err := tx.Commit(); err != nil {
 		return st, err
 	}
@@ -227,6 +269,13 @@ func (s *Service) applyAttributeFact(ctx context.Context, tx *sqlx.Tx, userID in
 	if err != nil {
 		return err
 	}
+	// 残留清理白名单：读到的已有行（existing 可能是本 session 上轮所建）不参与残留删除。
+	if existing != nil {
+		st.touch("person_attribute", existing.ID)
+	}
+	if dedup != nil {
+		st.touch("person_attribute", dedup.ID)
+	}
 
 	switch DecideAttribute(f, existing, isList, dedup != nil, s.Gate) {
 	case DecisionSkip:
@@ -292,9 +341,15 @@ func (s *Service) applyRelationshipFact(ctx context.Context, tx *sqlx.Tx, userID
 	if err != nil {
 		return err
 	}
+	if existing != nil {
+		st.touch("person_relationship", existing.ID) // 残留清理白名单
+	}
 	dedup, err := s.Relationships.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, f.RelationType, idPtr(relatedID))
 	if err != nil {
 		return err
+	}
+	if dedup != nil {
+		st.touch("person_relationship", dedup.ID) // 残留清理白名单
 	}
 
 	dec := DecideRelationship(f, existing, dedup != nil, s.Gate)
@@ -353,9 +408,15 @@ func (s *Service) applyEventFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 	if err != nil {
 		return err
 	}
+	if existing != nil {
+		st.touch("person_event", existing.ID) // 残留清理白名单
+	}
 	dedup, err := s.Events.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, f.EventType, f.EventTitle)
 	if err != nil {
 		return err
+	}
+	if dedup != nil {
+		st.touch("person_event", dedup.ID) // 残留清理白名单
 	}
 
 	dec := DecideEvent(f, existing, dedup != nil, s.Gate)
@@ -436,6 +497,9 @@ func (s *Service) applyMetricFact(ctx context.Context, tx *sqlx.Tx, userID int64
 		return err
 	}
 	if ex != nil {
+		st.touch("person_metric", ex.ID) // 残留清理白名单（幂等同点命中=本 session 上轮所建）
+	}
+	if ex != nil {
 		st.Skipped++
 		return nil
 	}
@@ -504,6 +568,9 @@ func (s *Service) applyActivityFact(ctx context.Context, tx *sqlx.Tx, userID int
 	if err != nil {
 		return err
 	}
+	if dedup != nil {
+		st.touch("person_activity", dedup.ID) // 残留清理白名单
+	}
 
 	dec := DecideActivity(f, dedup != nil, s.Gate)
 	if dec == DecisionSkip {
@@ -547,9 +614,15 @@ func (s *Service) applyCycleFact(ctx context.Context, tx *sqlx.Tx, userID int64,
 	if err != nil {
 		return err
 	}
+	if existing != nil {
+		st.touch("person_cycle", existing.ID) // 残留清理白名单
+	}
 	dedup, err := s.Cycles.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, f.CycleType, label)
 	if err != nil {
 		return err
+	}
+	if dedup != nil {
+		st.touch("person_cycle", dedup.ID) // 残留清理白名单
 	}
 
 	// 同参短路（对齐 attribute 的「同值→佐证」语义）：existing 的关键参数与新事实完全一致时
@@ -638,9 +711,15 @@ func (s *Service) applyPetFact(ctx context.Context, tx *sqlx.Tx, userID int64, f
 	if err != nil {
 		return err
 	}
+	if existing != nil {
+		st.touch("person_pet", existing.ID) // 残留清理白名单
+	}
 	dedup, err := s.Pets.FindByNaturalKeyExt(ctx, tx, prov.SessionID, personID, name)
 	if err != nil {
 		return err
+	}
+	if dedup != nil {
+		st.touch("person_pet", dedup.ID) // 残留清理白名单
 	}
 
 	// 同值佐证短路：跨 session 未命中自然键、但 fact 提到的字段与现值全一致（「我家猫小花」
