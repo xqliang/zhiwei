@@ -3057,7 +3057,7 @@ const app = createApp({
     const entList = ref([]);           // 全部实体（auto+manual，含禁用行，设置页分组展示）
     const entNewCanonical = ref('');   // 手动新增输入
     const entNewNote = ref('');
-    const entKindLabels = { person: '人物', pet: '宠物', project: '项目', task: '待办', topic: '话题', speaker: '说话人', custom: '自定义' };
+    const entKindLabels = { person: '人物', pet: '宠物', project: '项目', topic: '话题', speaker: '说话人', custom: '自定义' };
     // GET /api/agent/entity-settings → {correction_enabled, confidence_threshold, auto_sources, counts_by_kind}
     // GET /api/agent/entities → {entities:[{id,canonical,kind,pinyin,metaphone,source,source_ref,enabled,note,...}]}
     async function loadEntities() {
@@ -3092,14 +3092,15 @@ const app = createApp({
         await loadEntities();
       } catch (e) { showError(e); }
     }
-    // PATCH /api/agent/entities/{id} {enabled}（任意来源均可启禁）
+    // PATCH /api/agent/entities/{id} {enabled}（manual/auto 均可启禁；auto id 形如 "auto:<canonical>"，
+    // 含 ":" 与中文，须 encodeURIComponent，否则 chi 路由按 "/" 截断匹配不到）。
     async function toggleEntity(e) {
-      try { await api('PATCH', '/api/agent/entities/' + e.id, { enabled: !e.enabled }); await loadEntities(); }
+      try { await api('PATCH', '/api/agent/entities/' + encodeURIComponent(e.id), { enabled: !e.enabled }); await loadEntities(); }
       catch (err) { showError(err); }
     }
-    // DELETE /api/agent/entities/{id} → 204（自动实体删除后下次刷新会回来，想持久停用请禁用）
+    // DELETE /api/agent/entities/{id} → 204（仅 manual；auto 由来源实时重建，删除无意义，后端亦拒）。
     async function removeEntity(e) {
-      try { await api('DELETE', '/api/agent/entities/' + e.id); await loadEntities(); }
+      try { await api('DELETE', '/api/agent/entities/' + encodeURIComponent(e.id)); await loadEntities(); }
       catch (err) { showError(err); }
     }
 

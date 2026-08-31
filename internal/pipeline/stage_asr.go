@@ -59,9 +59,10 @@ type StageDeps struct {
 	NameInferMaxSegments  int                            // 上下文段数上限，0 = 默认 400
 
 	// ---- correct stage（ASR 实体纠错）----
-	EntityKB       *repo.EntityKBRepo       // 实体知识库；nil = no-op（兼容旧装配/测试）
+	EntityKB       *repo.EntityKBRepo       // 实体知识库（manual 条目）；nil = no-op（兼容旧装配/测试）
 	EntitySettings *repo.EntitySettingsRepo // 纠错配置（每用户开关/阈值/auto_sources）；nil = no-op
-	EntitySeed     entity.SeedDeps          // 种子刷新依赖（各来源 repo + KB）
+	EntitySeed     entity.SeedDeps          // 实时聚合依赖（person/pet/speaker/topic 等来源 repo）
+	EntityDisabled *repo.EntityDisabledRepo // 禁用名单（持久停用的自动实体名）；nil = 无禁用
 	CorrectPrompt  string                   // prompts/asr_correction_v1.md 内容（system prompt）
 	// CorrectPromptVersion prompt 文件版本名（如 asr_correction_v1），写 trace 用。
 	CorrectPromptVersion string

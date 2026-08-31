@@ -1101,14 +1101,14 @@
         <button class="btn primary" @click="addEntity">添加</button>
       </div>
 
-      <!-- 实体列表（auto+manual，含禁用行） -->
+      <!-- 实体列表（manual 可增删改；auto 实时聚合只可启禁——无删除按钮，删了会被来源重建） -->
       <div v-for="e in entList" :key="e.id"
            style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid var(--border,#eee)">
         <span :class="{ muted: !e.enabled }" :style="e.enabled ? 'font-weight:600' : 'text-decoration:line-through'">{{ e.canonical }}</span>
         <span class="muted" style="font-size:var(--fs-xs)">{{ entKindLabels[e.kind] || e.kind }} · {{ e.source === 'manual' ? '手动' : '自动' }}<template v-if="e.note"> · {{ e.note }}</template></span>
         <span style="flex:1"></span>
-        <button class="btn" style="padding:4px 10px; font-size:var(--fs-xs)" @click="toggleEntity(e)" :title="e.enabled ? '禁用（不参与纠错，刷新保留）' : '启用'">{{ e.enabled ? '禁用' : '启用' }}</button>
-        <button class="btn" style="padding:4px 10px; font-size:var(--fs-xs)" @click="removeEntity(e)" :title="e.source === 'manual' ? '删除' : '自动实体删除后下次刷新会回来，想持久停用请禁用'">删除</button>
+        <button class="btn" style="padding:4px 10px; font-size:var(--fs-xs)" @click="toggleEntity(e)" :title="e.enabled ? '禁用（不参与纠错，持久保留）' : '启用'">{{ e.enabled ? '禁用' : '启用' }}</button>
+        <button v-if="e.source === 'manual'" class="btn" style="padding:4px 10px; font-size:var(--fs-xs)" @click="removeEntity(e)" title="删除">删除</button>
       </div>
       <div v-if="!entList.length" class="muted" style="font-size:var(--fs-xs); padding:6px 0">实体库为空——录一段音频后自动收录，或在上方手动补充。</div>
     </div>
@@ -2698,6 +2698,6 @@
   </template>
 </div>
 
-<script src="/app/app.ce2dcf4d.js"></script>
+<script src="/app/app.fca47574.js"></script>
 </body>
 </html>

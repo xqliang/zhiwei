@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"zhiwei/internal/auth"
+	"zhiwei/internal/entity"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
 )
@@ -31,8 +32,10 @@ type AgentHandler struct {
 	OnMCPChange    func(ctx context.Context)
 	Skills         *repo.AgentSkillRepo     // 已装技能元数据；nil 时技能端点 503
 	SkillInst      *SkillInstaller          // 安装器（tarball/搜索代理 + 磁盘根）；nil 时技能端点 503
-	EntityKB       *repo.EntityKBRepo       // 实体知识库（设置页「专有名词」）；nil 时实体端点 503
+	EntityKB       *repo.EntityKBRepo       // 实体知识库（设置页「专有名词」manual 条目）；nil 时实体端点 503
 	EntitySettings *repo.EntitySettingsRepo // 实体纠错配置；nil 时 503
+	EntitySeed     entity.SeedDeps          // 实时聚合依赖（person/pet/speaker/topic 来源 repo）；auto 实体列表用
+	EntityDisabled *repo.EntityDisabledRepo // 禁用名单（自动实体持久停用）；nil 时 auto 无禁用态
 }
 
 // RegisterAgent 挂载 /api/agent 路由。

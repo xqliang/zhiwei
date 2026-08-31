@@ -10,12 +10,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"zhiwei/internal/entity"
 	"zhiwei/internal/repo"
 	"zhiwei/internal/repotest"
 )
 
-// entityHandler 造一个装配了 EntityKB/EntitySettings 的 handler，并清理该测试用户的实体数据。
-// 用固定测试 uid（与其它测试的 uid=1 隔离），避免共享库时相互踩数据。
+// entityHandler 造一个装配了 EntityKB/EntitySettings/EntityDisabled/EntitySeed 的 handler，
+// 并清理该测试用户的实体数据。用固定测试 uid（与其它测试的 uid=1 隔离），避免共享库时相互踩数据。
 func entityHandler(t *testing.T, uid int64) *AgentHandler {
 	t.Helper()
 	db, err := repo.NewDB(repotest.DSN(t))
@@ -25,12 +26,20 @@ func entityHandler(t *testing.T, uid int64) *AgentHandler {
 	clean := func() {
 		_, _ = db.Exec("DELETE FROM entity_kb WHERE user_id = ?", uid)
 		_, _ = db.Exec("DELETE FROM entity_settings WHERE user_id = ?", uid)
+		_, _ = db.Exec("DELETE FROM entity_disabled WHERE user_id = ?", uid)
+		_, _ = db.Exec("DELETE FROM speaker")
+		_, _ = db.Exec("DELETE FROM person WHERE user_id = ?", uid)
 	}
 	clean()
 	t.Cleanup(clean)
 	return &AgentHandler{
 		EntityKB:       &repo.EntityKBRepo{DB: db},
 		EntitySettings: &repo.EntitySettingsRepo{DB: db},
+		EntityDisabled: &repo.EntityDisabledRepo{DB: db},
+		EntitySeed: entity.SeedDeps{
+			Persons:  &repo.PersonRepo{DB: db},
+			Speakers: &repo.SpeakerRepo{DB: db},
+		},
 	}
 }
 
@@ -49,7 +58,7 @@ func TestEntitySettingsAPI(t *testing.T) {
 	const uid = int64(7001)
 	h := entityHandler(t, uid)
 
-	// GET 默认值：无行时返回默认配置（enabled + 0.8 + 全量 6 kinds + counts map）。
+	// GET 默认值：无行时返回默认配置（enabled + 0.8 + 全量 kinds + counts map）。
 	rec := doEntity(h, uid, "GET", "/api/agent/entity-settings", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET code=%d body=%s", rec.Code, rec.Body.String())
@@ -69,8 +78,8 @@ func TestEntitySettingsAPI(t *testing.T) {
 	if got.ConfidenceThreshold != 0.8 {
 		t.Errorf("默认阈值应 0.8, got=%v", got.ConfidenceThreshold)
 	}
-	if len(got.AutoSources) != 6 {
-		t.Errorf("默认 auto_sources 应 6 个, got=%v", got.AutoSources)
+	if len(got.AutoSources) != 5 {
+		t.Errorf("默认 auto_sources 应 5 个(去 task), got=%v", got.AutoSources)
 	}
 	if got.CountsByKind == nil {
 		t.Errorf("counts_by_kind 应为 map（可空但非 nil）: %s", rec.Body.String())
@@ -162,19 +171,28 @@ func TestEntityCRUDAPI(t *testing.T) {
 		t.Errorf("改名后拼音应重算为 'tian xuan', got=%v", patched.Pinyin)
 	}
 
-	// PATCH 一个 auto 实体的 canonical → 400（auto 不可改名）。
-	if err := h.EntityKB.ReplaceAuto(context.Background(), uid, repo.EntityKindPerson,
-		[]repo.Entity{{Canonical: "张三"}}); err != nil {
+	// auto 实体：去拷贝化后实时聚合(造说话人张三) → 列表含 source=auto、id="auto:张三"。
+	if err := h.EntitySeed.Speakers.Create(context.Background(), &repo.Speaker{Name: "张三"}); err != nil {
 		t.Fatal(err)
 	}
-	autoList, err := h.EntityKB.List(context.Background(), uid, repo.EntityKindPerson)
-	if err != nil || len(autoList) == 0 {
-		t.Fatalf("应有 auto 实体: err=%v len=%d", err, len(autoList))
+	rec = doEntity(h, uid, "GET", "/api/agent/entities", "")
+	if !strings.Contains(rec.Body.String(), `"id":"auto:张三"`) || !strings.Contains(rec.Body.String(), `"source":"auto"`) {
+		t.Fatalf("列表应含实时 auto 张三: %s", rec.Body.String())
 	}
-	autoID := autoList[0].ID.String()
-	rec = doEntity(h, uid, "PATCH", "/api/agent/entities/"+autoID, `{"canonical":"李四"}`)
+	// auto 不可改名 → 400（"auto:<canonical>" 前缀路径；中文已 URL 编码）。
+	rec = doEntity(h, uid, "PATCH", "/api/agent/entities/auto:%E5%BC%A0%E4%B8%89", `{"canonical":"李四"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("auto 改名应 400, got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// auto 禁用 → 200（写 entity_disabled 持久停用）。
+	rec = doEntity(h, uid, "PATCH", "/api/agent/entities/auto:%E5%BC%A0%E4%B8%89", `{"enabled":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auto 禁用应 200, got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// auto 删除 → 400（无删除按钮，后端亦拒）。
+	rec = doEntity(h, uid, "DELETE", "/api/agent/entities/auto:%E5%BC%A0%E4%B8%89", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("auto 删除应 400, got=%d body=%s", rec.Code, rec.Body.String())
 	}
 
 	// PATCH enabled=false → 200，实体禁用。

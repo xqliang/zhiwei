@@ -19,10 +19,11 @@ import (
 )
 
 // correctionEdit LLM 输出的一条纠错建议（asr_correction_v1 契约）。
+// 去拷贝化后改为 canonical 唯一门控：corrected 逐字等于白名单 canonical 即充分
+// （原 entity_id 二次校验随实时实体无稳定 id 而去掉，替换文本本就是 corrected）。
 type correctionEdit struct {
 	Orig       string  `json:"orig"`       // 段内原片段（门控：必须原样出现在段文本里）
 	Corrected  string  `json:"corrected"`  // 替换目标（门控：必须逐字等于白名单 canonical）
-	EntityID   string  `json:"entity_id"`  // 白名单条目 id（门控：必须在白名单内）
 	Confidence float64 `json:"confidence"` // 0~1，clamp
 	Reason     string  `json:"reason"`     // 简短依据（存 entity_edits 供前端 tooltip）
 }
@@ -82,14 +83,25 @@ func runCorrectStage(ctx context.Context, d StageDeps, j *repo.Job, sessionID id
 	if !st.CorrectionEnabled {
 		return nil
 	}
-	// 刷新 auto 实体（失败不阻断：用库内旧实体继续纠错——旧库总比不纠好）。
-	if err := entity.RefreshAuto(ctx, d.EntitySeed, s.UserID, st.AutoSources); err != nil {
-		log.Printf("[correct] session=%s 实体库刷新失败（降级用旧库）: %v", sessionID, err)
-		appendTrace(j, repo.TraceEntry{Stage: "correct", Error: fmt.Sprintf("实体库刷新失败（降级）: %v", err)})
+	// 实时组装纠错白名单（去拷贝化）：auto 从源表实时聚合(AssembleEntities) + entity_kb 的
+	// manual 启用条目 − entity_disabled 禁用名单。不再 RefreshAuto 全删全落拷贝。
+	// auto/manual 读失败降级为「仅用另一来源」(best-effort)；disabled/manual 的 DB 真错误才 return。
+	var entities []repo.Entity
+	if d.EntitySeed.Persons != nil || d.EntitySeed.Speakers != nil || d.EntitySeed.Pets != nil || d.EntitySeed.Topics != nil {
+		auto, err := entity.AssembleEntities(ctx, d.EntitySeed, s.UserID, st.AutoSources)
+		if err != nil {
+			log.Printf("[correct] session=%s 实时聚合失败（降级仅用 manual）: %v", sessionID, err)
+			appendTrace(j, repo.TraceEntry{Stage: "correct", Error: fmt.Sprintf("实时聚合失败（降级）: %v", err)})
+		} else {
+			entities = append(entities, auto...)
+		}
 	}
-	entities, err := d.EntityKB.ListEnabled(ctx, s.UserID)
-	if err != nil {
-		return fmt.Errorf("读实体库: %w", err)
+	if d.EntityKB != nil {
+		manual, err := d.EntityKB.ListManualEnabled(ctx, s.UserID)
+		if err != nil {
+			return fmt.Errorf("读 manual 实体: %w", err)
+		}
+		entities = entity.MergeWhitelist(entities, manual, loadDisabled(ctx, d, s.UserID))
 	}
 	if len(entities) == 0 {
 		return nil // 空库无事可做
@@ -193,21 +205,19 @@ type appliedEdit struct {
 }
 
 // correctSegment 单段纠错：组上下文 + 白名单 → LLM → 解析 → 门控（置信度 ≥ threshold、
-// orig 原样在段内、corrected/entity_id 在白名单内）→ 返回通过的 edits。
+// orig 原样在段内、corrected 逐字等于白名单 canonical）→ 返回通过的 edits。
 // LLM/解析失败：log + trace + 返回 nil（best-effort，不 fail session）。
 func correctSegment(ctx context.Context, d StageDeps, j *repo.Job, sessionID ids.ID,
 	sg *repo.TranscriptSegment, cands []entity.Candidate, segs []repo.TranscriptSegment,
 	i, window int, threshold float64) []correctionEdit {
 
-	// 白名单索引（门控校验用）：entity_id → canonical。门控要求 corrected 与
-	// entity_id 指向**同一个候选**（分立双 map 会放过「corrected 取自候选 A、
-	// entity_id 取自候选 B」的拼接错位——虽无害但不严谨）。
-	idToCanon := make(map[string]string, len(cands))
+	// 白名单 canonical 集合（门控校验用）：corrected 必须逐字等于其中某条。
+	canonSet := make(map[string]bool, len(cands))
 	var sb strings.Builder
-	sb.WriteString("合法实体白名单（corrected 只能取自这里）：\n")
+	sb.WriteString("合法实体白名单（corrected 只能逐字等于这里）：\n")
 	for _, c := range cands {
-		fmt.Fprintf(&sb, "- id=%s canonical=%s kind=%s\n", c.EntityID, c.Canonical, c.Kind)
-		idToCanon[c.EntityID.String()] = c.Canonical
+		fmt.Fprintf(&sb, "- canonical=%s kind=%s\n", c.Canonical, c.Kind)
+		canonSet[c.Canonical] = true
 	}
 	sb.WriteString("\n对话转写（【本段】是要纠错的段落，其余为上下文参考）：\n")
 	for k := i - window; k <= i+window; k++ {
@@ -234,7 +244,7 @@ func correctSegment(ctx context.Context, d StageDeps, j *repo.Job, sessionID ids
 		appendTrace(j, repo.TraceEntry{Stage: "correct", Error: fmt.Sprintf("段%d 解析失败（尽力而为）: %v", sg.SequenceNo, err)})
 		return nil
 	}
-	// 双重门控：阈值 + orig 在段内 + corrected/entity_id 同属白名单内同一候选。
+	// 门控：阈值 + orig 在段内 + corrected 逐字等于白名单某 canonical。
 	var pass []correctionEdit
 	for _, e := range edits {
 		if e.Confidence < threshold {
@@ -243,12 +253,25 @@ func correctSegment(ctx context.Context, d StageDeps, j *repo.Job, sessionID ids
 		if !strings.Contains(sg.Text, e.Orig) {
 			continue // 幻觉 orig：段里根本没有这个片段
 		}
-		if canon, ok := idToCanon[e.EntityID]; !ok || canon != e.Corrected {
-			continue // 幻觉实体：白名单里没有，或 corrected 与 entity_id 指向不同候选（拼接错位）
+		if !canonSet[e.Corrected] {
+			continue // 幻觉实体：corrected 不在白名单 canonical 内
 		}
 		pass = append(pass, e)
 	}
 	return pass
+}
+
+// loadDisabled 读用户禁用名单（持久停用的自动实体名）。repo 为 nil（未装配）或读失败时
+// 降级为空 map（best-effort：禁用名单缺失仅导致被禁用名仍参与纠错，属可接受的过包含）。
+func loadDisabled(ctx context.Context, d StageDeps, userID int64) map[string]bool {
+	if d.EntityDisabled == nil {
+		return nil
+	}
+	m, err := d.EntityDisabled.ListDisabled(ctx, userID)
+	if err != nil {
+		return nil
+	}
+	return m
 }
 
 // stageCorrect 是 pool 用的 Handler 包装。

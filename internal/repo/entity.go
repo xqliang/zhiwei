@@ -26,9 +26,9 @@ const (
 )
 
 // AllEntityKinds entity kinds 全量清单（entity_settings.auto_sources 的默认值）。
-// 注意：不含 custom——custom 只能手动录入，没有「自动入库来源」。
+// 注意：不含 custom（只能手动录入）、不含 task（待办不再进实体词，见需求②）。
 var AllEntityKinds = []string{
-	EntityKindPerson, EntityKindPet, EntityKindProject, EntityKindTask, EntityKindTopic, EntityKindSpeaker,
+	EntityKindPerson, EntityKindPet, EntityKindProject, EntityKindTopic, EntityKindSpeaker,
 }
 
 // 实体来源枚举（entity_kb.source）。
@@ -66,6 +66,15 @@ func (r *EntityKBRepo) ListEnabled(ctx context.Context, userID int64) ([]Entity,
 	var list []Entity
 	err := r.DB.SelectContext(ctx, &list,
 		`SELECT `+entityCols+` FROM entity_kb WHERE user_id = ? AND enabled = 1 ORDER BY kind, canonical`, userID)
+	return list, err
+}
+
+// ListManualEnabled 读启用的 manual 实体（去拷贝化后 entity_kb 只存 manual；
+// correct stage 实时白名单 = 聚合 auto − 禁用 + 本方法的 manual）。manual 无来源可重建，故常驻。
+func (r *EntityKBRepo) ListManualEnabled(ctx context.Context, userID int64) ([]Entity, error) {
+	var list []Entity
+	err := r.DB.SelectContext(ctx, &list,
+		`SELECT `+entityCols+` FROM entity_kb WHERE user_id = ? AND source = 'manual' AND enabled = 1 ORDER BY kind, canonical`, userID)
 	return list, err
 }
 
@@ -333,4 +342,43 @@ ON DUPLICATE KEY UPDATE correction_enabled = VALUES(correction_enabled),
   confidence_threshold = VALUES(confidence_threshold), auto_sources = VALUES(auto_sources)`,
 		userID, enabled, threshold, raw)
 	return err
+}
+
+// EntityDisabledRepo 实体禁用名单存取（去拷贝化后替代 auto 条目的 enabled=0）。
+// 记录用户「想持久停用」的自动实体名；纠错白名单组装时按 canonical(大小写不敏感)剔除。
+// 不按 kind 区分——与「人物/说话人同名只留一条」语义一致。
+type EntityDisabledRepo struct{ DB *sqlx.DB }
+
+// SetDisabled 禁用一个自动实体名（INSERT IGNORE 幂等；重复禁用无副作用）。
+// canonical 由调用方统一 ToLower 归一（与 mergeWhitelist 的查找键一致）。
+func (r *EntityDisabledRepo) SetDisabled(ctx context.Context, userID int64, canonical string) error {
+	_, err := r.DB.ExecContext(ctx,
+		`INSERT IGNORE INTO entity_disabled (user_id, canonical) VALUES (?, ?)`, userID, canonical)
+	return err
+}
+
+// Clear 取消禁用（= 重新启用）。不存在时无副作用。
+func (r *EntityDisabledRepo) Clear(ctx context.Context, userID int64, canonical string) error {
+	_, err := r.DB.ExecContext(ctx,
+		`DELETE FROM entity_disabled WHERE user_id = ? AND canonical = ?`, userID, canonical)
+	return err
+}
+
+// ListDisabled 读全部禁用名，返回 set（key 已统一 ToLower，供 mergeWhitelist O(1) 过滤）。
+func (r *EntityDisabledRepo) ListDisabled(ctx context.Context, userID int64) (map[string]bool, error) {
+	rows, err := r.DB.QueryContext(ctx,
+		`SELECT canonical FROM entity_disabled WHERE user_id = ?`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]bool{}
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		m[strings.ToLower(c)] = true
+	}
+	return m, rows.Err()
 }
