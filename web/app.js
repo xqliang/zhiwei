@@ -1230,7 +1230,21 @@ const app = createApp({
     async function askDeleteSpeaker(sp) {
       if (!confirm('删除说话人「' + sp.name + '」？关联的转写段将变为未解析。')) return;
       try {
-        await api('DELETE', '/api/speakers/' + (sp.speaker_id || sp.id));
+        // 后端删除声纹有两种返回：
+        //   1) 204 空体 —— 无需二次确认，api() 返回 null，直接刷新即可。
+        //   2) 200 {ok:true, needs_confirm:true, prompts:[{person_id,name,reason}]} ——
+        //      该声纹关联的人物曾被用户编辑过（非自动生成），后端不擅自删，交前端二次确认。
+        const res = await api('DELETE', '/api/speakers/' + (sp.speaker_id || sp.id));
+        if (res && res.needs_confirm && res.prompts && res.prompts.length > 0) {
+          // 汇总待确认人物名，一次性问用户是否连带删除这些编辑过的人物。
+          const names = res.prompts.map(function (p) { return p.name; }).join('、');
+          if (confirm('声纹已删除。关联人物「' + names + '」曾被编辑过，是否也删除？')) {
+            // 用户确认删除 → 逐个把人物状态改为 dismissed（软删除/忽略），复用人物 PATCH 接口。
+            for (const p of res.prompts) {
+              await api('PATCH', '/api/persons/' + p.person_id, { status: 'dismissed' });
+            }
+          }
+        }
         await loadAllSpeakers();
         // 时间线面板删除 → 重拉当前会话让相关段变「未解析」；声纹 tab 无展开会话（detail 为空），跳过。
         if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
