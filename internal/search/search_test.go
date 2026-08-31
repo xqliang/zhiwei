@@ -141,3 +141,17 @@ func TestSearchArgValidation(t *testing.T) {
 		t.Error("ValidEngine 判定不符")
 	}
 }
+
+// TestUnwrapDDGNoDoubleUnescape：uddg 参数只应解一层——目标 URL 含 + 或 % 序列时
+// 不能被二次反转义（+ 变空格 / %XX 被吃掉），否则交给模型的链接是坏的。
+func TestUnwrapDDGNoDoubleUnescape(t *testing.T) {
+	// 目标 https://ex.com/c++q?a=1+2 单层编码进 uddg（%→%25、+→%2B）。
+	wrapped := "//duckduckgo.com/l/?uddg=https%3A%2F%2Fex.com%2Fc%2B%2Bq%3Fa%3D1%2B2&rut=abc"
+	if got := unwrapDDG(wrapped); got != "https://ex.com/c++q?a=1+2" {
+		t.Fatalf("uddg 解包应单层解码: got %q", got)
+	}
+	// 非包装链接原样返回。
+	if got := unwrapDDG("https://plain.example/x"); got != "https://plain.example/x" {
+		t.Fatalf("非包装链接应原样返回: %q", got)
+	}
+}

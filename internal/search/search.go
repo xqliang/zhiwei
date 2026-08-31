@@ -213,6 +213,7 @@ func (s *Searcher) tavily(ctx context.Context, apiKey, query string, limit int) 
 }
 
 // fetchDoc GET 一个 SERP 并解析成 DOM（带 UA、2MB 限读、状态码校验）。
+// 与 Fetch 不同，这里不转码：Bing/DDG 是固定 UTF-8 端点（非任意用户 URL），刻意保持简单。
 func (s *Searcher) fetchDoc(ctx context.Context, rawURL string) (*html.Node, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -234,7 +235,9 @@ func (s *Searcher) fetchDoc(ctx context.Context, rawURL string) (*html.Node, err
 	return html.Parse(strings.NewReader(string(body)))
 }
 
-// unwrapDDG 解开 DuckDuckGo 的跳转包装（uddg=<encoded> 参数），非包装链接原样返回。
+// unwrapDDG 解开 DuckDuckGo 的跳转包装（uddg=<单层编码的目标 URL>），非包装链接原样返回。
+// 注意只解一层：u.Query().Get 已做一次反转义，再 QueryUnescape 会把目标 URL 里的
+// 「+」（如 c++、a=1+2）错解成空格、%XX 被二次解码——交给模型的链接就坏了。
 func unwrapDDG(raw string) string {
 	if !strings.Contains(raw, "uddg=") {
 		return raw
@@ -243,14 +246,8 @@ func unwrapDDG(raw string) string {
 	if err != nil {
 		return raw
 	}
-	if u.Scheme == "" { // lite 页里常是协议相对 //duckduckgo.com/l/...
-		u.Scheme = "https"
-	}
 	if target := u.Query().Get("uddg"); target != "" {
-		if dec, err := url.QueryUnescape(target); err == nil {
-			return dec
-		}
-		return target
+		return target // Query().Get 已单层解码，绝不能再解
 	}
 	return raw
 }
@@ -278,6 +275,7 @@ func attrOf(n *html.Node, key string) string {
 }
 
 // firstDesc 在 n 的后代里找第一个 tag 元素；sub 非空时再在其内找第一个 sub 元素。
+// 注意：sub 必须与 tag 不同——walk 从命中节点自身开始检查，tag==sub 时会返回命中节点自己。
 func firstDesc(n *html.Node, tag, sub string) *html.Node {
 	var found *html.Node
 	var walk func(*html.Node)
