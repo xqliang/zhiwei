@@ -13,6 +13,7 @@ import (
 
 	"zhiwei/internal/repo"
 	"zhiwei/internal/retrieve"
+	"zhiwei/internal/search"
 )
 
 // MCPDeps 是工具依赖的仓储集合（主服务装配时注入已开库的实例）。
@@ -39,6 +40,14 @@ type MCPDeps struct {
 	// Retrieve 语义检索（可选）：非 nil 且 query 非空时 search_memory 走「向量+关键词」混合，
 	// 否则退回 Memory.Search 关键词。装配见 main.go（ARK_AUDIO_API_KEY 未配则 nil，降级）。
 	Retrieve *retrieve.Retriever
+	// ---- 联网搜索（Phase 2：web_search / web_fetch 工具）----
+	// Search 联网搜索器；nil 则 web_search 工具报「未启用」。每次调用读 Configs 最新配置
+	//（设置页改引擎/API key 热生效，不重启）。装配见 main.go。
+	Search *search.Searcher
+	// Fetch 网页抓取器（SSRF 安全拨号）；nil 则 web_fetch 工具报「未启用」。
+	Fetch *search.Fetcher
+	// Configs 全局 agent 配置（web_search 读搜索引擎/API key；与 handlers 的 AgentHandler.Configs 同一实例）。
+	Configs *repo.AgentConfigRepo
 }
 
 // pingArgs：无参工具的入参（空 struct → object schema 无属性）。

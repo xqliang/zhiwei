@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/repo"
+	"zhiwei/internal/search"
 )
 
 // toolUserID 是单用户 MVP 的用户 id。2B-A 起 MCP 工具（本文件 + mcp_write_tools.go +
@@ -37,6 +39,17 @@ func registerReadTools(s *mcp.Server, d MCPDeps, userID int64) {
 		Name:        "get_todos",
 		Description: "列出我的待办。可选 status(suggested|confirmed|done) 与 topic_id 过滤。",
 	}, getTodosHandler(d, userID))
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "web_search",
+		Description: "联网搜索公开网络信息（搜索引擎）。用于：不确定或可能有时效性的问题、不了解的专业术语/名词、需要外部资料佐证时。" +
+			"返回结果列表(标题/链接/摘要)；要看某条结果详情时配合 web_fetch。与用户个人数据无关的通用问题优先用它查证。",
+	}, webSearchHandler(d))
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "web_fetch",
+		Description: "抓取指定 URL 的网页正文（纯文本）。用于：阅读 web_search 结果中的某个链接、或用户明确给出的网址。仅支持 http/https 公网页面。",
+	}, webFetchHandler(d))
 }
 
 type memoryOut struct {
@@ -233,5 +246,66 @@ func getTodosHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToo
 			out = append(out, todoOut{ID: r.Todo.ID, Title: r.Title, Status: r.Status, DueAt: r.DueAt, Topics: names})
 		}
 		return jsonResult(out)
+	}
+}
+
+// ---- web_search / web_fetch（Phase 2 联网工具，全局配置不按 userID 隔离）----
+
+type webResultOut struct {
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Snippet string `json:"snippet"`
+}
+
+type webSearchArgs struct {
+	Query string `json:"query" jsonschema:"搜索关键词（自然语言或关键词均可）"`
+	Limit int    `json:"limit,omitempty" jsonschema:"最多返回条数, 默认 5, 上限 10"`
+}
+
+// webSearchHandler 每次调用读 Configs 最新搜索配置（引擎/API key，设置页热改即生效），
+// 无 Configs/无行时默认 auto 引擎链。Search 未装配 → tool-error。
+func webSearchHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, webSearchArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, a webSearchArgs) (*mcp.CallToolResult, any, error) {
+		if d.Search == nil {
+			return nil, nil, fmt.Errorf("联网搜索未启用（服务器未装配 search）")
+		}
+		engine, apiKey := search.EngineAuto, ""
+		if d.Configs != nil {
+			if c, err := d.Configs.Get(ctx); err == nil {
+				engine = c.SearchEngine
+				apiKey = c.SearchKey()
+			}
+		}
+		rs, err := d.Search.Search(ctx, engine, apiKey, a.Query, a.Limit)
+		if err != nil {
+			return nil, nil, err
+		}
+		out := make([]webResultOut, 0, len(rs))
+		for _, r := range rs {
+			out = append(out, webResultOut{Title: r.Title, URL: r.URL, Snippet: r.Snippet})
+		}
+		return jsonResult(out)
+	}
+}
+
+type webFetchArgs struct {
+	URL string `json:"url" jsonschema:"要抓取的网页 URL（http/https）"`
+}
+
+// webFetchHandler 抓单页正文；Fetch 未装配 → tool-error。
+func webFetchHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, webFetchArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, a webFetchArgs) (*mcp.CallToolResult, any, error) {
+		if d.Fetch == nil {
+			return nil, nil, fmt.Errorf("网页抓取未启用（服务器未装配 fetch）")
+		}
+		p, err := d.Fetch.Fetch(ctx, a.URL)
+		if err != nil {
+			return nil, nil, err
+		}
+		return jsonResult(struct {
+			URL   string `json:"url"`
+			Title string `json:"title,omitempty"`
+			Text  string `json:"text"`
+		}{URL: p.URL, Title: p.Title, Text: p.Text})
 	}
 }
