@@ -148,6 +148,12 @@ func (h *AgentHandler) createEntity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "canonical required"})
 		return
 	}
+	// 超长守卫：DB VARCHAR(128) 按「字符」计，INSERT IGNORE 会把 Data-too-long 降级为
+	// 警告并截断（响应却回显全文，与库内值背离）——与种子层 addSeedEntity 同一上限，显式 400。
+	if len([]rune(body.Canonical)) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "canonical 过长（上限 128 字符）"})
+		return
+	}
 	if body.Kind == "" {
 		body.Kind = repo.EntityKindCustom
 	}

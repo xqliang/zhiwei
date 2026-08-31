@@ -164,8 +164,16 @@ func (r *EntityKBRepo) CreateManual(ctx context.Context, e *Entity) error {
 	e.ID = ids.New()
 	e.Source = EntitySourceManual
 	e.Enabled = true // 新建的手动条目默认启用；禁用走 SetEnabled
-	_, err := r.DB.NamedExecContext(ctx, entityInsertSQL, e)
-	return err
+	// INSERT IGNORE（与 ReplaceAuto 共用语句）撞唯一键时静默跳过、RowsAffected=0。
+	// 手动创建须可感知重复：返回明确错误（handler → 400），否则调用方拿到从未落库的幻影 id。
+	res, err := r.DB.NamedExecContext(ctx, entityInsertSQL, e)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("实体已存在（canonical=%s kind=%s 重复）", e.Canonical, e.Kind)
+	}
+	return nil
 }
 
 // UpdateManual 改手动实体的规范名/备注/匹配键。只能改 manual 条目；auto 条目（刷新重建）
