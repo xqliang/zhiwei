@@ -2648,6 +2648,8 @@ const app = createApp({
       search_memory: '检索记忆', get_timeline: '查看时间线', get_topics: '查看主题',
       get_todos: '查看待办', get_topic_status: '话题状态', generate_report: '生成报告',
       zhiwei_ping: '连通性检查',
+      // 联网工具（Phase 2）
+      web_search: '联网搜索', web_fetch: '抓取网页',
       // 画像读工具（P2）
       get_profile: '读取画像', get_person: '查看人物',
       // 写-提议工具（propose_*）：出结果后会翻成「确认卡」，这里只是进行中骨架的友好名。
