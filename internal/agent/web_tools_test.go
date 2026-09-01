@@ -53,7 +53,7 @@ func webDeps(t *testing.T) (MCPDeps, *httptest.Server) {
 func TestWebSearchTool(t *testing.T) {
 	md, _ := webDeps(t)
 	ctx := context.Background()
-	res, _, err := webSearchHandler(md)(ctx, nil, webSearchArgs{Query: "测试", Limit: 3})
+	res, _, err := webSearchHandler(md, 1)(ctx, nil, webSearchArgs{Query: "测试", Limit: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,17 +68,17 @@ func TestWebSearchTool(t *testing.T) {
 	if err := md.Configs.Upsert(ctx, repo.AgentConfig{SearchEngine: "bing"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := webSearchHandler(md)(ctx, nil, webSearchArgs{Query: "测试"}); err != nil {
+	if _, _, err := webSearchHandler(md, 1)(ctx, nil, webSearchArgs{Query: "测试"}); err != nil {
 		t.Fatalf("指定 bing 引擎不应报错: %v", err)
 	}
 	// Search 未装配 → tool-error。
 	md.Search = nil
-	if _, _, err := webSearchHandler(md)(ctx, nil, webSearchArgs{Query: "测试"}); err == nil {
+	if _, _, err := webSearchHandler(md, 1)(ctx, nil, webSearchArgs{Query: "测试"}); err == nil {
 		t.Error("Search=nil 应报「未启用」")
 	}
 	// 空 query。
 	md2, _ := webDeps(t)
-	if _, _, err := webSearchHandler(md2)(ctx, nil, webSearchArgs{Query: " "}); err == nil {
+	if _, _, err := webSearchHandler(md2, 1)(ctx, nil, webSearchArgs{Query: " "}); err == nil {
 		t.Error("空 query 应报错")
 	}
 }
@@ -108,5 +108,49 @@ func TestWebFetchTool(t *testing.T) {
 	md.Fetch = nil
 	if _, _, err := webFetchHandler(md)(ctx, nil, webFetchArgs{URL: srv.URL + "/page"}); err == nil {
 		t.Error("Fetch=nil 应报「未启用」")
+	}
+}
+
+// TestWebSearchLimiter：滑动窗口限流器——窗口内超 max 拒绝，窗口滑过恢复放行。
+func TestWebSearchLimiter(t *testing.T) {
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	l := &webSearchLimiter{max: 2, window: time.Minute, now: func() time.Time { return base }, calls: map[int64][]time.Time{}}
+	if !l.allow(1) || !l.allow(1) {
+		t.Fatal("前 2 次应放行")
+	}
+	if l.allow(1) {
+		t.Fatal("第 3 次应拒绝（窗口内超 max）")
+	}
+	if !l.allow(2) {
+		t.Fatal("其他 userID 不受影响")
+	}
+	// 时间前进 61s（窗口滑过）：旧的 3 次调用全部出窗，恢复放行。
+	base = base.Add(61 * time.Second)
+	if !l.allow(1) {
+		t.Fatal("窗口滑过后应恢复放行")
+	}
+}
+
+// TestWebSearchLoopGuard：模型换词重搜死循环的硬刹车——超限后 tool-error 明确告知
+// 停止搜索（实测：搜索引擎被限流返回垃圾兜底结果时，模型会一直换词重试直到轮次超时）。
+func TestWebSearchLoopGuard(t *testing.T) {
+	md, _ := webDeps(t)
+	ctx := context.Background()
+	// 测试专用小限流器：3 分钟窗口内最多 2 次（恢复现场由 t.Cleanup 兜底）。
+	orig := webSearchLimit
+	t.Cleanup(func() { webSearchLimit = orig })
+	base := time.Now()
+	webSearchLimit = &webSearchLimiter{max: 2, window: 3 * time.Minute, now: func() time.Time { return base }, calls: map[int64][]time.Time{}}
+
+	h := webSearchHandler(md, 7)
+	if _, _, err := h(ctx, nil, webSearchArgs{Query: "一"}); err != nil {
+		t.Fatalf("第 1 次不应报错: %v", err)
+	}
+	if _, _, err := h(ctx, nil, webSearchArgs{Query: "二"}); err != nil {
+		t.Fatalf("第 2 次不应报错: %v", err)
+	}
+	_, _, err := h(ctx, nil, webSearchArgs{Query: "三"})
+	if err == nil || !strings.Contains(err.Error(), "停止搜索") {
+		t.Fatalf("第 3 次应报限流错误（含「停止搜索」指引）: %v", err)
 	}
 }

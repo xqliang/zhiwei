@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -46,11 +47,12 @@ func registerReadTools(s *mcp.Server, d MCPDeps, userID int64) {
 			"返回结果列表(标题/链接/摘要)；要看某条结果详情时配合 web_fetch。与用户个人数据无关的通用问题优先用它查证。" +
 			"组词技巧：不要只搜原词——歧义缩写/新词要结合对话语境加领域关键词（如聊智能体时搜「ASL 智能体 安全」而非只搜「ASL」）；" +
 			"若首轮结果与对话语境明显不符，换更具体的关键词（加领域词/疑似全称）再搜 1-2 次，不要硬用不符的结果作答。" +
+			"若连续多次结果都与查询完全无关（很可能是搜索引擎被限流、返回兜底垃圾），立即停止换词重搜，如实告知用户并基于已有信息作答。" +
 			"引用规范：回答中使用了搜索/网页信息时，末尾必须附「来源：」清单，逐条列出实际参考页面的 markdown 链接（[标题](URL)）。",
-	}, webSearchHandler(d))
+	}, webSearchHandler(d, userID))
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "web_fetch",
+		Name: "web_fetch",
 		Description: "抓取指定 URL 的网页正文（纯文本）。用于：阅读 web_search 结果中的某个链接、或用户明确给出的网址。仅支持 http/https 公网页面。" +
 			"引用规范：回答中使用了本页内容时，把它列入回答末尾的「来源：」清单（[标题](URL)）。",
 	}, webFetchHandler(d))
@@ -255,6 +257,44 @@ func getTodosHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToo
 
 // ---- web_search / web_fetch（Phase 2 联网工具，全局配置不按 userID 隔离）----
 
+// webSearchLimiter 按 userID 的滑动窗口限流器：限制 web_search 调用频率。
+// 动机（实测 2026-09-01）：搜索引擎被反爬限流后会返回「正常壳+无关垃圾结果」，
+// 模型按「结果不符就换词再搜」的指引陷入死循环（一轮 8 次、直到轮次 5 分钟超时）。
+// 引擎层无法甄别垃圾（降级页仍回显查询词），只能在工具层硬刹车。
+type webSearchLimiter struct {
+	mu     sync.Mutex
+	max    int                   // 窗口内最大调用次数
+	window time.Duration         // 滑动窗口宽度
+	now    func() time.Time      // 可注入时钟（单测）
+	calls  map[int64][]time.Time // userID → 窗口内的调用时间
+}
+
+// webSearchLimit 是进程级全局限流器（单实例部署；按 userID 隔离计数）。
+var webSearchLimit = &webSearchLimiter{
+	max: 5, window: 3 * time.Minute, now: time.Now, calls: map[int64][]time.Time{},
+}
+
+// allow 记录一次调用并判断是否放行（窗口内调用数 ≤ max）。
+func (l *webSearchLimiter) allow(userID int64) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	// 剔除滑出窗口的旧调用（原地压缩，避免 map 无限增长）。
+	old := l.calls[userID]
+	fresh := old[:0]
+	for _, t := range old {
+		if now.Sub(t) < l.window {
+			fresh = append(fresh, t)
+		}
+	}
+	if len(fresh) >= l.max {
+		l.calls[userID] = fresh
+		return false
+	}
+	l.calls[userID] = append(fresh, now)
+	return true
+}
+
 type webResultOut struct {
 	Title   string `json:"title"`
 	URL     string `json:"url"`
@@ -267,11 +307,17 @@ type webSearchArgs struct {
 }
 
 // webSearchHandler 每次调用读 Configs 最新搜索配置（引擎/API key，设置页热改即生效），
-// 无 Configs/无行时默认 auto 引擎链。Search 未装配 → tool-error。
-func webSearchHandler(d MCPDeps) func(context.Context, *mcp.CallToolRequest, webSearchArgs) (*mcp.CallToolResult, any, error) {
+// 无 Configs/无行时默认 auto 引擎链。Search 未装配 → tool-error；
+// 超出滑动窗口调用上限 → tool-error 硬刹车（防换词重搜死循环，见 webSearchLimiter）。
+func webSearchHandler(d MCPDeps, userID int64) func(context.Context, *mcp.CallToolRequest, webSearchArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, a webSearchArgs) (*mcp.CallToolResult, any, error) {
 		if d.Search == nil {
 			return nil, nil, fmt.Errorf("联网搜索未启用（服务器未装配 search）")
+		}
+		if !webSearchLimit.allow(userID) {
+			return nil, nil, fmt.Errorf(
+				"搜索过于频繁（%d 分钟内超过 %d 次）：连续搜索可能已被引擎限流、返回无关结果。请停止搜索，基于已有信息作答，或如实告知用户稍后再试",
+				int(webSearchLimit.window.Minutes()), webSearchLimit.max)
 		}
 		engine, apiKey := search.EngineAuto, ""
 		if d.Configs != nil {
