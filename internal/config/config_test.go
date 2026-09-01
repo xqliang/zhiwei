@@ -117,9 +117,10 @@ func TestAgentConfigDefaults(t *testing.T) {
 		t.Errorf("ReviewDailyCron 默认错误: %q", cfg.ReviewDailyCron)
 	}
 	// 默认 system prompt 须含行为路由关键词（常识题自答、不硬关联用户数据、不懂直说），
-	// 锁定 Phase 1 行为意图（不断言整串，避免脆弱）。
+	// 以及带 mcp__zhiwei__ 前缀的准确工具名（防回归：dsh 发布给模型的工具名带前缀，
+	// prompt 里写裸名 web_search 会导致模型调不存在的工具报 unknown tool）。
 	sp := cfg.DSHSystemPrompt
-	for _, kw := range []string{"分场景", "直接基于你自己的知识", "如实说明", "web_search"} {
+	for _, kw := range []string{"分场景", "直接基于你自己的知识", "如实说明", "mcp__zhiwei__web_search", "mcp__zhiwei__search_memory"} {
 		if !strings.Contains(sp, kw) {
 			t.Errorf("DSHSystemPrompt 应含路由关键词 %q: %q", kw, sp)
 		}

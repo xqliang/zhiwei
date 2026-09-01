@@ -123,8 +123,8 @@ func TestOrchestratorSeedsInjection(t *testing.T) {
 	}
 }
 
-// TestSeedsGateSkipsNonPersonal：query 无个人信号（我/咱/自己/本人）时，即使有相关记忆
-// 也不注入种子——常识/名词解释题不再被生硬关联用户数据（Phase 1 门控）。
+// TestSeedsGateSkipsNonPersonal：query 无个人信号（人称代词/用户数据域名词/「是谁」）时，
+// 即使有相关记忆也不注入种子——常识/名词解释题不再被生硬关联用户数据（Phase 1 门控）。
 func TestSeedsGateSkipsNonPersonal(t *testing.T) {
 	db, err := repo.NewDB(orchDSN(t))
 	if err != nil {
@@ -157,5 +157,43 @@ func TestSeedsGateSkipsNonPersonal(t *testing.T) {
 	}
 	if strings.Contains(fake.LastText, "背景记忆") || strings.Contains(fake.LastText, "猫的常见习性GATESEED") {
 		t.Errorf("常识题不应注入种子: %q", fake.LastText)
+	}
+}
+
+// TestSeedsGatePersonalVariants：门控口径须与 system prompt 的「关于用户本人」一致——
+// 不含「我」字但明确指向用户数据的问法（「张三是谁」「上周录音里聊了什么」）也应注入种子。
+func TestSeedsGatePersonalVariants(t *testing.T) {
+	db, err := repo.NewDB(orchDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convRepo := &repo.AgentConversationRepo{DB: db}
+	msgRepo := &repo.AgentMessageRepo{DB: db}
+	mem := &repo.MemoryRepo{DB: db}
+	ctx := t.Context()
+	_ = seedMem(t, mem, "和张三聊了猫的事GV")
+	r := &retrieve.Retriever{Memories: mem, Embedder: fakeEmbedder{}, TopK: 5}
+	if _, err := r.Backfill(ctx, toolUserID, 500); err != nil {
+		t.Fatal(err)
+	}
+
+	msgData, _ := json.Marshal(map[string]any{"message": map[string]any{"content": []map[string]any{
+		{"type": "text", "text": "好的"},
+	}}})
+
+	for _, raw := range []string{"张三是谁", "上周录音里聊了什么"} {
+		conv := &repo.AgentConversation{Title: "种子门控变体:" + raw}
+		if err := convRepo.Create(ctx, conv); err != nil {
+			t.Fatal(err)
+		}
+		fake := &FakeRuntime{Script: [][]Event{{{Type: EvAssistantMessage, Data: msgData}}}}
+		orch := NewOrchestrator(rtFor(fake), convRepo, msgRepo)
+		orch.Ctx = &ProfileContext{Retrieve: r}
+		if _, err := orch.RunTurn(ctx, conv, raw); err != nil {
+			t.Fatalf("RunTurn(%q): %v", raw, err)
+		}
+		if !strings.Contains(fake.LastText, "背景记忆") || !strings.Contains(fake.LastText, "和张三聊了猫的事GV") {
+			t.Errorf("个人数据问法 %q 应注入种子: %q", raw, fake.LastText)
+		}
 	}
 }

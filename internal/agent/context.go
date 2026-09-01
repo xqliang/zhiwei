@@ -103,13 +103,18 @@ func AssemblePersona(identity, soul string) string {
 }
 
 // personalSignal 命中「问题关于用户本人」的信号；仅当 query 命中时才跑召回+注入种子。
+// 口径与 system prompt 的「关于用户本人的问题」保持一致（prompt 示例：「张三是谁」
+// 「上周录音里聊了什么」）：除人称代词外，也认用户数据域名词（录音/待办/话题/时间线/
+// 日程/画像/指标/情绪等）与「是谁」人物指代——它们不含「我」字但明确指向用户数据。
 // 常识/名词解释/一般知识题（如「ASL 是什么」「猫的习性」）不含这些词 → 不注入，
 // 从源头避免「啥都跟你数据有关」的误导，也顺带省一次 embedding 调用。
-var personalSignal = regexp.MustCompile(`我|咱|自己|本人`)
+// 注：域名词偶有误伤（如「衡量学习的指标」），代价仅一次多余的 embedding 调用 +
+// 中性措辞的种子块（模型被明示「不相关请忽略」），可接受；不为此上模型分类。
+var personalSignal = regexp.MustCompile(`我|咱|自己|本人|是谁|录音|聊了|聊过|聊天记录|待办|话题|时间线|日程|画像|指标|情绪|心情`)
 
 // Seeds 按本轮 query 召回 top-k 相关记忆，拼成上下文头的「相关记忆」块。
-// 门控：仅当 query 命中个人信号（我/咱/自己/本人）时才召回——常识/名词解释题不注入，
-// 避免「啥都跟你数据有关」的误导，也省一次 embedding 调用。
+// 门控：仅当 query 命中个人信号（见 personalSignal：人称代词 + 用户数据域名词 + 「是谁」）
+// 时才召回——常识/名词解释题不注入，避免「啥都跟你数据有关」的误导，也省一次 embedding 调用。
 // 无 Retrieve / query 空 / query 无个人信号 / 无命中 → ""。每轮一次 query 向量化（未配 embedder 时 Retrieve=nil 不触发）。
 // userID 指定「谁」的记忆（2B-B：由 runTurn 传 conv.UserID，多用户隔离，绝不召回别人的记忆）。
 func (pc *ProfileContext) Seeds(ctx context.Context, userID int64, query string) string {
