@@ -30,9 +30,11 @@ import (
 // 主要失败模式：碎片组要么误命中库里嗓音最像的他人、要么 gap 差一口气未命中而登记成新声纹
 // （库污染的自我强化源头）。2026-08-31「碎片在场优先」：同场内与本场更主要说话人声纹够像
 // （≥ InSessionMin 0.72，实测同人 0.76+、不同人 ≤0.67）的组并入该说话人，不再各标签各登记；
-// 跨 session 归并仍只认 1:N 检索。登记向量优先取「干净段」（见 pickCleanSegVec）：时长最长、
-// 与其他说话人段无时间交集且 ≥3s 的单段——聚合向量会被 diarization 切错/混入他人语音的段
-// 污染；无干净段才退回全组聚合（2026-08-26 需求）。
+// 跨 session 归并仍只认 1:N 检索。检索与登记向量都优先取「干净段」（见 pickCleanSegVec）：
+// 时长最长、与其他说话人段无时间交集且 ≥3s 的单段——聚合向量会被 diarization 切错/混入
+// 他人语音的段污染（2026-09-01 实测：碎段把对既有声纹的领先压缩到宽松命中门槛以下，
+// 整组被误登记成新声纹）；无干净段才退回全组聚合（2026-08-26 需求起登记如此、
+// 2026-09-01 起检索同基准）。
 func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *repo.Transcript) error {
 	segs, err := d.Transcripts.ListSegments(ctx, tr.ID)
 	if err != nil {
@@ -129,7 +131,15 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 	matched := make([]bool, len(reps))     // 该组是否命中既有声纹
 	matchedID := make([]ids.ID, len(reps)) // 命中的既有 speaker id
 	for i, g := range reps {
-		res, err := d.Voiceprint.Search(ctx, g.rep)
+		// 检索基准与登记同源：优先「干净段」向量，无干净段才退回全组聚合。
+		// 聚合会被短碎段污染（实测 2026-09-01 session 2094724818275405824：主力段对既有
+		// 声纹领先 0.19~0.31，被 0~1s 碎段拽平到 0.0676 < LooseGap 0.1，整组被误登记成
+		// 新声纹「说话人prbiv」）；干净段无此污染，见 pickCleanSegVec。
+		searchVec := g.rep
+		if g.clean != nil {
+			searchVec = g.clean
+		}
+		res, err := d.Voiceprint.Search(ctx, searchVec)
 		if err != nil {
 			return fmt.Errorf("voiceprint search: %w", err)
 		}
@@ -596,10 +606,12 @@ type segVec struct {
 // groupRep 一个 ASR 说话人标签组的检索/登记/纠正所需信息（runSpeakerStage 内构建）。
 type groupRep struct {
 	label string
-	rep   []float32 // 组代表声纹（全部段向量均值）——1:N 检索用
+	rep   []float32 // 组代表声纹（全部段向量均值）——无干净段时的检索/登记兜底基准
 	vecN  int       // 该组有效向量数（用于 sample_count）
-	// clean 登记优先向量：组内「时长最长、与其他说话人段无时间交集且 ≥3s」的单段向量。
-	// nil=无干净段（登记时退回 rep）。只影响**新声纹登记**，不影响上面 rep 的检索。
+	// clean 登记与检索的首选向量：组内「时长最长、与其他说话人段无时间交集且 ≥3s」的单段向量。
+	// nil=无干净段（检索/登记退回 rep）。聚合向量会被 diarization 切错/混入他人语音的段
+	// 污染（2026-09-01 实测：碎段把对真身的领先压缩到宽松命中门槛以下，整组误登记成新声纹），
+	// 故 1:N 检索（步骤 2 首趟）与登记（步骤 2b）同基准、都优先干净段。
 	clean []float32
 	// segVecs 组内各段与其向量（纠正 pass 用：逐段对各在场说话人打分）。
 	segVecs []segVec
