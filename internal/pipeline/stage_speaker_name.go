@@ -220,6 +220,9 @@ func runSpeakerNameStage(ctx context.Context, d StageDeps, j *repo.Job, sessionI
 		Model:  d.LLMModel,
 		System: d.NameInferPrompt,
 		User:   sb.String(),
+		// 名字推断=候选名集合内的结构化小输出（同实体纠错的近音/上下文判断），关思考
+		// 提速（2026-09-02 实测 ~10 倍，见 provider.ChatRequest.NoThinking 注释）。
+		NoThinking: true,
 	})
 	if err != nil {
 		log.Printf("[speakername] session=%s LLM 调用失败（尽力而为，不阻塞）: %v", sessionID, err)

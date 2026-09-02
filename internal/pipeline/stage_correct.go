@@ -231,6 +231,10 @@ func correctSegment(ctx context.Context, d StageDeps, j *repo.Job, sessionID ids
 	begin := time.Now()
 	resp, err := d.LLM.Chat(ctx, provider.ChatRequest{
 		Model: d.LLMModel, System: d.CorrectPrompt, User: sb.String(), Temperature: 0.1,
+		// 实体纠错=白名单内近音改写（四重门控兜底），不需要隐性推理：2026-09-02 实测
+		// doubao-seed 默认思考下单次 9~26s、~1000 思考 tokens 纯浪费，disabled 后
+		// 1.3~1.6s 且输出等价（见 provider.ChatRequest.NoThinking 注释）。
+		NoThinking: true,
 	})
 	if err != nil {
 		log.Printf("[correct] session=%s 段%d LLM 失败（尽力而为）: %v", sessionID, sg.SequenceNo, err)

@@ -23,6 +23,13 @@ type ChatRequest struct {
 	System      string  // system prompt
 	User        string  // 用户输入
 	Temperature float64 // 0 表示用服务端默认
+	// NoThinking 显式关闭端侧思考（doubao-seed 系混合推理模型默认开启）。结构化小输出
+	// 的调用（实体纠错/名字推断）不需要隐性推理：2026-09-02 实测 doubao-seed-1-6-flash，
+	// 默认思考单次 9~26s、completion ~1111 tokens（思考吞掉，有效答案仅 ~82）；
+	// 显式 disabled 后 1.3~1.6s、completion 82 tokens——约 10 倍提速且纠错输出等价
+	// （找出的 edits 与置信度一致，四重门控仍在）。按调用方 opt-in：报告/抽取等可能
+	// 受益于推理的长输出调用不设此字段。
+	NoThinking bool
 }
 
 type ChatResponse struct {
@@ -57,6 +64,13 @@ type chatPayload struct {
 	Model       string        `json:"model"`
 	Messages    []chatMessage `json:"messages"`
 	Temperature *float64      `json:"temperature,omitempty"`
+	// Thinking 端侧思考开关（Ark 扩展参数）。nil=不传（用服务端默认——doubao-seed
+	// 系默认开启）；NoThinking 的请求传 {"type":"disabled"}。指针区分「不传」与「显式配置」。
+	Thinking *thinkingConfig `json:"thinking,omitempty"`
+}
+
+type thinkingConfig struct {
+	Type string `json:"type"` // "enabled" | "disabled" | "auto"
 }
 
 type chatMessage struct {
@@ -88,6 +102,9 @@ func (p *ArkLLM) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error
 	pl := chatPayload{Model: req.Model, Messages: msgs}
 	if req.Temperature > 0 {
 		pl.Temperature = &req.Temperature
+	}
+	if req.NoThinking {
+		pl.Thinking = &thinkingConfig{Type: "disabled"}
 	}
 	body, _ := json.Marshal(pl)
 
