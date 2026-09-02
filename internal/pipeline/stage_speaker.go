@@ -31,7 +31,8 @@ import (
 // （库污染的自我强化源头）。2026-08-31「碎片在场优先」：同场内与本场更主要说话人声纹够像
 // （≥ InSessionMin 0.72，实测同人 0.76+、不同人 ≤0.67）的组并入该说话人，不再各标签各登记；
 // 跨 session 归并仍只认 1:N 检索。检索与登记向量都优先取「干净段」（见 pickCleanSegVec）：
-// 时长最长、与其他说话人段无时间交集且 ≥3s 的单段——聚合向量会被 diarization 切错/混入
+// 时长最长、与其他说话人段无**显著**时间交集（亚秒嵌套碎片有容差，见 overlapsOtherLabel）
+// 且 ≥3s 的单段——聚合向量会被 diarization 切错/混入
 // 他人语音的段污染（2026-09-01 实测：碎段把对既有声纹的领先压缩到宽松命中门槛以下，
 // 整组被误登记成新声纹）；无干净段才退回全组聚合（2026-08-26 需求起登记如此、
 // 2026-09-01 起检索同基准）。
@@ -281,6 +282,24 @@ const minCleanSegMS = 3000
 // voteSegMinMS 段级投票的最短段时长：1s——亚秒碎段声纹不稳，投票噪声大
 // （实测案例里 0s 段 top1 随机漂到第三名）。
 const voteSegMinMS = 1000
+
+// cleanOverlapTolMS / cleanOverlapTolFrac 干净段「混入他人语音」判定的交集时长容差：
+// 候选段与其他标签段的**实际交集时长** < min(1s, 候选段时长×15%) 时，视为 diarization
+// 噪声（亚秒嵌套碎片/标签边界渗出）而非真实混音证据，不因此否决该候选段。
+//
+// 背景（2026-09-02 实测 session 2095044361807990784）：9.7s 的杰辉主力段因内嵌 0.2s
+// 噪声碎片「吧？」被判定不干净，整组退回全组聚合——聚合又混进 0.9s 的另一人碎段，
+// 对杰辉相似度从 0.8466（强命中）掉到 0.7823、对第二名胡志涛的领先只剩 0.036 <
+// GapMin，三条命中规则全败，被误登记成新声纹「说话人gif3n」。更糟的是两个人向量的
+// 均值经归一化放大后成了「幽灵质心」——它比两个本体都更像第三方（0.867 > 0.846），
+// 另一人的组又被在场锚点归并吸进这个新声纹，最终一条三人录音只剩一个说话人。
+// 亚秒嵌套碎片本是 ASR 过度切分的典型噪声（后续会被过短并入规则吸收），用最不可信
+// 的标签去否决最可信的长段向量，是本 case 的根因。相对分量 15% 保护短候选段：
+// 3s 段内嵌 0.9s（30% 混音）仍会否决，只有长段才放宽到绝对 1s。
+const (
+	cleanOverlapTolMS   = int64(1000)
+	cleanOverlapTolFrac = 0.15
+)
 
 // segmentVoteMatch 段级多数投票兜底：单向量基准（干净段/聚合）未命中时，让 ≥1s 的
 // 段各自对历史库取 top1 说话人计票。**保守门槛**（防在相近声纹间瞎猜）：
@@ -676,7 +695,8 @@ type groupRep struct {
 	label string
 	rep   []float32 // 组代表声纹（全部段向量均值）——无干净段时的检索/登记兜底基准
 	vecN  int       // 该组有效向量数（用于 sample_count）
-	// clean 登记与检索的首选向量：组内「时长最长、与其他说话人段无时间交集且 ≥3s」的单段向量。
+	// clean 登记与检索的首选向量：组内「时长最长、与其他说话人段无显著时间交集
+	// （亚秒嵌套碎片有容差，见 overlapsOtherLabel）且 ≥3s」的单段向量。
 	// nil=无干净段（检索/登记退回 rep）。聚合向量会被 diarization 切错/混入他人语音的段
 	// 污染（2026-09-01 实测：碎段把对真身的领先压缩到宽松命中门槛以下，整组误登记成新声纹），
 	// 故 1:N 检索（步骤 2 首趟）与登记（步骤 2b）同基准、都优先干净段。
@@ -688,8 +708,9 @@ type groupRep struct {
 }
 
 // pickCleanSegVec 从组内段向量中挑「干净段」向量：时长 ≥3s 且与本 session **其他标签**的
-// 段无时间交集（时间交集=音频上混有他人语音，diarization 切错的典型痕迹），取其中时长
-// 最长的一段。无满足条件的段返回 nil（调用方退回全组聚合）。
+// 段无显著时间交集（时间交集=音频上混有他人语音，diarization 切错的典型痕迹；亚秒嵌套
+// 碎片有容差，见 overlapsOtherLabel），取其中时长最长的一段。无满足条件的段返回 nil
+//（调用方退回全组聚合）。
 // all 传本 session 全部段（含其他标签），用于交集判定。
 func pickCleanSegVec(svs []segVec, all []repo.TranscriptSegment, label string) []float32 {
 	var best []float32
@@ -709,19 +730,38 @@ func pickCleanSegVec(svs []segVec, all []repo.TranscriptSegment, label string) [
 	return best
 }
 
-// overlapsOtherLabel 判断段是否与「其他 speaker_label」的任何段在时间上相交
-// （半开区间 [start,end) 判交：s1.start < s2.end && s2.start < s1.end）。
+// overlapsOtherLabel 判断段是否与「其他 speaker_label」的段在时间上**显著**相交
+// （半开区间 [start,end) 判交）。交集时长低于容差（见 cleanOverlapTolMS 注释——亚秒
+// 嵌套碎片是 diarization 噪声，不代表候选段音频真的混入了他人语音）的其他标签段被忽略。
 // 空 label 的段也算「其他」——单人录音通常全空标签，此时组内即全体段、天然无交集判定对象。
 func overlapsOtherLabel(seg repo.TranscriptSegment, all []repo.TranscriptSegment, label string) bool {
+	dur := seg.EndMS - seg.StartMS
 	for _, o := range all {
 		if o.SpeakerLabel == label {
 			continue
 		}
-		if seg.StartMS < o.EndMS && o.StartMS < seg.EndMS {
-			return true
+		ov := overlapMS(seg, o)
+		if ov <= 0 {
+			continue
 		}
+		// 容差 = min(绝对 1s, 候选段时长×15%)：低于它的交集不构成「混入他人语音」的
+		// 实质证据，忽略该其他标签段。
+		if ov < min(cleanOverlapTolMS, int64(float64(dur)*cleanOverlapTolFrac)) {
+			continue
+		}
+		return true
 	}
 	return false
+}
+
+// overlapMS 两段的实际时间交集时长（半开区间 [start,end)，无交集返回 0）。
+func overlapMS(a, b repo.TranscriptSegment) int64 {
+	lo := max(a.StartMS, b.StartMS)
+	hi := min(a.EndMS, b.EndMS)
+	if hi <= lo {
+		return 0
+	}
+	return hi - lo
 }
 
 // stageSpeaker 是 pool 用的 Handler 包装。

@@ -340,7 +340,9 @@ func TestStageSpeakerSavesSegmentEmbeddings(t *testing.T) {
 }
 
 // seedCleanSegStage 造「可验证干净段挑选」的会话：label "1" 两段（A 长 5s + B 短 0.4s）、
-// label "2" 一段（C 短 0.5s）。overlapC 控制 A 是否与 C 时间相交（true→C 改为与 A 尾部重叠）。
+// label "2" 一段（C 短 0.5s）。overlapC 控制 A 是否与 C 显著时间相交（true→C 改为与 A
+// 重叠 2.5s，**超过**交集容差 min(1s, 15%×5s)=750ms → A 不再「干净」；亚秒级交集自
+// 2026-09-02 起被 cleanOverlapTolMS 容差忽略、不再否决干净段，见 overlapsOtherLabel）。
 // fake Embed 按调用顺序给正交 one-hot：A=e0、B=e1、C=e2。
 func seedCleanSegStage(t *testing.T, overlapC bool) (ids.ID, *repo.Transcript, *repo.TranscriptRepo, *repo.SpeakerRepo, string) {
 	t.Helper()
@@ -367,7 +369,7 @@ func seedCleanSegStage(t *testing.T, overlapC bool) (ids.ID, *repo.Transcript, *
 	}
 	cStart := int64(6000)
 	if overlapC {
-		cStart = 4800 // 与 A [0,5000) 相交 → A 不再「干净」
+		cStart = 2500 // 与 A [0,5000) 重叠 2.5s（> 容差 750ms）→ A 不再「干净」；亚秒交集会被容差忽略
 	}
 	// C 时长 ≥3s：C 是「另一 ASR 说话人」支撑段（scenario2 用来与 A 交集使 A 不干净），
 	// 需照常登记成第二个说话人。若 <3s 会被 Task2 的过短并入规则缓起并入 label1，令 addVecs 少一个、
@@ -505,6 +507,95 @@ func TestStageSpeakerEnrollPrefersCleanSeg(t *testing.T) {
 	}
 }
 
+// TestStageSpeakerCleanSegToleratesNestedFragment 复刻 2026-09-02 session 2095044361807990784
+// 的失败链（根因分析详见 cleanOverlapTolMS 注释）：一条三人录音最终只剩一个说话人。
+// ASR 两处 diarization 错误：①人 A 的 0.9s 插话「英文中间」（嵌在人 A 7s 主力段内）
+// 被错标成 speaker_0（杰辉的标签）；②杰辉 9.7s 主力段内被切出 0.2s 噪声碎片「吧？」
+// （speaker_1）。旧逻辑下 ② 让 9.7s 主力段因 0.2s 交集被否决出「干净段」，speaker_0
+// 组退回「人 A 0.9s + 杰辉 9.7s」的两人混合聚合向量——对杰辉 0.7823 跌破强命中 0.8、
+// 对第二名领先仅 0.036 < GapMin，未命中误登记成新声纹（两人均值的归一化还造成比本体
+// 更像第三方的「幽灵质心」，把人 A 的组也吸入，最终只剩 1 人）。
+// 修复后：亚秒嵌套碎片不再否决干净段 → 杰辉主力段直接强命中杰辉、人 A 独立登记新声纹、
+// 错标插话由 pass4 逐段改判归人 A、噪声碎片过短并入杰辉——四段全部落到正确的人。
+func TestStageSpeakerCleanSegToleratesNestedFragment(t *testing.T) {
+	ctx := context.Background()
+	// 段布局复刻真实 session 的时间轴：seq1(人A 7.0s)；seq2(人A 0.9s，嵌在 seq1 内、
+	// 错标 speaker_0)；seq3(杰辉 9.7s)；seq4(0.2s 噪声，嵌在 seq3 内)
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "speaker_2", Text: "他他要说那个什么英文", StartMS: 7272, EndMS: 14293},
+		{SequenceNo: 2, SpeakerLabel: "speaker_0", Text: "英文中间", StartMS: 11213, EndMS: 12113},
+		{SequenceNo: 3, SpeakerLabel: "speaker_0", Text: "那自己去反馈估计也没用", StartMS: 14293, EndMS: 23992},
+		{SequenceNo: 4, SpeakerLabel: "speaker_1", Text: "吧？", StartMS: 15913, EndMS: 16113},
+	})
+	// 人 A = e0、杰辉 = e1（正交 = 不同人）。seq4 噪声向量微偏杰辉（0.3），
+	// 使过短并入确定性地选杰辉（对齐真实 case：0.4685 > 0.3910）。
+	vA, vJH := make([]float32, 256), make([]float32, 256)
+	vA[0], vJH[1] = 1, 1
+	v4 := make([]float32, 256)
+	v4[1] = 0.3
+	v4[2] = float32(math.Sqrt(1 - 0.3*0.3))
+	// 历史库：杰辉已登记（本 run 开始前已存在）。
+	jh := &repo.Speaker{Name: "杰辉", Source: "auto", Embedding: float32Blob(vJH)}
+	if err := speakers.Create(ctx, jh); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), jh.ID) })
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vA, 2: vA, 3: vJH, 4: v4},
+		entries:  []libEntry{{id: jh.ID, vec: vJH}},
+	}
+	t.Cleanup(func() {
+		for _, id := range fv.added {
+			_ = speakers.Delete(context.Background(), id)
+		}
+	})
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	// 只应登记 1 个新声纹（人 A）。旧逻辑下 speaker_0 组也因污染聚合未命中而误登记 → 2 个。
+	if len(fv.added) != 1 {
+		t.Fatalf("应只登记人 A 的 1 个新声纹，实际 %d 个（杰辉组被污染聚合带偏误登记）", len(fv.added))
+	}
+	newID := fv.added[0]
+	// 检索基准：3 组各检索一次（按标签首次出现排序：speaker_2→speaker_0→speaker_1），
+	// speaker_0 组（下标 1）应用干净段 seq3 的向量 e1（下标0=0、下标1=1），而非全组
+	// 聚合（下标0/1≈0.707 的两人混合向量）。
+	if len(fv.searchVecs) != 3 {
+		t.Fatalf("应检索 3 次（每组一次），实际 %d", len(fv.searchVecs))
+	}
+	if sv := fv.searchVecs[1]; sv[0] != 0 || math.Abs(float64(sv[1])-1) > 1e-6 {
+		t.Fatalf("speaker_0 组检索应用干净段 seq3 向量 e1（下标0=0,下标1=1），实际 %v/%v", sv[0], sv[1])
+	}
+	// 段归属：seq1/seq2 → 人 A（seq2 由 pass4 逐段改判纠正错标签），seq3/seq4 → 杰辉。
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	bySeq := map[int]repo.TranscriptSegment{}
+	for _, s := range segs {
+		if s.SpeakerID == nil {
+			t.Fatalf("段 %d 未回填 speaker_id", s.SequenceNo)
+		}
+		bySeq[s.SequenceNo] = s
+	}
+	if *bySeq[1].SpeakerID != newID {
+		t.Fatalf("seq1（人A 7s）应登记新声纹并归属之，实际 %v", *bySeq[1].SpeakerID)
+	}
+	if *bySeq[2].SpeakerID != newID {
+		t.Fatalf("seq2（人A 0.9s 错标插话）应被 pass4 逐段改判归人 A，实际 %v", *bySeq[2].SpeakerID)
+	}
+	if r := bySeq[2].CorrectedReason; r == nil || *r != "mismatch" {
+		t.Fatalf("seq2 应 corrected_reason=mismatch，实际 %+v", bySeq[2].CorrectedReason)
+	}
+	if *bySeq[3].SpeakerID != jh.ID {
+		t.Fatalf("seq3（杰辉 9.7s 主力段）应经干净段强命中杰辉，实际 %v", *bySeq[3].SpeakerID)
+	}
+	if *bySeq[4].SpeakerID != jh.ID {
+		t.Fatalf("seq4（0.2s 噪声碎片）应过短并入杰辉，实际 %v", *bySeq[4].SpeakerID)
+	}
+	if r := bySeq[4].CorrectedReason; r == nil || *r != "short" {
+		t.Fatalf("seq4 应 corrected_reason=short，实际 %+v", bySeq[4].CorrectedReason)
+	}
+}
+
 // libEntry 有状态 fake 库里的一条声纹（说话人 id → 向量）。
 type libEntry struct {
 	id  ids.ID
@@ -522,6 +613,7 @@ type libVoiceprint struct {
 	entries     []libEntry // 已登记声纹（预置 = 历史库；Add 追加 = 本 run 新登记）
 	added       []ids.ID
 	searchCalls int
+	searchVecs  [][]float32 // 每次 Search 收到的查询向量（断言检索基准是否用干净段）
 }
 
 func (f *libVoiceprint) Embed(_ context.Context, path string) ([]float32, error) {
@@ -540,6 +632,7 @@ func (f *libVoiceprint) Embed(_ context.Context, path string) ([]float32, error)
 
 func (f *libVoiceprint) Search(_ context.Context, vec []float32) (voiceprint.SearchResult, error) {
 	f.searchCalls++
+	f.searchVecs = append(f.searchVecs, append([]float32(nil), vec...))
 	if len(f.entries) == 0 {
 		return voiceprint.SearchResult{Matched: false}, nil // 空库
 	}
