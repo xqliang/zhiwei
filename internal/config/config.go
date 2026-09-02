@@ -27,6 +27,7 @@ type Config struct {
 
 	LLMFastModel   string // Tier1：抽取/分类
 	LLMStrongModel string // Tier2：Agent/Review
+	DenoisePython  string // ZW_DENOISE_PYTHON：DeepFilterNet 降噪所用 python 解释器（须已装 DeepFilterNet 包）
 	EmbedModel     string
 	EmbedAPIKey    string // ARK_AUDIO_API_KEY：向量端点专用 key（≠ ARK_API_KEY；未设→不启用向量）
 	EmbedBaseURL   string // ZW_EMBED_BASE_URL：向量 base，默认 https://ark.cn-beijing.volces.com/api/plan/v3
@@ -129,6 +130,7 @@ func Load() (*Config, error) {
 		// Ark 实测（2026-08-18）：本账号仅 doubao-seed-1-6-flash-250828 可用；
 		// 强模型与 embedding 需控制台开通后用环境变量覆盖。
 		LLMFastModel:   getenv("ZW_LLM_FAST", "doubao-seed-1-6-flash-250828"),
+		DenoisePython:  getenv("ZW_DENOISE_PYTHON", "python3"),
 		LLMStrongModel: getenv("ZW_LLM_STRONG", "doubao-seed-1-6-flash-250828"),
 		EmbedModel:     getenv("ZW_EMBED_MODEL", "doubao-embedding-vision"),
 		// 向量检索用独立 Ark 账号（实测确认）：key 来自 ARK_AUDIO_API_KEY（≠ ARK_API_KEY），

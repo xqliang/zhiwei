@@ -28,6 +28,12 @@ type StageDeps struct {
 	ASR         provider.ASRProvider
 	DataDir     string // 转码输出目录
 
+	// ---- ASR 前降噪（DeepFilterNet3，2026-09-02）----
+	// AsrSettings 每用户降噪配置（开关+强度）；nil=无设置能力 → 不降噪。
+	AsrSettings *repo.AsrSettingsRepo
+	// Denoise 降噪实现（子进程 DeepFilterNet3）；nil=环境未装配 → 不降噪。
+	Denoise Denoiser
+
 	// ---- Sprint 2：extract stage ----
 	DB            *sqlx.DB // 开启 commit 事务用
 	Memories      *repo.MemoryRepo
@@ -117,9 +123,11 @@ func BuildStages(d StageDeps) map[string]Handler {
 	}
 }
 
-// stageASR：ffmpeg 统一转 wav16k → ASR → transcript + segments 落库。
+// stageASR：ffmpeg 统一转 wav16k →（可选）DeepFilterNet3 降噪 → ASR → transcript + segments 落库。
+// 降噪只作用于送 ASR 的音频；声纹切片（speaker stage）仍用原始 transcoded wav——
+// 既有声纹库从原始音频登记，降噪版会改变嵌入分布、破坏跨 session 相似度可比性。
 func stageASR(d StageDeps) Handler {
-	return func(ctx context.Context, _ *repo.Job, sessionID ids.ID) error {
+	return func(ctx context.Context, j *repo.Job, sessionID ids.ID) error {
 		s, err := d.Sessions.Get(ctx, 1, sessionID) // 阶段1：后台流水线无请求上下文，暂 user-1
 		if err != nil {
 			return fmt.Errorf("读取 session: %w", err)
@@ -127,6 +135,9 @@ func stageASR(d StageDeps) Handler {
 		wavPath, err := transcodeToWAV(d.DataDir, sessionID, s.StoragePath)
 		if err != nil {
 			return fmt.Errorf("转码: %w", err)
+		}
+		if asrPath, ok := denoiseForASR(ctx, d, j, sessionID, s.UserID, wavPath); ok {
+			wavPath = asrPath
 		}
 		pieces, err := d.ASR.Transcribe(ctx, wavPath)
 		if err != nil {

@@ -166,7 +166,15 @@ func main() {
 	}
 	entityKB := &repo.EntityKBRepo{DB: db}
 	entitySettings := &repo.EntitySettingsRepo{DB: db}
+	asrSettings := &repo.AsrSettingsRepo{DB: db} // ASR 前降噪配置（每用户开关+强度）
 	entityDisabled := &repo.EntityDisabledRepo{DB: db}
+	// DeepFilterNet3 降噪器：python 须已装 DeepFilterNet 包（ZW_DENOISE_PYTHON 可指定
+	// 解释器，如 miniforge3 的 python3.12）。脚本路径转绝对——子进程不依赖服务进程 CWD。
+	// 降噪失败在 stage 内降级用原始音频（尽力而为），这里构造失败不致命、跳过装配。
+	var denoiser pipeline.Denoiser
+	if dfScript, err := filepath.Abs("scripts/denoise_df.py"); err == nil {
+		denoiser = &pipeline.DeepFilterNetDenoiser{PythonBin: cfg.DenoisePython, ScriptPath: dfScript}
+	}
 	entitySeed := entity.SeedDeps{
 		KB: entityKB, Persons: persons, Attributes: personAttrs, Relationships: personRels,
 		Pets: personPets, Speakers: speakers, Todos: todos, Topics: topics,
@@ -274,6 +282,8 @@ func main() {
 		// ---- correct stage（ASR 实体纠错）----
 		EntityKB:             entityKB,
 		EntitySettings:       entitySettings,
+		AsrSettings:           asrSettings, // ASR 前降噪（用户级开关+强度）
+		Denoise:               denoiser,   // DeepFilterNet3 子进程降噪（scripts/denoise_df.py）
 		EntitySeed:           entitySeed,
 		EntityDisabled:       entityDisabled,
 		CorrectPrompt:        string(correctPromptBytes),
@@ -552,6 +562,8 @@ func main() {
 			EntitySettings: entitySettings,
 			EntitySeed:     entitySeed,
 			EntityDisabled: entityDisabled,
+			// 设置页「音频降噪」：ASR 前降噪开关+强度
+			AsrSettings: asrSettings,
 		})
 		// 预热 owner(id=1) 的 dsh 边车：启动后后台 spawn + initialize 握手，把 node 启动的一次性
 		// 延迟从「首条消息」挪到启动阶段（best-effort：失败仅记日志，首条消息会自行懒启动）。

@@ -3106,6 +3106,28 @@ const app = createApp({
       finally { agentCfgSaving.value = false; }
     }
 
+    // ---------- 设置：音频降噪（ASR 前 DeepFilterNet3 降噪；/api/agent/asr-settings） ----------
+    // 后端契约：GET → {denoise_enabled, denoise_atten_lim}；PUT 指针合并，atten ∈[0,100] dB。
+    // 降噪只作用于送 ASR 的音频（声纹仍用原始音频，保证与既有声纹库可比）；对新录音生效。
+    const asrCfg = ref({ denoise_enabled: false, denoise_atten_lim: 21 });
+    const asrSaving = ref(false);
+    async function loadASRSettings() {
+      try { asrCfg.value = Object.assign(asrCfg.value, await api('GET', '/api/agent/asr-settings')); }
+      catch (e) { showError(e); }
+    }
+    async function saveASRSettings() {
+      if (asrSaving.value) return;
+      asrSaving.value = true;
+      try {
+        await api('PUT', '/api/agent/asr-settings', {
+          denoise_enabled: asrCfg.value.denoise_enabled,
+          denoise_atten_lim: asrCfg.value.denoise_atten_lim,
+        });
+        notify('降噪设置已保存，新录音生效', 2000);
+      } catch (e) { showError(e); }
+      finally { asrSaving.value = false; }
+    }
+
     // ---------- 设置：专有名词（实体纠错；/api/agent/entity-settings + /api/agent/entities） ----------
     // 后端契约见各函数注释；实体 kind → 中文标签。
     const entCfg = ref({ correction_enabled: true, confidence_threshold: 0.8, auto_sources: [], counts_by_kind: {} });
@@ -3404,7 +3426,7 @@ const app = createApp({
       // 问知微 tab：拉会话列表；若已有选中会话，重拉历史 + 重连 WS（切回时恢复现场）。
       if (name === 'agent') { loadAgentConversations(); if (agentConvId.value) { const cid = agentConvId.value; loadAgentHistory(cid); openAgentWS(cid); } }
       // 设置 tab：拉当前人设（identity/soul）到表单。
-      if (name === 'settings') { loadAgentConfig(); loadEntities(); loadMCP(); loadSkills(); }
+      if (name === 'settings') { loadAgentConfig(); loadEntities(); loadMCP(); loadSkills(); loadASRSettings(); }
       // 报告 tab：拉主题列表（话题状态选择器数据源）+ 按当前日报/周报类型加载报告。
       if (name === 'reports') { loadTopics(); loadReport(); }
       // 人物 tab：进入时复位详情/删除确认态，拉名册 + 已删除列表 + 确认队列（跨平面 pending 并集，独立刷新）+ 属性目录（受控输入元数据，懒加载缓存）。
@@ -3461,6 +3483,7 @@ const app = createApp({
       agentCfgIdentity, agentCfgSoul, agentCfgSaving, agentCfgSaved, agentCfgPreview, agentCfgSystemPrompt, agentCfgOwnerHead, agentCfgFullPrompt, loadAgentConfig, saveAgentConfig,
       agentSearchEngine, agentSearchKey, agentSearchSaving, agentSearchSaved, agentSearchErr, saveAgentSearch,
       entCfg, entSaving, entList, entNewCanonical, entNewNote, entKindLabels, loadEntities, saveEntitySettings, addEntity, toggleEntity, removeEntity,
+      asrCfg, asrSaving, loadASRSettings, saveASRSettings,
       mcpServers, mcpForm, mcpErr, loadMCP, addMCP, toggleMCP, deleteMCP,
       agentSkills, skillSearchQ, skillResults, skillSearching, skillManual, skillErr, skillView, loadSkills, searchSkills, installSkill, toggleSkill, deleteSkill,
       confirmProposal, dismissProposal,

@@ -1099,6 +1099,30 @@
       <div v-if="agentSearchErr" class="muted" style="font-size:var(--fs-xs); color:var(--danger,#c33); margin-top:6px">{{ agentSearchErr }}</div>
     </div>
 
+    <!-- ============ 音频降噪（ASR 前 DeepFilterNet3：开关 + 强度） ============ -->
+    <!-- 录音环境嘈杂时开启：转码后先用 DeepFilterNet3 降噪再送 ASR，识别更准。
+         降噪只作用于 ASR（声纹比对仍用原始音频，保证与既有声纹库可比）；对新录音生效。 -->
+    <div class="card">
+      <h2 style="margin:0 0 4px">音频降噪</h2>
+      <div class="muted" style="font-size:var(--fs-sm); margin-bottom:16px">
+        录音环境嘈杂时开启：音频先用 DeepFilterNet3 降噪再送 ASR 识别，人名/术语听写更准。只影响识别（声纹比对仍用原始音频），对新录音生效。
+      </div>
+      <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:600">
+          <input type="checkbox" v-model="asrCfg.denoise_enabled"> 降噪
+        </label>
+        <label style="display:flex; align-items:center; gap:4px; font-size:var(--fs-sm)"
+               title="降噪强度（DeepFilterNet 衰减上限，dB）：越大降噪越狠，0=不降噪。轻噪 12 / 常规 21 / 强噪 40">
+          强度
+          <input class="txt" type="number" v-model.number="asrCfg.denoise_atten_lim" min="0" max="100" step="1" style="width:64px"> dB
+        </label>
+        <button class="btn primary" @click="saveASRSettings" :disabled="asrSaving">{{ asrSaving ? '保存中…' : '保存设置' }}</button>
+      </div>
+      <div class="muted" style="font-size:var(--fs-xs); margin-top:8px">
+        强度即 DeepFilterNet 的衰减上限（dB）：越大降噪越强。轻噪 12 · 常规 21 · 强噪 40。过度降噪可能损伤语音细节，建议从 21 起按效果微调。
+      </div>
+    </div>
+
     <!-- ============ 专有名词（ASR 实体纠错：设置阈值/开关 + 实体库增删启禁） ============ -->
     <!-- ASR 常把人名/花名/项目代号听错；开启后转写中发音相近片段按实体库自动纠正，纠正处在时间线标注原文对照。
          自动实体每次录音刷新收录（删除后下次回来，想持久停用请禁用）；手动实体可自由增删。 -->
@@ -2763,6 +2787,6 @@
   </template>
 </div>
 
-<script src="/app/app.836b9e62.js"></script>
+<script src="/app/app.5f2929b8.js"></script>
 </body>
 </html>

@@ -37,6 +37,7 @@ type AgentHandler struct {
 	EntitySettings *repo.EntitySettingsRepo // 实体纠错配置；nil 时 503
 	EntitySeed     entity.SeedDeps          // 实时聚合依赖（person/pet/speaker/topic 来源 repo）；auto 实体列表用
 	EntityDisabled *repo.EntityDisabledRepo // 禁用名单（自动实体持久停用）；nil 时 auto 无禁用态
+	AsrSettings    *repo.AsrSettingsRepo    // ASR 前降噪配置（设置页「音频降噪」）；nil 时 503
 }
 
 // RegisterAgent 挂载 /api/agent 路由。
@@ -65,7 +66,8 @@ func RegisterAgent(r chi.Router, h *AgentHandler) {
 	r.Get("/api/agent/skills/{id}", h.getSkill)
 	r.Patch("/api/agent/skills/{id}", h.patchSkill) // 启禁（目录 rename 热生效）
 	r.Delete("/api/agent/skills/{id}", h.deleteSkill)
-	registerEntityRoutes(r, h) // 专有名词：纠错配置 + 手动实体 CRUD（设置页）
+	registerEntityRoutes(r, h)      // 专有名词：纠错配置 + 手动实体 CRUD（设置页）
+	registerASRSettingsRoutes(r, h) // 音频降噪：ASR 前降噪开关 + 强度（设置页）
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
