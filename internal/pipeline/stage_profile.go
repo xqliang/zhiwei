@@ -39,12 +39,14 @@ func stageProfile(d StageDeps) Handler {
 			Stage: "profile", MS: msSince(begin),
 			Model: d.Profile.Model, PromptVersion: d.Profile.PromptVersion,
 			Tokens: res.Tokens, Windows: res.Windows,
-			Error: fmt.Sprintf("facts=%d active=%d pending=%d 冲突=%d 佐证=%d 跳过=%d",
+			Error: fmt.Sprintf("facts=%d active=%d pending=%d 冲突=%d 佐证=%d 跳过=%d 提及人名=%d 新建人物=%d",
 				res.Apply.Total, res.Apply.Active, res.Apply.Pending,
-				res.Apply.Conflicts, res.Apply.Reaffirmed, res.Apply.Skipped),
+				res.Apply.Conflicts, res.Apply.Reaffirmed, res.Apply.Skipped,
+				res.Mentioned, res.PersonsNew),
 		})
-		log.Printf("[profile] session=%s facts=%d active=%d pending=%d windows=%d tokens=%d",
-			sessionID, res.Apply.Total, res.Apply.Active, res.Apply.Pending, res.Windows, res.Tokens)
+		log.Printf("[profile] session=%s facts=%d active=%d pending=%d 提及人名=%d 新建人物=%d windows=%d tokens=%d",
+			sessionID, res.Apply.Total, res.Apply.Active, res.Apply.Pending,
+			res.Mentioned, res.PersonsNew, res.Windows, res.Tokens)
 		return nil
 	}
 }

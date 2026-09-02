@@ -397,3 +397,21 @@ func TestExtractorStatsResetPerCall(t *testing.T) {
 		t.Fatalf("第二次 Stats = %+v, want 重置后 {Windows:1 Tokens:42}", st)
 	}
 }
+
+// TestExtractorMentionedAccumulate：mentioned_names 跨窗口累积去重（保序）。
+func TestExtractorMentionedAccumulate(t *testing.T) {
+	blocks := []memory.Block{
+		{SpeakerLabel: "我", Text: "提到张三", StartMS: 0, EndMS: 3000, SegmentIDs: []ids.ID{1}},
+		{SpeakerLabel: "我", Text: "又提到李四和张三", StartMS: 4000, EndMS: 7000, SegmentIDs: []ids.ID{2}},
+	}
+	r1 := `{"facts":[],"mentioned_names":["张三"]}`
+	r2 := `{"facts":[],"mentioned_names":["李四","张三"]}`
+	ex := &Extractor{LLM: &fakeLLM{resps: []string{r1, r2}}, Model: "m", Prompt: "sys", Window: 1} // Window=1 → 两窗口
+	if _, err := ex.Extract(context.Background(), blocks, nil); err != nil {
+		t.Fatal(err)
+	}
+	m := ex.Mentioned()
+	if len(m) != 2 || m[0] != "张三" || m[1] != "李四" {
+		t.Fatalf("跨窗口应去重保序: %v", m)
+	}
+}

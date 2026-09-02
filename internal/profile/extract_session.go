@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 
 	"zhiwei/internal/ids"
 	"zhiwei/internal/memory"
@@ -22,6 +23,10 @@ type ExtractResult struct {
 	Apply   ApplyStats // 落库决策统计（active/pending/reaffirm/skip 等）
 	Windows int        // LLM 调用次数（窗口数）
 	Tokens  int        // 累计 token 用量
+	// Mentioned/PersonsNew：mentioned_names 收录统计——「提了名字但无画像事实」的
+	// 人（如只被顺口问到的「振州」）进待确认队列，不再从人物侧失明。
+	Mentioned  int // 收录的提及人名数（过长度/去重守门后）
+	PersonsNew int // 其中新建的 pending 人物数（其余为命中既有）
 }
 
 // ExtractSession 对一个 session 跑完整画像抽取：读转写段（说话人名替换）→
@@ -108,6 +113,15 @@ func (s *Service) ExtractSession(ctx context.Context, sessionID ids.ID) (Extract
 		return res, fmt.Errorf("落库画像事实: %w", err)
 	}
 	res.Apply = st
+
+	// 提及人名收录：facts 只承载「有信息量的事实」，纯被提及的人（「振州那个更新了
+	// 吗」）不产事实、以前完全失明；由 mentioned_names 兜底进待确认队列（pending）。
+	// best-effort：失败不回滚已落的事实（画像主体已就绪），只记入统计外不阻断。
+	if m, created, err := s.ApplyMentionedNames(ctx, sessionID, ss.UserID, ex.Mentioned()); err != nil {
+		log.Printf("[profile] session=%s 提及人名收录失败（非致命）: %v", sessionID, err)
+	} else {
+		res.Mentioned, res.PersonsNew = m, created
+	}
 	return res, nil
 }
 

@@ -36,14 +36,22 @@ type Extractor struct {
 
 	// stats 记录最近一次 Extract 的统计（每个 stage 各自 new 一个，无并发共享）。
 	stats ExtractStats
+	// mentioned 累计各窗口 mentioned_names（跨窗口去重、保序）——「提了名字但零画像
+	// 事实」的人的收录来源（见 ParseMentionedNames）。
+	mentioned     []string
+	mentionedSeen map[string]bool
 }
 
 func (e *Extractor) Stats() ExtractStats { return e.stats }
+
+// Mentioned 返回最近一次 Extract 累计的提及人名（跨窗口去重、保序）。
+func (e *Extractor) Mentioned() []string { return e.mentioned }
 
 // Extract 抽取全部对话块。跨窗口同自然键（见 factKey：平面+主体身份+内容+关系对端身份）
 // 的重复视为同一事实，保留置信度高者。
 func (e *Extractor) Extract(ctx context.Context, blocks []memory.Block, persons []PersonRef) ([]Fact, error) {
 	e.stats = ExtractStats{}
+	e.mentioned, e.mentionedSeen = nil, map[string]bool{}
 	var all []Fact
 	seen := map[string]int{} // 自然键 -> 在 all 中的下标
 	for winIdx, win := range memory.SplitWindows(blocks, e.Window) {
@@ -57,6 +65,12 @@ func (e *Extractor) Extract(ctx context.Context, blocks []memory.Block, persons 
 		}
 		e.stats.Windows++
 		e.stats.Tokens += resp.TotalTokens
+		for _, n := range ParseMentionedNames(resp.Content) {
+			if !e.mentionedSeen[n] {
+				e.mentionedSeen[n] = true
+				e.mentioned = append(e.mentioned, n)
+			}
+		}
 		facts, err := ParseFacts(resp.Content)
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 窗口解析失败: %w", winIdx+1, err)

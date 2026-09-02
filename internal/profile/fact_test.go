@@ -212,3 +212,18 @@ func TestParsePetFacts(t *testing.T) {
 		t.Fatalf("③ pet_name 应保留: %q", facts[2].PetName)
 	}
 }
+
+// TestParseMentionedNames：顶层 mentioned_names 解析（容围栏/前后缀、trim 空白、缺字段→nil）。
+func TestParseMentionedNames(t *testing.T) {
+	raw := "好的，这是结果：\n```json\n{\"facts\":[],\"mentioned_names\":[\" 振州 \",\"王工\"]}\n```\n"
+	got := ParseMentionedNames(raw)
+	if len(got) != 2 || got[0] != "振州" || got[1] != "王工" {
+		t.Fatalf("解析/trim 不符: %v", got)
+	}
+	if ParseMentionedNames(`{"facts":[]}`) != nil {
+		t.Fatal("缺 mentioned_names 字段应返回 nil")
+	}
+	if ParseMentionedNames("不是 JSON") != nil {
+		t.Fatal("非法 JSON 应返回 nil（best-effort）")
+	}
+}

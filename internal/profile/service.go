@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jmoiron/sqlx"
 
@@ -816,13 +817,13 @@ func petRow(userID int64, personID ids.ID, f Fact, status string,
 	sup, memID *ids.ID, prov Provenance) *repo.PersonPet {
 	row := &repo.PersonPet{
 		UserID: userID, PersonID: personID,
-		Name:     strings.TrimSpace(f.PetName),
-		Nickname: trimToPtr(f.PetNickname),
-		Species:  NormalizeSpecies(f.Species),
-		Breed:    trimToPtr(f.Breed),
-		Gender:   trimToPtr(f.Gender),
-		AgeText:  trimToPtr(f.AgeText),
-		Likes:    trimToPtr(f.Likes),
+		Name:       strings.TrimSpace(f.PetName),
+		Nickname:   trimToPtr(f.PetNickname),
+		Species:    NormalizeSpecies(f.Species),
+		Breed:      trimToPtr(f.Breed),
+		Gender:     trimToPtr(f.Gender),
+		AgeText:    trimToPtr(f.AgeText),
+		Likes:      trimToPtr(f.Likes),
 		Confidence: f.Confidence, EpistemicType: f.EpistemicType,
 		Source: "llm", Status: status, SessionID: &prov.SessionID, MemoryID: memID,
 		TranscriptSegmentIDs: ids.List(prov.SegmentIDs), SupersedesID: sup,
@@ -835,7 +836,7 @@ func petRow(userID int64, personID ids.ID, f Fact, status string,
 
 // mergePetRow 字段级合并构造（同名现值 + 新事实 → 整只替换的新版本行）：
 // f 提到的字段（trim 非空）覆盖，未提到的字段从 existing 沿用。name 恒用 existing
-//（同名才走合并；改名属手动路径 ManualUpdatePet）。
+// （同名才走合并；改名属手动路径 ManualUpdatePet）。
 func mergePetRow(userID int64, existing *repo.PersonPet, f Fact, status string,
 	sup, memID *ids.ID, prov Provenance) *repo.PersonPet {
 	row := &repo.PersonPet{
@@ -949,7 +950,8 @@ func (s *Service) resolveSubject(ctx context.Context, tx *sqlx.Tx, userID int64,
 		} else if pid != 0 {
 			return pid, nil
 		}
-		return s.resolveOrCreateByName(ctx, tx, userID, subj.Name, prov)
+		pid, _, err := s.resolveOrCreateByName(ctx, tx, userID, subj.Name, prov)
+		return pid, err
 	case "relation":
 		if pid, err := s.personByOwnerRelation(ctx, tx, userID, subj.Relation); err != nil {
 			return 0, err
@@ -957,11 +959,13 @@ func (s *Service) resolveSubject(ctx context.Context, tx *sqlx.Tx, userID int64,
 			return pid, nil
 		}
 		if subj.Name != "" {
-			return s.resolveOrCreateByName(ctx, tx, userID, subj.Name, prov)
+			pid, _, err := s.resolveOrCreateByName(ctx, tx, userID, subj.Name, prov)
+			return pid, err
 		}
 		return 0, nil
 	case "mentioned":
-		return s.resolveOrCreateByName(ctx, tx, userID, subj.Name, prov)
+		pid, _, err := s.resolveOrCreateByName(ctx, tx, userID, subj.Name, prov)
+		return pid, err
 	}
 	return 0, nil
 }
@@ -1029,22 +1033,24 @@ func (s *Service) personByOwnerRelation(ctx context.Context, tx *sqlx.Tx, userID
 // 这里是防「老保一家」类口语粘连的第二道防线）：空名/代词/纯集合名词/超长（>8 rune）
 // → 拒绝新建（返回 0，调用方跳过该事实）。
 // 人物解析含**别名兜底**（FindByNameOrAliasExt，2026-08-31）：提到人物的已确认别名
-//（如「老保」之于解保功）直接归到该人物，不再重复建 pending 新人物。
-func (s *Service) resolveOrCreateByName(ctx context.Context, tx *sqlx.Tx, userID int64, name string, prov Provenance) (ids.ID, error) {
+// （如「老保」之于解保功）直接归到该人物，不再重复建 pending 新人物。
+// resolveOrCreateByName 按名（或别名）找已有人物，找不到新建 source=llm status=pending
+// 人物（走确认防噪声）。第二个返回值表示是否**新建**（false=命中既有）。
+func (s *Service) resolveOrCreateByName(ctx context.Context, tx *sqlx.Tx, userID int64, name string, prov Provenance) (ids.ID, bool, error) {
 	name = NormalizePersonName(name)
 	if name == "" {
-		return 0, nil
+		return 0, false, nil
 	}
 	p, err := s.Persons.FindByNameOrAliasExt(ctx, tx, userID, name)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if p != nil {
-		return p.ID, nil
+		return p.ID, false, nil
 	}
 	p = &repo.Person{UserID: userID, DisplayName: name, Source: "llm", Status: "pending"}
 	if err := s.Persons.CreateExt(ctx, tx, p); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	sid := prov.SessionID
 	if err := s.ChangeLogs.CreateExt(ctx, tx, &repo.PersonChangeLog{
@@ -1052,9 +1058,53 @@ func (s *Service) resolveOrCreateByName(ctx context.Context, tx *sqlx.Tx, userID
 		ChangeType: "create", ChangedBy: "llm", NewValue: snap(p.DisplayName),
 		SessionID: &sid, Note: strPtr("LLM 抽取自动新建人物，待确认"),
 	}); err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return p.ID, nil
+	return p.ID, true, nil
+}
+
+// mentionedNameMaxRunes 提及人名的长度上限（与 prompt 人物名字规则一致：超 8 字一律
+// 不建人物）——Go 侧兜底，防模型偶尔违规输出长串。
+const mentionedNameMaxRunes = 8
+
+// ApplyMentionedNames 收录「本场提及但无画像事实」的人名：按名/别名命中已有人物
+// 则 no-op，否则新建 source=llm status=pending 人物（进待确认队列，用户确认才 active）。
+// 幂等：同 session 重跑时 FindByNameOrAliasExt 命中既有 pending，不重复建。
+// 返回（收录名数, 新建数）。
+func (s *Service) ApplyMentionedNames(ctx context.Context, sessionID ids.ID, userID int64, names []string) (int, int, error) {
+	kept := make([]string, 0, len(names))
+	seen := map[string]bool{}
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" || utf8.RuneCountInString(n) > mentionedNameMaxRunes || seen[n] {
+			continue
+		}
+		seen[n] = true
+		kept = append(kept, n)
+	}
+	if len(kept) == 0 {
+		return 0, 0, nil
+	}
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	prov := Provenance{SessionID: sessionID}
+	created := 0
+	for _, n := range kept {
+		_, isNew, err := s.resolveOrCreateByName(ctx, tx, userID, n, prov)
+		if err != nil {
+			return 0, 0, fmt.Errorf("收录提及人名 %q: %w", n, err)
+		}
+		if isNew {
+			created++
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return len(kept), created, nil
 }
 
 // ---- 行构造与审计构造小工具 ----

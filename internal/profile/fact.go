@@ -211,12 +211,7 @@ type rawFact struct {
 // 条目级问题（非法 plane/枚举/空字段）直接丢弃该条——宁少勿错，不整体失败。
 // epistemic_type 缺省视为 observed（画像事实多为对话直陈）。
 func ParseFacts(raw string) ([]Fact, error) {
-	s := strings.TrimSpace(raw)
-	if i := strings.Index(s, "{"); i >= 0 {
-		if j := strings.LastIndex(s, "}"); j > i {
-			s = s[i : j+1]
-		}
-	}
+	s := trimJSON(raw)
 	var out struct {
 		Facts []rawFact `json:"facts"`
 	}
@@ -373,4 +368,39 @@ func trimSubjects(ss []rawSubject) []Subject {
 		out = append(out, trimSubject(s))
 	}
 	return out
+}
+
+// trimJSON 剥掉模型输出可能带的前后缀文字与 markdown 围栏：截取首个 { 到最后一个 }。
+// ParseFacts 与 ParseMentionedNames 共用（同一段响应两视角解析）。
+func trimJSON(raw string) string {
+	s := strings.TrimSpace(raw)
+	if i := strings.Index(s, "{"); i >= 0 {
+		if j := strings.LastIndex(s, "}"); j > i {
+			s = s[i : j+1]
+		}
+	}
+	return s
+}
+
+// ParseMentionedNames 解析画像抽取输出顶层的 mentioned_names：本场对话中被明确
+// 提及的人名（**无需伴随画像事实**）——「提了名字但零信息」的人（如只被问到
+// 「振州那个更新了吗」）也进待确认队列，不再从人物侧失明。
+// best-effort：字段缺失/解析失败返回 nil，绝不让人名收录失败拖垮整次抽取。
+func ParseMentionedNames(raw string) []string {
+	var out struct {
+		MentionedNames []string `json:"mentioned_names"`
+	}
+	if err := json.Unmarshal([]byte(trimJSON(raw)), &out); err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(out.MentionedNames))
+	for _, n := range out.MentionedNames {
+		if n = strings.TrimSpace(n); n != "" {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
 }

@@ -148,3 +148,80 @@ func TestExtractSessionEdgePaths(t *testing.T) {
 		t.Fatalf("跳过应零值: %+v", res)
 	}
 }
+
+// TestExtractSessionMentionedNames：「提了名字但无画像事实」的人应被收录为 pending
+// 人物（待确认队列）——复刻 2026-09-01 session 2094724818275405824 的「振州」案例：
+// 只被提到一句、facts=0，人物侧完全失明。mentioned_names 不需要伴随事实。
+func TestExtractSessionMentionedNames(t *testing.T) {
+	ctx := context.Background()
+	resp := `{"facts":[],"mentioned_names":["振州"," 王工 "]}` // 王工带空格：验证 trim
+	svc := newExtractService(t, resp, resp)
+	t.Cleanup(func() {
+		_, _ = svc.DB.ExecContext(context.Background(),
+			`DELETE FROM person_change_log WHERE person_id IN (SELECT id FROM person WHERE user_id=1 AND display_name IN ('振州','王工'))`)
+		_, _ = svc.DB.ExecContext(context.Background(),
+			`DELETE FROM person WHERE user_id = 1 AND display_name IN ('振州','王工')`)
+	})
+	sid := mkSession(t, svc, []string{"哎，振州那个更新了吗？王工说已经上线了"})
+	res, err := svc.ExtractSession(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Mentioned != 2 || res.PersonsNew != 2 {
+		t.Fatalf("应收录 2 个提及人名、新建 2 个 pending: %+v", res)
+	}
+	for _, name := range []string{"振州", "王工"} {
+		p, _ := svc.Persons.FindByName(ctx, 1, name)
+		if p == nil || p.Status != "pending" || p.Source != "llm" {
+			t.Fatalf("%s 应为 source=llm status=pending 人物: %+v", name, p)
+		}
+	}
+	// 幂等重跑：同名命中既有 pending（FindByNameOrAliasExt），不重复建。
+	res2, err := svc.ExtractSession(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.PersonsNew != 0 {
+		t.Fatalf("重跑不应重复建人物: %+v", res2)
+	}
+	var n int
+	if err := svc.DB.GetContext(ctx, &n,
+		`SELECT COUNT(*) FROM person WHERE user_id=1 AND display_name IN ('振州','王工')`); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("重跑后仍应只有 2 行: %d", n)
+	}
+}
+
+// TestExtractSessionMentionedNamesGuard：人名守门——超 8 字的名字跳过（prompt 同规则
+// 的 Go 侧兜底）、已存在的人物（含别名命中）不新建。
+func TestExtractSessionMentionedNamesGuard(t *testing.T) {
+	ctx := context.Background()
+	resp := `{"facts":[],"mentioned_names":["这是一个特别长的所谓名字超过八个字","老板"]}`
+	svc := newExtractService(t, resp)
+	t.Cleanup(func() {
+		_, _ = svc.DB.ExecContext(context.Background(),
+			`DELETE FROM person WHERE user_id = 1 AND display_name = '老板'`)
+	})
+	// 预建「老板」为 active 人物（已存在 → 收录时 no-op）。
+	if err := svc.Persons.Create(ctx, &repo.Person{UserID: 1, DisplayName: "老板", Source: "manual", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	sid := mkSession(t, svc, []string{"老板说这个方案可以"})
+	res, err := svc.ExtractSession(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Mentioned != 1 || res.PersonsNew != 0 {
+		t.Fatalf("超长名应跳过、既有名应 no-op: %+v", res)
+	}
+	var n int
+	if err := svc.DB.GetContext(ctx, &n,
+		`SELECT COUNT(*) FROM person WHERE user_id=1 AND display_name LIKE '%这是一个特别长的%'`); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("超长名不应建人物: %d", n)
+	}
+}
