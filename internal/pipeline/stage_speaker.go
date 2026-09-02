@@ -154,6 +154,16 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 				continue
 			}
 			matched[i], matchedID[i] = true, res.SpeakerID
+			continue
+		}
+		// 段级多数投票兜底：干净段单向量可能恰好选中最不具区分性的那段（实测
+		// 2026-09-02 session 2095037034107244544：8s 干净段 top1 领先仅 0.014 未命中、
+		// 误登记「说话人ffwvo」，而 ≥1s 段里 6/8 段 top1=清亮、3 段段级即满足命中）。
+		// 保守门槛见 segmentVoteMatch。
+		if vid, ok := segmentVoteMatch(ctx, d, g, threshold); ok {
+			if sp, gerr := d.Speakers.Get(ctx, vid); gerr == nil && sp != nil {
+				matched[i], matchedID[i] = true, vid
+			}
 		}
 	}
 	// 预判是否存在可作「过短并入」目标的组（命中历史库 or 非过短新组）。
@@ -267,6 +277,64 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 
 // minCleanSegMS 干净段（登记声纹优先来源）的最短时长：3s——太短的段声纹特征不稳。
 const minCleanSegMS = 3000
+
+// voteSegMinMS 段级投票的最短段时长：1s——亚秒碎段声纹不稳，投票噪声大
+// （实测案例里 0s 段 top1 随机漂到第三名）。
+const voteSegMinMS = 1000
+
+// segmentVoteMatch 段级多数投票兜底：单向量基准（干净段/聚合）未命中时，让 ≥1s 的
+// 段各自对历史库取 top1 说话人计票。**保守门槛**（防在相近声纹间瞎猜）：
+//   - 得票严格过半（>50%）且 ≥2 票；
+//   - 至少一段对该说话人**段级满足 voiceprint.Matched**（强证据：不只票多，
+//     还要有段落能独立通过两级命中规则）。
+//
+// 全库在首趟检索阶段尚未加入本 run 新声纹（两趟设计），各段票面对的是同一历史库。
+// 复刻 case：8s 干净段近平手（gap 0.014）未命中误登记新声纹，而 6/8 段 top1=清亮、
+// 3 段段级即命中。返回 (speakerID, true) 表示投票归属；未决返回 (0, false)。
+func segmentVoteMatch(ctx context.Context, d StageDeps, g groupRep, threshold float64) (ids.ID, bool) {
+	// 预检短路：≥1s 段不足 2 个时投票不可能过「≥2 票」门槛，直接返回，省无效检索
+	//（单人短组/碎片组常只有 1 个合格段，逐段检索纯浪费 sidecar 调用）。
+	eligible := 0
+	for _, sv := range g.segVecs {
+		if sv.seg.EndMS-sv.seg.StartMS >= voteSegMinMS {
+			eligible++
+		}
+	}
+	if eligible < 2 {
+		return 0, false
+	}
+	votes := map[ids.ID]int{}
+	strong := map[ids.ID]bool{}
+	total := 0
+	for _, sv := range g.segVecs {
+		if sv.seg.EndMS-sv.seg.StartMS < voteSegMinMS {
+			continue
+		}
+		res, err := d.Voiceprint.Search(ctx, sv.vec)
+		if err != nil || !res.Matched || res.SpeakerID == 0 {
+			continue // 检索失败/空库：该段弃权
+		}
+		total++
+		votes[res.SpeakerID]++
+		if voiceprint.Matched(res.Distance, res.SecondDistance, threshold) {
+			strong[res.SpeakerID] = true
+		}
+	}
+	if total < 2 {
+		return 0, false
+	}
+	var bestID ids.ID
+	bestN := 0
+	for sid, n := range votes {
+		if n > bestN {
+			bestID, bestN = sid, n
+		}
+	}
+	if bestN >= 2 && bestN*2 > total && strong[bestID] {
+		return bestID, true
+	}
+	return 0, false
+}
 
 // defaultFragmentMS 「碎片组」判定默认阈值（10s）：组内段总时长小于此值视为 ASR diarization
 // 碎片（同一人被切成第二标签的短句，或噪声句）。实测两个误判 case 的碎片组分别为 3.9s/6.3s，

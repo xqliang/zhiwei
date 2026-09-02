@@ -1393,3 +1393,108 @@ func TestStageSpeakerSearchPrefersCleanSeg(t *testing.T) {
 		t.Fatalf("单组应检索 1 次，实际 %d", fv.searchCalls)
 	}
 }
+
+// seedVoteStage 造「段级投票」场景：单标签 "1" 的多段会话。向量由 vecBySeq 指定。
+func seedVoteStage(t *testing.T, segs []repo.TranscriptSegment) (ids.ID, *repo.Transcript, string, *repo.TranscriptRepo, *repo.SpeakerRepo) {
+	return seedSpeakerStageSegs(t, segs)
+}
+
+// mkVec2 造 256 维、前两维为 (a,b) 的归一化向量（e0/e1 正交锚，靠近谁即像谁）。
+func mkVec2(a, b float64) []float32 {
+	n := math.Sqrt(a*a + b*b)
+	v := make([]float32, 256)
+	v[0], v[1] = float32(a/n), float32(b/n)
+	return v
+}
+
+// TestStageSpeakerSegmentVoteMajority：干净段是全组最不具区分性的一段（top1 近平手）
+// 但多数段各自明确偏向同一既有声纹 → 段级多数投票兜底应归属它，不登记新声纹。
+// 复刻 2026-09-02 session 2095037034107244544（误登记「说话人ffwvo」）：8s 干净段
+// 清亮 0.756/铉晔 0.742 仅差 0.014 未命中，而 6/8 段 top1=清亮、3 段段级即命中。
+func TestStageSpeakerSegmentVoteMajority(t *testing.T) {
+	sid, tr, dataDir, transcripts, speakers := seedVoteStage(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "最长但近平手段", StartMS: 0, EndMS: 5000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "明确段乙", StartMS: 5100, EndMS: 8100},
+		{SequenceNo: 3, SpeakerLabel: "1", Text: "明确段丙", StartMS: 8200, EndMS: 10200},
+		{SequenceNo: 4, SpeakerLabel: "1", Text: "明确段丁", StartMS: 10300, EndMS: 11800},
+	})
+	ctx := context.Background()
+	p1 := &repo.Speaker{Name: "P1", Source: "auto"}
+	p2 := &repo.Speaker{Name: "P2", Source: "auto"}
+	if err := speakers.Create(ctx, p1); err != nil {
+		t.Fatal(err)
+	}
+	if err := speakers.Create(ctx, p2); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = speakers.Delete(context.Background(), p1.ID)
+		_ = speakers.Delete(context.Background(), p2.ID)
+	})
+	e0, e1 := mkVec2(1, 0), mkVec2(0, 1)
+	// seq1（5s 干净段）：稍偏 P2 的近平手（0.711 vs 0.704，gap≈0.007）→ 干净段未命中；
+	// seq2/3/4：纯 e0 → 段级对 P1 强命中（1.0 vs 0）。
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: mkVec2(0.99, 1), 2: e0, 3: e0, 4: e0},
+		entries:  []libEntry{{id: p1.ID, vec: e0}, {id: p2.ID, vec: e1}},
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 0 {
+		t.Fatalf("多数段明确偏向 P1 应投票归属、零登记，实际登记 %d 个", len(fv.added))
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SpeakerID == nil || *s.SpeakerID != p1.ID {
+			t.Fatalf("段 %d 应归属 P1（3/4 票 + 3 段段级强命中），实际 %+v", s.SequenceNo, s.SpeakerID)
+		}
+	}
+}
+
+// TestStageSpeakerSegmentVoteTieRejected：票数恰好 50/50 时不得归属（保守门），
+// 照常登记新声纹——投票兜底只在明确多数时介入。
+func TestStageSpeakerSegmentVoteTieRejected(t *testing.T) {
+	sid, tr, dataDir, transcripts, speakers := seedVoteStage(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "近平手段偏P1", StartMS: 0, EndMS: 5000},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "P1明确段", StartMS: 5100, EndMS: 8100},
+		{SequenceNo: 3, SpeakerLabel: "1", Text: "P2明确段", StartMS: 8200, EndMS: 10200},
+		{SequenceNo: 4, SpeakerLabel: "1", Text: "P2明确段二", StartMS: 10300, EndMS: 11800},
+	})
+	ctx := context.Background()
+	p1 := &repo.Speaker{Name: "P1", Source: "auto"}
+	p2 := &repo.Speaker{Name: "P2", Source: "auto"}
+	if err := speakers.Create(ctx, p1); err != nil {
+		t.Fatal(err)
+	}
+	if err := speakers.Create(ctx, p2); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = speakers.Delete(context.Background(), p1.ID)
+		_ = speakers.Delete(context.Background(), p2.ID)
+	})
+	e0, e1 := mkVec2(1, 0), mkVec2(0, 1)
+	// seq1 近平手偏 P1（未命中），seq2=P1 强，seq3/4=P2 强 → 2:2 平票 → 不归属。
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: mkVec2(1, 0.99), 2: e0, 3: e1, 4: e1},
+		entries:  []libEntry{{id: p1.ID, vec: e0}, {id: p2.ID, vec: e1}},
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 1 {
+		t.Fatalf("50/50 平票不应归属，应照常登记 1 个新声纹，实际 %d 个", len(fv.added))
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SpeakerID == nil {
+			t.Fatalf("段 %d 未回填 speaker_id", s.SequenceNo)
+		}
+		if *s.SpeakerID == p1.ID || *s.SpeakerID == p2.ID {
+			t.Fatalf("段 %d 不应归属 P1/P2（50/50 平票保守不归属），实际 %s", s.SequenceNo, *s.SpeakerID)
+		}
+	}
+}
