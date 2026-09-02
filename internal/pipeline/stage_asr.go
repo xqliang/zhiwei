@@ -76,10 +76,14 @@ type StageDeps struct {
 	// CorrectEnabled 总开关（ZW_ENTITY_CORRECT_ENABLED）。stage 常驻 stagesList、
 	// 开关在此生效（false → no-op）——中段 stage 不能按开关从 stagesList 移除，
 	// 否则恰停在该 stage 的在途 job 会因 Flow.Next 无后继直接判完成、静默丢后续。
-	CorrectEnabled   bool    // false = stage no-op（流水线照常推进）
-	CorrectWindow    int     // 上下文前后段数，0 = 默认 2
-	CorrectTopK      int     // 召回 Top-K，0 = 默认 5
-	CorrectMinSim    float64 // 召回相似度下限，0 = 默认 0.6
+	CorrectEnabled bool // false = stage no-op（流水线照常推进）
+	// CorrectConcurrency 逐段 LLM 调用的并发数（ZW_ENTITY_CORRECT_CONCURRENCY，0=默认 6）。
+	// 段间判定相互独立（上下文读原始文本、应用只写 DB 不回写内存），并行不改语义；
+	// 1 = 退回串行。见 stage_correct.go defaultCorrectConcurrency 注释。
+	CorrectConcurrency int
+	CorrectWindow      int     // 上下文前后段数，0 = 默认 2
+	CorrectTopK        int     // 召回 Top-K，0 = 默认 5
+	CorrectMinSim      float64 // 召回相似度下限，0 = 默认 0.6
 	// CorrectMaxLLMCalls 逐段 LLM 调用的会话级上限（成本护栏），0 = 默认 500。
 	CorrectMaxLLMCalls int
 

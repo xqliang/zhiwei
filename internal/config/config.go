@@ -52,7 +52,7 @@ type Config struct {
 	VoiceprintFragmentMS int64
 	// VoiceprintInSessionMin 碎片在场归并的最低相似度（实测同人 0.76+、不同人 ≤0.67）。
 	VoiceprintInSessionMin float64
-	EnrollMinDurationMS     int64   // 从转写段音频录入声纹的最小时长（毫秒，默认 3000=3s；WeSpeaker LM 对 >3s 更稳）
+	EnrollMinDurationMS    int64 // 从转写段音频录入声纹的最小时长（毫秒，默认 3000=3s；WeSpeaker LM 对 >3s 更稳）
 
 	// ---- Agent / Chatbot（P1；设计见 agent-chatbot spec §14）----
 	AgentEnabled         bool   // ZW_AGENT_ENABLED，关掉则不 spawn dsh（报告等仍可用）
@@ -97,6 +97,7 @@ type Config struct {
 	EntityCorrectTopK    int     // ZW_ENTITY_CORRECT_TOPK：召回 Top-K（默认 5）
 	EntityCorrectMinSim  float64 // ZW_ENTITY_CORRECT_MIN_SIM：召回相似度下限 [0,1]（默认 0.6）
 	EntityCorrectMaxLLM  int     // ZW_ENTITY_CORRECT_MAX_LLM：逐段 LLM 调用的会话级上限（默认 500）
+	EntityCorrectConc    int     // ZW_ENTITY_CORRECT_CONCURRENCY：逐段 LLM 并发数（默认 6，1=串行）
 
 	// ---- 多用户鉴权（阶段1：cookie+session）----
 	OwnerPassword  string // ZW_OWNER_PASSWORD：首启引导 owner(id=1) 口令（其 password_hash 空时用它设置）
@@ -218,6 +219,7 @@ func Load() (*Config, error) {
 		EntityCorrectTopK:    getenvInt("ZW_ENTITY_CORRECT_TOPK", 5),
 		EntityCorrectMinSim:  getenvFloat("ZW_ENTITY_CORRECT_MIN_SIM", 0.6),
 		EntityCorrectMaxLLM:  getenvInt("ZW_ENTITY_CORRECT_MAX_LLM", 500),
+		EntityCorrectConc:    getenvInt("ZW_ENTITY_CORRECT_CONCURRENCY", 6),
 
 		// ---- 多用户鉴权（阶段1）----
 		OwnerPassword:  os.Getenv("ZW_OWNER_PASSWORD"),

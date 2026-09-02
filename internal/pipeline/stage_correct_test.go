@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -61,13 +63,18 @@ func TestParseCorrectionEdits(t *testing.T) {
 }
 
 // fakeCorrectLLM 可编程 LLM 桩：按序弹出预设响应；耗尽/err 返回错误。记录收到的 user 消息。
+// 并发安全（correct stage 的段级调用已并行化，多段会并发进 Chat；互斥下「按序弹出」
+// 的实际分配随完成顺序不定——既有用例均为单调用或全同响应，不受影响）。
 type fakeCorrectLLM struct {
+	mu    sync.Mutex
 	resps []string
 	calls []string
 	err   error
 }
 
 func (f *fakeCorrectLLM) Chat(_ context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, req.User)
 	if f.err != nil {
 		return provider.ChatResponse{}, f.err
@@ -477,5 +484,79 @@ func TestStageCorrectSkipOnEntityEditsOnly(t *testing.T) {
 	seg2 := getSeg(t, fx.transcripts, fx.tr.ID, 2)
 	if seg2.Text != "张梦瑜你看到我的邮件了吗" {
 		t.Fatalf("文本不应被二次改动: %q", seg2.Text)
+	}
+}
+
+// parLLM 并发观测桩：固定响应 + 原子跟踪在途/峰值并发（每调用 sleep 一小会儿拉开
+// 并发窗口）。correct stage 并行化（2026-09-02）的守护测试用。
+type parLLM struct {
+	mu       sync.Mutex
+	resp     string
+	calls    int
+	inflight int
+	maxInfl  int
+}
+
+func (f *parLLM) Chat(_ context.Context, _ provider.ChatRequest) (provider.ChatResponse, error) {
+	f.mu.Lock()
+	f.calls++
+	f.inflight++
+	if f.inflight > f.maxInfl {
+		f.maxInfl = f.inflight
+	}
+	f.mu.Unlock()
+	time.Sleep(40 * time.Millisecond)
+	f.mu.Lock()
+	f.inflight--
+	f.mu.Unlock()
+	return provider.ChatResponse{Content: f.resp, TotalTokens: 10}, nil
+}
+
+var _ provider.LLMProvider = (*parLLM)(nil)
+
+// TestStageCorrectParallelSegments 守护并行化：8 个有候选的段在并发 4 下应真并发
+//（峰值在途 ≥2）、全部正确纠正、恰好 8 次调用；串行实现（或并发退化为 1）时
+// maxInfl 恒 1 → 红。
+func TestStageCorrectParallelSegments(t *testing.T) {
+	fx := setupCorrectFixture(t)
+	ctx := context.Background()
+	// 8 个段全部含「常梦瑜」（召回 张梦瑜）
+	texts := []string{
+		"常梦瑜你看到我的邮件了吗", "常梦瑜在哪呢", "常梦瑜来了没", "常梦瑜说一下",
+		"常梦瑜帮我看下", "常梦瑜刚才说什么", "常梦瑜等下聊聊", "常梦瑜在忙吗",
+	}
+	segs := make([]repo.TranscriptSegment, len(texts))
+	for i, txt := range texts {
+		segs[i] = repo.TranscriptSegment{
+			TranscriptID: fx.tr.ID, SequenceNo: 10 + i, SpeakerLabel: "1",
+			Text: txt, StartMS: int64(10000 + i*3000), EndMS: int64(12000 + i*3000),
+		}
+	}
+	if err := fx.transcripts.InsertSegments(ctx, segs); err != nil {
+		t.Fatal(err)
+	}
+	// 注意：fixture 的 seq2「常梦瑜你看到我的邮件了吗」也有候选，与 texts[0] 文本相同
+	// ——总共 9 个有候选段（seq2..seq17）。
+	llm := &parLLM{resp: `{"edits":[{"orig":"常梦瑜","corrected":"张梦瑜","confidence":0.9,"reason":"读音相近"}]}`}
+	d := newCorrectDeps(fx, llm)
+	d.CorrectConcurrency = 4
+	if err := runCorrectStage(ctx, d, &repo.Job{}, fx.sid); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if llm.calls != 9 {
+		t.Fatalf("应恰好 9 次 LLM 调用（9 个有候选段），实际 %d", llm.calls)
+	}
+	if llm.maxInfl < 2 {
+		t.Fatalf("并发 4 下峰值在途应 ≥2（真并行），实际 %d（疑似退化为串行）", llm.maxInfl)
+	}
+	// 全部段都被纠正为 张梦瑜 开头
+	for i, txt := range texts {
+		s := getSeg(t, fx.transcripts, fx.tr.ID, 10+i)
+		if want := strings.Replace(txt, "常梦瑜", "张梦瑜", 1); s.Text != want {
+			t.Fatalf("段 %d 文本应纠正为 %q，实际 %q", 10+i, want, s.Text)
+		}
+		if s.CorrectedReason == nil || *s.CorrectedReason != "entity" {
+			t.Fatalf("段 %d corrected_reason 应为 entity，实际 %v", 10+i, s.CorrectedReason)
+		}
 	}
 }

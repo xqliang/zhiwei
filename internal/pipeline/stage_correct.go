@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"zhiwei/internal/entity"
@@ -17,6 +18,11 @@ import (
 	"zhiwei/internal/provider"
 	"zhiwei/internal/repo"
 )
+
+// defaultCorrectConcurrency 逐段 LLM 调用的默认并发数：6——关思考后单次 ~1.4s，
+// 6 并发把长录音（实测 47 段有候选）的 correct 墙钟从 ~29s 压到 ~7s；对 Ark flash
+// 档限速是温和压力。可用 ZW_ENTITY_CORRECT_CONCURRENCY 调（1=退回串行）。
+const defaultCorrectConcurrency = 6
 
 // correctionEdit LLM 输出的一条纠错建议（asr_correction_v1 契约）。
 // 去拷贝化后改为 canonical 唯一门控：corrected 逐字等于白名单 canonical 即充分
@@ -128,15 +134,22 @@ func runCorrectStage(ctx context.Context, d StageDeps, j *repo.Job, sessionID id
 		minSim = 0.6 // 召回下限默认（实测同音错≈0.95、无关≈0.57）
 	}
 	// 成本护栏：逐段 LLM 调用的会话级上限。长录音（数百段）即便三成段有候选，
-	// 也是上百次串行调用——token 花费随录音长度线性无界。达上限后余下段本轮跳过
+	// 也是上百次调用——token 花费随录音长度线性无界。达上限后余下段本轮跳过
 	// （不落标记，下轮重跑会自然续上——幂等跳过已纠正段，从第一个未纠正候选段继续）。
 	maxLLMCalls := d.CorrectMaxLLMCalls
 	if maxLLMCalls <= 0 {
 		maxLLMCalls = 500
 	}
-	llmCalls := 0
 
 	changed := false
+	// 预筛（纯 CPU 无 IO）：幂等跳过 + 空文本 + 召回候选，先算出全部要调 LLM 的段。
+	// 成本护栏也在此截断（保序取前 maxLLMCalls 个有候选段，与旧串行版 break 语义一致）。
+	type segWork struct {
+		idx   int // 段在 segs 里的下标（correctSegment 组上下文窗口用）
+		seg   *repo.TranscriptSegment
+		cands []entity.Candidate
+	}
+	var work []segWork
 	for i := range segs {
 		sg := &segs[i]
 		if (sg.CorrectedReason != nil && *sg.CorrectedReason == "entity") || len(sg.EntityEdits) > 0 {
@@ -152,40 +165,71 @@ func runCorrectStage(ctx context.Context, d StageDeps, j *repo.Job, sessionID id
 		if len(cands) == 0 {
 			continue // 白名单为空 → 不调 LLM（省成本 + 避免无约束改写）
 		}
-		if llmCalls >= maxLLMCalls {
-			appendTrace(j, repo.TraceEntry{Stage: "correct", Error: fmt.Sprintf("LLM 调用达会话上限 %d，余下段本轮跳过（成本护栏，非错误）", maxLLMCalls)})
-			break
+		work = append(work, segWork{idx: i, seg: sg, cands: cands})
+	}
+	if len(work) > maxLLMCalls {
+		appendTrace(j, repo.TraceEntry{Stage: "correct", Error: fmt.Sprintf("LLM 调用达会话上限 %d，余下段本轮跳过（成本护栏，非错误）", maxLLMCalls)})
+		work = work[:maxLLMCalls]
+	}
+
+	// 并行调 LLM（2026-09-02 优化）：段间相互独立——上下文窗口读的是各段原始文本
+	//（应用阶段只写 DB、从不回写内存 segs，串行版同样如此），并行不改判定语义；
+	// 完成顺序无关，结果按下标对齐，最终状态确定。关思考后单次 ~1.4s，串行 47 段
+	// 仍要 ~29s（实测 3m40s 那条 session），并发把墙钟压到 ~1/并发数。
+	if len(work) > 0 {
+		concurrency := d.CorrectConcurrency
+		if concurrency <= 0 {
+			concurrency = defaultCorrectConcurrency
 		}
-		edits := correctSegment(ctx, d, j, sessionID, sg, cands, segs, i, window, st.ConfidenceThreshold)
-		llmCalls++
-		if len(edits) == 0 {
-			continue
+		concurrency = min(concurrency, len(work))
+		results := make([][]correctionEdit, len(work))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, concurrency)
+		for wi := range work {
+			wg.Add(1)
+			go func(wi int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				w := work[wi]
+				results[wi] = correctSegment(ctx, d, j, sessionID, w.seg, w.cands, segs, w.idx, window, st.ConfidenceThreshold)
+			}(wi)
 		}
-		// 门控通过的 edits 逐个应用到段文本副本（首次出现处替换，最小改动）。
-		text := sg.Text
-		var applied []appliedEdit
-		for _, e := range edits {
-			if !strings.Contains(text, e.Orig) {
-				continue // 前一个替换改变了文本后可能不再包含（位置竞争），跳过
+		wg.Wait()
+
+		// 串行应用（门控后的替换 + 落库）：与旧实现逐字一致，写库顺序确定。
+		for wi := range work {
+			sg := work[wi].seg
+			edits := results[wi]
+			if len(edits) == 0 {
+				continue
 			}
-			text = strings.Replace(text, e.Orig, e.Corrected, 1)
-			applied = append(applied, appliedEdit{
-				Orig: e.Orig, Corrected: e.Corrected,
-				Canonical: e.Corrected, Confidence: e.Confidence, Reason: e.Reason,
-			})
+			// 门控通过的 edits 逐个应用到段文本副本（首次出现处替换，最小改动）。
+			text := sg.Text
+			var applied []appliedEdit
+			for _, e := range edits {
+				if !strings.Contains(text, e.Orig) {
+					continue // 前一个替换改变了文本后可能不再包含（位置竞争），跳过
+				}
+				text = strings.Replace(text, e.Orig, e.Corrected, 1)
+				applied = append(applied, appliedEdit{
+					Orig: e.Orig, Corrected: e.Corrected,
+					Canonical: e.Corrected, Confidence: e.Confidence, Reason: e.Reason,
+				})
+			}
+			if len(applied) == 0 {
+				continue
+			}
+			raw, err := json.Marshal(applied)
+			if err != nil {
+				log.Printf("[correct] session=%s 序列化 edits 失败: %v", sessionID, err)
+				continue
+			}
+			if err := d.Transcripts.ApplyEntityCorrections(ctx, tr.ID, sg.ID, text, raw); err != nil {
+				return fmt.Errorf("落库纠错段 %d: %w", sg.SequenceNo, err) // DB 写失败：真基础设施问题，交 pool 重试
+			}
+			changed = true
 		}
-		if len(applied) == 0 {
-			continue
-		}
-		raw, err := json.Marshal(applied)
-		if err != nil {
-			log.Printf("[correct] session=%s 序列化 edits 失败: %v", sessionID, err)
-			continue
-		}
-		if err := d.Transcripts.ApplyEntityCorrections(ctx, tr.ID, sg.ID, text, raw); err != nil {
-			return fmt.Errorf("落库纠错段 %d: %w", sg.SequenceNo, err) // DB 写失败：真基础设施问题，交 pool 重试
-		}
-		changed = true
 	}
 	if changed {
 		if err := d.Transcripts.RecomputeFullText(ctx, tr.ID); err != nil {

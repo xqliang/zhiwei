@@ -36,7 +36,7 @@ import (
 // promptPath 是抽取 prompt 的版本化文件路径；版本号 = 去掉扩展名的文件名
 // （如 extraction_v1），运行时从文件名推导并写进 job.trace。
 // v4（2026-08-31）：说话人归属（「思敏 提到…」取代泛称「用户」）+ 当前用户标注
-//（可能旁听/不在场）+ 事件旁听标注——配合 memory.person_id 归属（迁移 000028）。
+// （可能旁听/不在场）+ 事件旁听标注——配合 memory.person_id 归属（迁移 000028）。
 const promptPath = "prompts/extraction_v4.md"
 
 // nameInferPromptPath 说话人名字推断 prompt（speakername stage 用，版本号见文件名）。
@@ -263,14 +263,14 @@ func main() {
 		Voiceprint:    voiceprintCli, Speakers: speakers, VoiceprintThreshold: cfg.VoiceprintThreshold,
 		VoiceprintCorrectMargin: cfg.VoiceprintCorrectMargin,
 		// 碎片在场优先（2026-08-31）：碎片组判定阈值 + 在场归并最低相似度
-		VoiceprintFragmentMS:    cfg.VoiceprintFragmentMS,
-		VoiceprintInSessionMin:  cfg.VoiceprintInSessionMin,
-		SpeakerEmbeddings:       speakerEmbeddings,
-		NameInferPrompt:         string(nameInferBytes),
-		SpeakerNameCandidates:   nameCandidates,
-		NameInferWindowMin:      cfg.NameInferWindowMin,
-		NameInferMaxSegments:    cfg.NameInferMaxSegments,
-		Profile:                 profileSvc,
+		VoiceprintFragmentMS:   cfg.VoiceprintFragmentMS,
+		VoiceprintInSessionMin: cfg.VoiceprintInSessionMin,
+		SpeakerEmbeddings:      speakerEmbeddings,
+		NameInferPrompt:        string(nameInferBytes),
+		SpeakerNameCandidates:  nameCandidates,
+		NameInferWindowMin:     cfg.NameInferWindowMin,
+		NameInferMaxSegments:   cfg.NameInferMaxSegments,
+		Profile:                profileSvc,
 		// ---- correct stage（ASR 实体纠错）----
 		EntityKB:             entityKB,
 		EntitySettings:       entitySettings,
@@ -283,6 +283,7 @@ func main() {
 		CorrectTopK:          cfg.EntityCorrectTopK,
 		CorrectMinSim:        cfg.EntityCorrectMinSim,
 		CorrectMaxLLMCalls:   cfg.EntityCorrectMaxLLM,
+		CorrectConcurrency:   cfg.EntityCorrectConc,
 		// ---- audioscene stage（P1 音频场景与情绪）----
 		SpeakerStates:        &repo.SpeakerSessionStateRepo{DB: db},
 		AudioInsight:         audioInsight,
