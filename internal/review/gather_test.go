@@ -214,7 +214,14 @@ func TestGatherWeeklyWindowsPastWeek(t *testing.T) {
 	for _, tl := range in.MemoriesByTopic {
 		lines = append(lines, tl.Lines...)
 	}
-	if !containsStr(lines, inTitle) {
+	// 记忆行现含内容摘录（memLine：标题+内容），按前缀匹配标题即可。
+	found := false
+	for _, l := range lines {
+		if l == inTitle || strings.HasPrefix(l, inTitle+"：") {
+			found = true
+		}
+	}
+	if !found {
 		t.Errorf("窗口内记忆应被汇聚，实际 = %v", lines)
 	}
 	for _, l := range lines {

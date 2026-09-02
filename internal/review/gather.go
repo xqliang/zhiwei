@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"zhiwei/internal/ids"
@@ -101,7 +102,7 @@ func (g *Generator) gatherDaily(ctx context.Context, date time.Time) (DailyInput
 			if _, ok := byTopic[tn]; !ok {
 				order = append(order, tn)
 			}
-			byTopic[tn] = append(byTopic[tn], m.Title)
+			byTopic[tn] = append(byTopic[tn], memLine(m))
 		}
 	}
 	for _, tn := range order {
@@ -248,7 +249,7 @@ func (g *Generator) gatherWeekly(ctx context.Context, weekStart time.Time) (Week
 				if _, ok := byTopic[tn]; !ok {
 					order = append(order, tn)
 				}
-				byTopic[tn] = append(byTopic[tn], m.Title)
+				byTopic[tn] = append(byTopic[tn], memLine(m))
 			}
 		}
 	}
@@ -388,4 +389,18 @@ func (g *Generator) TopicStatus(ctx context.Context, topicID ids.ID) (*repo.Topi
 		return nil, fmt.Errorf("落库话题状态: %w", err)
 	}
 	return g.TopicStatuses.GetLatest(ctx, topicID)
+}
+
+// memLine 汇入 prompt 的记忆行：标题 + 内容摘录（超 120 字截断）。
+// 洞察深度（细致入微/一针见血）靠细节原料——只喂标题时模型无米下锅、只能罗列；
+// 内容截断防大 prompt（一天几十条记忆也不会撑爆上下文）。
+func memLine(m repo.MemoryRow) string {
+	c := strings.TrimSpace(m.Content)
+	if c == "" {
+		return m.Title
+	}
+	if r := []rune(c); len(r) > 120 {
+		c = string(r[:120]) + "…"
+	}
+	return m.Title + "：" + c
 }

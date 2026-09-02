@@ -27,6 +27,55 @@ type ComicImage struct {
 	ImageURL string `json:"image_url"` // TOS 长期 URL
 }
 
+// LooseStrings 是「模型本应输出纯字符串数组、偶尔输出对象数组」的容错类型
+// （实测 2026-08-31 22:00 周报定时任务因 patterns 写成 [{"text":...}] 整份报废）。
+// 解析规则：字符串原样收；对象按常见文本键（text/insight/desc/detail/pattern/content/
+// note）抽第一个非空值；未知键则兜底取对象内第一个非空字符串。序列化输出恒为纯字符串
+// 数组（前端契约不变）。
+type LooseStrings []string
+
+// UnmarshalJSON 容错解析：数组内逐元素处理（字符串直收 / 对象抽文本键 / 其他类型
+// 压缩 JSON 字符串），单元素失败不拖垮整份报告。
+func (l *LooseStrings) UnmarshalJSON(b []byte) error {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err // 顶层就不是数组（如纯字符串）时保持原错误语义
+	}
+	out := make([]string, 0, len(raw))
+	for _, el := range raw {
+		var s string
+		if err := json.Unmarshal(el, &s); err == nil {
+			out = append(out, s)
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(el, &obj); err == nil {
+			found := false
+			for _, key := range []string{"text", "insight", "desc", "detail", "pattern", "content", "note"} {
+				if v, ok := obj[key]; ok {
+					if str, ok := v.(string); ok && str != "" {
+						out = append(out, str)
+						found = true
+						break
+					}
+				}
+			}
+			if !found { // 未知键：兜底取对象里第一个非空字符串值
+				for _, v := range obj {
+					if str, ok := v.(string); ok && str != "" {
+						out = append(out, str)
+						break
+					}
+				}
+			}
+			continue
+		}
+		out = append(out, string(el)) // 数字/布尔等其他标量：原样文本兜底
+	}
+	*l = out
+	return nil
+}
+
 // DailyContent 是日报的结构化输出（落 daily_review.content）。
 // 字段对齐 spec §11.1：headline / highlights / decisions / todos{new,done,open}
 // / insights / tomorrow / topic_distribution。
@@ -35,14 +84,14 @@ type DailyContent struct {
 	Highlights        []string     `json:"highlights"`         // 当天要点（3~7 条）
 	Decisions         []string     `json:"decisions"`          // 当天做出的决定
 	Todos             DailyTodos   `json:"todos"`              // 待办三分组
-	Insights          []string     `json:"insights"`           // 归纳/洞察
+	Insights          LooseStrings `json:"insights"`           // 归纳/洞察（LooseStrings 容错：模型偶发对象数组）
 	Tomorrow          []string     `json:"tomorrow"`           // 明日计划（只引当天 confirmed 未完成 todo，见 §11.1 约束）
 	TopicDistribution []TopicCount `json:"topic_distribution"` // 当天记忆的话题分布（图表就绪）
 	// ---- P3 深度增强（spec §3）----
-	Narrative   string       `json:"narrative"`    // 叙事总结：一段话概括当天状态/情绪/场景走向（有温度，不罗列）
-	MoodJourney []MoodPoint  `json:"mood_journey"` // 当天情绪走向（情绪点序列）
-	Patterns    []string     `json:"patterns"`     // 跨记忆/时段发现的细微规律/微情绪/状态推断
-	Scenes      []SceneCount `json:"scenes"`       // 当天声学场景分布（图表就绪）
+	Narrative   string       `json:"narrative"`       // 叙事总结：一段话概括当天状态/情绪/场景走向（有温度，不罗列）
+	MoodJourney []MoodPoint  `json:"mood_journey"`    // 当天情绪走向（情绪点序列）
+	Patterns    LooseStrings `json:"patterns"`        // 跨记忆/时段发现的细微规律/微情绪/状态推断（容错解析）
+	Scenes      []SceneCount `json:"scenes"`          // 当天声学场景分布（图表就绪）
 	Comic       *ComicImage  `json:"comic,omitempty"` // 报告漫画（P4；未生成时省略，守 no-null 契约）
 }
 
@@ -70,9 +119,9 @@ type WeeklyContent struct {
 	Risks    []string      `json:"risks"`     // 全局风险
 	NextWeek []string      `json:"next_week"` // 下周计划
 	// ---- P3 深度增强（spec §3）----
-	Narrative string       `json:"narrative"` // 本周叙事总结
-	Patterns  []string     `json:"patterns"`  // 本周规律
-	Scenes    []SceneCount `json:"scenes"`    // 本周场景分布
+	Narrative string       `json:"narrative"`       // 本周叙事总结
+	Patterns  LooseStrings `json:"patterns"`        // 本周规律（LooseStrings 容错：模型偶发对象数组）
+	Scenes    []SceneCount `json:"scenes"`          // 本周场景分布
 	Comic     *ComicImage  `json:"comic,omitempty"` // 报告漫画（P4；未生成时省略，守 no-null 契约）
 }
 
