@@ -742,7 +742,9 @@ func (h *SpeakerHandler) ReassignSpeakerAll(w http.ResponseWriter, r *http.Reque
 // EnrollFromSegment timeline「用此段录音纹」：用某转写段对应时间段的音频录入新说话人，
 // 并把该段所属说话人在本会话的全部段一并改判到新说话人。
 // 切 transcoded/{sid}.wav 的 [start_ms,end_ms] → sidecar /embed → 登记(enrolled) + /add → 批量改判。
-// 时长 < EnrollMinDurationMS 拒绝（声纹需足够时长才稳，WeSpeaker LM 对 >3s 更准）。
+// 时长 < EnrollMinDurationMS 拒绝（声纹需足够时长才稳，WeSpeaker LM 对 >3s 更准）；
+// 段与其他 ASR 标签段有显著时间交集（混入他人语音）时剪除交集、用剩余最长块提向，
+// 剩余不足最小时长拒绝（口径与自动登记一致，见 internal/voiceprint/segtrim.go）。
 // 改判口径「按当前显示的说话人」：该段已识别出说话人(speaker_id 非空)→ 改判本 transcript 内同一
 // speaker 的所有段；尚未识别(为空)→ 退回按 ASR 说话人标签分组，回填本 transcript 内同标签的未解析段。
 func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Request) {
@@ -782,7 +784,28 @@ func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Reques
 	if min == 0 {
 		min = 3000 // 兜底，与 config 默认一致
 	}
-	if dur := seg.EndMS - seg.StartMS; dur < min {
+	// 交集排查+修剪（与自动登记同口径，见 internal/voiceprint/segtrim.go）：本段与其他
+	// ASR 标签段有显著时间交集 = 混入他人语音，整段提向会把污染向量录进库里。剪掉
+	// 显著交集的并集、用剩余最长块提向；剩余不足最小时长则拒绝（提示用户换一段）。
+	// 亚秒级交集（diarization 噪声）在容差内不剪，照常用整段。
+	allSegs, err := h.Transcripts.ListSegments(r.Context(), tr.ID)
+	if err != nil {
+		http.Error(w, "读转写段失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	chunk := voiceprint.LongestTrimmedChunk(*seg, allSegs, seg.SpeakerLabel)
+	embedStart, embedEnd := seg.StartMS, seg.EndMS
+	trimmedMS := int64(0)
+	if chunk != [2]int64{seg.StartMS, seg.EndMS} {
+		if chunk[1]-chunk[0] < min {
+			http.Error(w, fmt.Sprintf("该段混有他人语音（时间重叠），剪除重叠后仅剩 %.1fs，录入声纹至少需 %.0fs，请换一段",
+				float64(chunk[1]-chunk[0])/1000, float64(min)/1000), http.StatusBadRequest)
+			return
+		}
+		embedStart, embedEnd = chunk[0], chunk[1]
+		trimmedMS = (seg.EndMS - seg.StartMS) - (chunk[1] - chunk[0])
+	}
+	if dur := embedEnd - embedStart; dur < min {
 		http.Error(w, fmt.Sprintf("时长 %.1fs 不足，录入声纹至少需 %.0fs", float64(dur)/1000, float64(min)/1000),
 			http.StatusBadRequest)
 		return
@@ -799,7 +822,7 @@ func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Reques
 	}
 	slice := filepath.Join(tmpDir, segID.String()+"-seg.wav")
 	defer os.Remove(slice)
-	if err := sliceWavForEnroll(wavPath, slice, seg.StartMS, seg.EndMS); err != nil {
+	if err := sliceWavForEnroll(wavPath, slice, embedStart, embedEnd); err != nil {
 		http.Error(w, "切片失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -826,6 +849,9 @@ func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Reques
 	// 首条样本落库（备注标注来源段，便于在声纹页辨认这条是怎么来的；失败仅 log 非致命，同 Enroll）
 	if h.SpeakerEmbeddings != nil {
 		note := "来自转写段：" + fmt.Sprintf("%.1fs", float64(seg.EndMS-seg.StartMS)/1000)
+		if trimmedMS > 0 {
+			note += fmt.Sprintf("（剪除与他人重叠 %.1fs 后 %.1fs）", float64(trimmedMS)/1000, float64(embedEnd-embedStart)/1000)
+		}
 		e := &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: float32BlobAPI(vec), SampleCount: 1, Source: "manual", Note: &note}
 		if err := h.SpeakerEmbeddings.Create(r.Context(), e); err != nil {
 			log.Printf("[speaker] 段录入后样本行落库失败 speaker=%s: %v", sp.ID, err)

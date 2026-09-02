@@ -701,6 +701,95 @@ func TestEnrollFromSegmentReassignsByLabelWhenUnresolved(t *testing.T) {
 	t.Cleanup(func() { _ = speakers.Delete(context.Background(), np.ID) })
 }
 
+// recVoiceprintAPI 在 fakeVoiceprintAPI 基础上记录 Embed 收到的切片文件大小——
+// 断言 EnrollFromSegment 用**修剪后**的音频区间切片（16kHz s16 mono = 32B/ms，
+// 文件大小 ≈ 区间时长×32 + 44B 头）。
+type recVoiceprintAPI struct {
+	fakeVoiceprintAPI
+	embedSizes []int64
+}
+
+func (f *recVoiceprintAPI) Embed(ctx context.Context, path string) ([]float32, error) {
+	if fi, err := os.Stat(path); err == nil {
+		f.embedSizes = append(f.embedSizes, fi.Size())
+	}
+	return f.fakeVoiceprintAPI.Embed(ctx, path)
+}
+
+var _ voiceprint.Client = (*recVoiceprintAPI)(nil)
+
+// setupEnrollRecAPI 搭带切片记录 fake 的 speaker 路由（setupSpeakerAPI 固定用无状态
+// fake，无法断言切片区间）。
+func setupEnrollRecAPI(t *testing.T) (http.Handler, *repo.SpeakerRepo, *repo.TranscriptRepo, string, *recVoiceprintAPI) {
+	t.Helper()
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ids.InitForTest(); err != nil {
+		t.Fatal(err)
+	}
+	speakers := &repo.SpeakerRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	dir := t.TempDir()
+	rec := &recVoiceprintAPI{}
+	r := chi.NewRouter()
+	RegisterSpeaker(r, &SpeakerHandler{Speakers: speakers, Transcripts: transcripts, Voiceprint: rec, DataDir: dir})
+	return r, speakers, transcripts, dir, rec
+}
+
+// TestEnrollFromSegmentTrimsOverlap：选中段与其他 ASR 标签段有显著时间交集（混入他人
+// 语音）时，录入应剪掉交集、用剩余最长块提向——而非把污染的整段向量录进库。
+// 10s 段中部嵌 2s 插话（> 容差 1s）→ 修剪块 [0,4000) 4s ≥3s → 切片大小 ≈ 128KB。
+func TestEnrollFromSegmentTrimsOverlap(t *testing.T) {
+	requireFFmpegAPI(t)
+	r, speakers, transcripts, dir, rec := setupEnrollRecAPI(t)
+
+	sid, _, segs := seedEnrollSession(t, transcripts, dir, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "主力段", StartMS: 0, EndMS: 10000},
+		{SequenceNo: 2, SpeakerLabel: "2", Text: "插话", StartMS: 4000, EndMS: 6000},
+	})
+	if resp := enrollFromSegment(t, r, sid, segs[0].ID, "王重阳"); resp.Code != 200 {
+		t.Fatalf("enroll code %d body %s", resp.Code, resp.Body.String())
+	}
+	if len(rec.embedSizes) != 1 {
+		t.Fatalf("应只提向一次，实际 %d", len(rec.embedSizes))
+	}
+	// 修剪块 [0,4000)：4000ms×32B/ms+44B ≈ 128044（±100ms 容差 3200B）；若误用整段
+	// [0,10000) 则 ≈ 320044，一眼可辨
+	if sz := rec.embedSizes[0]; sz < 124844 || sz > 131244 {
+		t.Fatalf("切片大小 %d 不符合修剪块 [0,4000)（约 128044±3200），疑似用了整段区间", sz)
+	}
+	// 收尾防跨包物化污染（对齐既有用例）
+	got, _ := transcripts.ListSegments(context.Background(), segs[0].TranscriptID)
+	if len(got) > 0 && got[0].SpeakerID != nil {
+		t.Cleanup(func() { _ = speakers.Delete(context.Background(), *got[0].SpeakerID) })
+	}
+}
+
+// TestEnrollFromSegmentRejectsWhenTrimmedTooShort：剪除显著交集后剩余不足最小时长
+// （本例 4s 段剪掉 1.5s 只剩 2s <3s）→ 400 拒绝并明确提示，不落库不提向。
+func TestEnrollFromSegmentRejectsWhenTrimmedTooShort(t *testing.T) {
+	requireFFmpegAPI(t)
+	r, _, transcripts, dir, rec := setupEnrollRecAPI(t)
+
+	// seq1 4s；[2000,3500) 与 seq2 相交 1.5s ≥ 容差 min(1s, 4s×15%)=600ms → 显著
+	sid, _, segs := seedEnrollSession(t, transcripts, dir, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "主力段", StartMS: 0, EndMS: 4000},
+		{SequenceNo: 2, SpeakerLabel: "2", Text: "插话", StartMS: 2000, EndMS: 3500},
+	})
+	resp := enrollFromSegment(t, r, sid, segs[0].ID, "林朝英")
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("剪除后不足应 400，实际 %d body %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "剪除重叠") {
+		t.Fatalf("错误信息应说明剪除重叠后不足，实际 %s", resp.Body.String())
+	}
+	if len(rec.embedSizes) != 0 {
+		t.Fatalf("拒绝场景不应提向，实际 %d 次", len(rec.embedSizes))
+	}
+}
+
 // TestSpeakerReassignAll timeline 说话人 chip「切换声纹」：识别错时把本会话内
 // 源说话人的全部段一键改判给目标声纹。验证：改判段数、段归属、transcript 作用域
 // （另一会话同源说话人的段不受波及）、目标声纹不存在 404、缺参 400。

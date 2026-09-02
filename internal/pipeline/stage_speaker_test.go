@@ -596,6 +596,57 @@ func TestStageSpeakerCleanSegToleratesNestedFragment(t *testing.T) {
 	}
 }
 
+// TestStageSpeakerCleanSegTrimsSignificantOverlap 干净段二级优先「修剪」：长主力段
+// 中部嵌着**超过容差**的真实插话（本例 10s 段中 2s 他人语音 > 容差 1s）时，整段向量
+// 被稀释（mixed 与真身余弦 0.707，低于弱命中 0.72）、组内又无其他干净段——旧逻辑退回
+// 污染聚合 → 未命中 → 误登记新声纹；修复后剪掉显著交集、用剩余 4s 纯净块重新提向，
+// 强命中既有真身、零登记。这是容差（TestStageSpeakerCleanSegToleratesNestedFragment
+// 覆盖的亚秒嵌套碎片）之外的第二类混音场景。
+func TestStageSpeakerCleanSegTrimsSignificantOverlap(t *testing.T) {
+	ctx := context.Background()
+	// seq1(label"1") 10s 主力段，[4000,6000) 与 seq2(label"2") 2s 插话显著相交（≥容差 1s）
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "长主力段", StartMS: 0, EndMS: 10000},
+		{SequenceNo: 2, SpeakerLabel: "2", Text: "插话", StartMS: 4000, EndMS: 6000},
+	})
+	// 整段切片混两人 → mixed=(e0+e2)/√2（与真身 e0 余弦 0.707，三命中规则全败）；
+	// 修剪块 [0,4000) 纯净 → e0
+	e0, e2 := make([]float32, 256), make([]float32, 256)
+	e0[0], e2[2] = 1, 1
+	mixed := make([]float32, 256)
+	mixed[0], mixed[2] = float32(math.Sqrt2/2), float32(math.Sqrt2/2)
+	zs := &repo.Speaker{Name: "真身", Source: "auto", Embedding: float32Blob(e0)}
+	if err := speakers.Create(ctx, zs); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), zs.ID) })
+	fv := &libVoiceprint{
+		vecBySeq:  map[int][]float32{1: mixed, 2: e2},
+		vecByTrim: map[int][]float32{1: e0},
+		entries:   []libEntry{{id: zs.ID, vec: e0}},
+	}
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 0 {
+		t.Fatalf("修剪后应强命中真身、零登记，实际登记 %d 个（污染聚合未命中误登记）", len(fv.added))
+	}
+	// 检索基准 = 修剪块向量 e0（下标0=1、下标2=0），而非混音整段（下标0/2≈0.707）
+	if len(fv.searchVecs) != 2 {
+		t.Fatalf("应检索 2 次（每组一次），实际 %d", len(fv.searchVecs))
+	}
+	if sv := fv.searchVecs[0]; math.Abs(float64(sv[0])-1) > 1e-6 || sv[2] != 0 {
+		t.Fatalf("label1 组检索应用修剪块向量 e0（下标0=1,下标2=0），实际 %v/%v", sv[0], sv[2])
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SpeakerID == nil || *s.SpeakerID != zs.ID {
+			t.Fatalf("段 %d 应归属真身，实际 %+v", s.SequenceNo, s.SpeakerID)
+		}
+	}
+}
+
 // libEntry 有状态 fake 库里的一条声纹（说话人 id → 向量）。
 type libEntry struct {
 	id  ids.ID
@@ -610,22 +661,30 @@ type libEntry struct {
 // 向量按段 SequenceNo 指定（Embed 从切片路径 seg-{N}.wav 解析 N），模拟不同说话人的声纹。
 type libVoiceprint struct {
 	vecBySeq    map[int][]float32
-	entries     []libEntry // 已登记声纹（预置 = 历史库；Add 追加 = 本 run 新登记）
+	vecByTrim   map[int][]float32 // 修剪切片（trim-{N}.wav，pickCleanSegVec 二级优先）按 seq 配置的向量；区别于整段向量
+	entries     []libEntry        // 已登记声纹（预置 = 历史库；Add 追加 = 本 run 新登记）
 	added       []ids.ID
 	searchCalls int
 	searchVecs  [][]float32 // 每次 Search 收到的查询向量（断言检索基准是否用干净段）
 }
 
 func (f *libVoiceprint) Embed(_ context.Context, path string) ([]float32, error) {
-	base := filepath.Base(path) // seg-{N}.wav
-	numStr := strings.TrimSuffix(strings.TrimPrefix(base, "seg-"), ".wav")
+	base := filepath.Base(path) // seg-{N}.wav / trim-{N}.wav
+	m := f.vecBySeq
+	if s := strings.TrimPrefix(base, "trim-"); s != base {
+		m = f.vecByTrim
+		base = s
+	} else {
+		base = strings.TrimPrefix(base, "seg-")
+	}
+	numStr := strings.TrimSuffix(base, ".wav")
 	n, err := strconv.Atoi(numStr)
 	if err != nil {
 		return nil, err
 	}
-	v, ok := f.vecBySeq[n]
+	v, ok := m[n]
 	if !ok {
-		return nil, fmt.Errorf("libVoiceprint: 未为 seq %d 配置向量", n)
+		return nil, fmt.Errorf("libVoiceprint: 未为 %s 配置向量", filepath.Base(path))
 	}
 	return append([]float32(nil), v...), nil
 }

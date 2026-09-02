@@ -30,11 +30,12 @@ import (
 // 主要失败模式：碎片组要么误命中库里嗓音最像的他人、要么 gap 差一口气未命中而登记成新声纹
 // （库污染的自我强化源头）。2026-08-31「碎片在场优先」：同场内与本场更主要说话人声纹够像
 // （≥ InSessionMin 0.72，实测同人 0.76+、不同人 ≤0.67）的组并入该说话人，不再各标签各登记；
-// 跨 session 归并仍只认 1:N 检索。检索与登记向量都优先取「干净段」（见 pickCleanSegVec）：
-// 时长最长、与其他说话人段无**显著**时间交集（亚秒嵌套碎片有容差，见 overlapsOtherLabel）
-// 且 ≥3s 的单段——聚合向量会被 diarization 切错/混入
+// 跨 session 归并仍只认 1:N 检索。检索与登记向量都优先取「干净段」（见 pickCleanSegVec
+// 的三级优先）：时长最长、与其他说话人段无**显著**时间交集（亚秒嵌套碎片有容差，见
+// overlapsOtherLabel）且 ≥3s 的单段；无原生干净段时尝试**修剪**（剪掉显著交集后剩余
+// ≥3s 则重新切片提向）。聚合向量会被 diarization 切错/混入
 // 他人语音的段污染（2026-09-01 实测：碎段把对既有声纹的领先压缩到宽松命中门槛以下，
-// 整组被误登记成新声纹）；无干净段才退回全组聚合（2026-08-26 需求起登记如此、
+// 整组被误登记成新声纹）；修剪/聚合都不可用才退回全组聚合（2026-08-26 需求起登记如此、
 // 2026-09-01 起检索同基准）。
 func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *repo.Transcript) error {
 	segs, err := d.Transcripts.ListSegments(ctx, tr.ID)
@@ -105,7 +106,7 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		}
 		reps = append(reps, groupRep{
 			label: label, rep: aggregateEmbeddings(vecs), vecN: len(vecs),
-			clean:   pickCleanSegVec(svs, segs, label),
+			clean:   pickCleanSegVec(ctx, d, wavPath, sliceDir, svs, segs, label),
 			segVecs: svs,
 			durMS:   durMS,
 		})
@@ -283,23 +284,10 @@ const minCleanSegMS = 3000
 // （实测案例里 0s 段 top1 随机漂到第三名）。
 const voteSegMinMS = 1000
 
-// cleanOverlapTolMS / cleanOverlapTolFrac 干净段「混入他人语音」判定的交集时长容差：
-// 候选段与其他标签段的**实际交集时长** < min(1s, 候选段时长×15%) 时，视为 diarization
-// 噪声（亚秒嵌套碎片/标签边界渗出）而非真实混音证据，不因此否决该候选段。
-//
-// 背景（2026-09-02 实测 session 2095044361807990784）：9.7s 的杰辉主力段因内嵌 0.2s
-// 噪声碎片「吧？」被判定不干净，整组退回全组聚合——聚合又混进 0.9s 的另一人碎段，
-// 对杰辉相似度从 0.8466（强命中）掉到 0.7823、对第二名胡志涛的领先只剩 0.036 <
-// GapMin，三条命中规则全败，被误登记成新声纹「说话人gif3n」。更糟的是两个人向量的
-// 均值经归一化放大后成了「幽灵质心」——它比两个本体都更像第三方（0.867 > 0.846），
-// 另一人的组又被在场锚点归并吸进这个新声纹，最终一条三人录音只剩一个说话人。
-// 亚秒嵌套碎片本是 ASR 过度切分的典型噪声（后续会被过短并入规则吸收），用最不可信
-// 的标签去否决最可信的长段向量，是本 case 的根因。相对分量 15% 保护短候选段：
-// 3s 段内嵌 0.9s（30% 混音）仍会否决，只有长段才放宽到绝对 1s。
-const (
-	cleanOverlapTolMS   = int64(1000)
-	cleanOverlapTolFrac = 0.15
-)
+// cleanOverlapTolMS / cleanOverlapTolFrac 已上移 internal/voiceprint（OverlapTolMS /
+// OverlapTolFrac）：手动录入（api EnrollFromSegment）与自动登记共用同一容差口径，
+// 单一事实源见该包 segtrim.go 注释（含 2026-09-02 session 2095044361807990784
+// 「幽灵质心」完整根因）。
 
 // segmentVoteMatch 段级多数投票兜底：单向量基准（干净段/聚合）未命中时，让 ≥1s 的
 // 段各自对历史库取 top1 说话人计票。**保守门槛**（防在相近声纹间瞎猜）：
@@ -695,9 +683,9 @@ type groupRep struct {
 	label string
 	rep   []float32 // 组代表声纹（全部段向量均值）——无干净段时的检索/登记兜底基准
 	vecN  int       // 该组有效向量数（用于 sample_count）
-	// clean 登记与检索的首选向量：组内「时长最长、与其他说话人段无显著时间交集
-	// （亚秒嵌套碎片有容差，见 overlapsOtherLabel）且 ≥3s」的单段向量。
-	// nil=无干净段（检索/登记退回 rep）。聚合向量会被 diarization 切错/混入他人语音的段
+	// clean 登记与检索的首选向量：pickCleanSegVec 三级优先的结果——原生干净段
+	//（无显著交集的最长 ≥3s 段）或修剪段（剪掉显著交集后 ≥3s 的剩余块，重新提向）。
+	// nil=两者皆无（检索/登记退回 rep）。聚合向量会被 diarization 切错/混入他人语音的段
 	// 污染（2026-09-01 实测：碎段把对真身的领先压缩到宽松命中门槛以下，整组误登记成新声纹），
 	// 故 1:N 检索（步骤 2 首趟）与登记（步骤 2b）同基准、都优先干净段。
 	clean []float32
@@ -707,12 +695,21 @@ type groupRep struct {
 	durMS int64
 }
 
-// pickCleanSegVec 从组内段向量中挑「干净段」向量：时长 ≥3s 且与本 session **其他标签**的
-// 段无显著时间交集（时间交集=音频上混有他人语音，diarization 切错的典型痕迹；亚秒嵌套
-// 碎片有容差，见 overlapsOtherLabel），取其中时长最长的一段。无满足条件的段返回 nil
-//（调用方退回全组聚合）。
-// all 传本 session 全部段（含其他标签），用于交集判定。
-func pickCleanSegVec(svs []segVec, all []repo.TranscriptSegment, label string) []float32 {
+// pickCleanSegVec 从组内段向量中挑「干净段」向量（检索/登记/纠正样本共用的基准）。
+// 三级优先（多候选按时长取最长）：
+//  1. 原生干净段：≥3s 且与其他标签段无显著时间交集（亚秒嵌套碎片有容差，见
+//     overlapsOtherLabel）→ 直接用已提好的段向量，零额外开销；
+//  2. 修剪段：有显著交集、但剪掉与其他标签段的交集并集后最长剩余块仍 ≥3s →
+//     对该块重新切片+提向（sidecar 调用）。修的是容差覆盖不到的场景——长主力段
+//     中间嵌着超过容差的真实插话（如 30s 段中 5s 他人语音）：整段向量被稀释、
+//     又没有别的干净段可换时，与其退回混音聚合（幽灵质心源头），不如剪掉混音
+//     部分用剩余纯音频。切片/提向失败静默跳过（与段提向失败的降级一致，退回 3）；
+//  3. 无 → nil（调用方退回全组聚合）。
+//
+// 注意：只要存在原生干净段就用它（不再与更长的修剪候选比较）——原生段零成本且
+// 纯度有保证；修剪候选只在「组内没有任何原生干净段」时兜底。
+func pickCleanSegVec(ctx context.Context, d StageDeps, wavPath, sliceDir string, svs []segVec, all []repo.TranscriptSegment, label string) []float32 {
+	// 1) 原生干净段
 	var best []float32
 	var bestDur int64
 	for _, sv := range svs {
@@ -727,41 +724,47 @@ func pickCleanSegVec(svs []segVec, all []repo.TranscriptSegment, label string) [
 			best, bestDur = sv.vec, dur
 		}
 	}
+	if best != nil {
+		return best
+	}
+	// 2) 修剪段：剪掉显著交集后最长剩余块 ≥3s 者，重新切片+提向
+	for _, sv := range svs {
+		if sv.seg.EndMS-sv.seg.StartMS < minCleanSegMS {
+			continue
+		}
+		chunk := voiceprint.LongestTrimmedChunk(sv.seg, all, label)
+		chunkDur := chunk[1] - chunk[0]
+		if chunkDur < minCleanSegMS || chunkDur <= bestDur {
+			continue // 剩余太短，或不比已选修剪候选长（时长比较在切片前，省 sidecar 调用）
+		}
+		trimPath := filepath.Join(sliceDir, fmt.Sprintf("trim-%d.wav", sv.seg.SequenceNo))
+		if err := sliceAudio(wavPath, trimPath, chunk[0], chunk[1]); err != nil {
+			continue
+		}
+		v, err := d.Voiceprint.Embed(ctx, trimPath)
+		if err != nil || len(v) != 256 {
+			continue
+		}
+		best, bestDur = v, chunkDur
+	}
 	return best
 }
 
 // overlapsOtherLabel 判断段是否与「其他 speaker_label」的段在时间上**显著**相交
-// （半开区间 [start,end) 判交）。交集时长低于容差（见 cleanOverlapTolMS 注释——亚秒
-// 嵌套碎片是 diarization 噪声，不代表候选段音频真的混入了他人语音）的其他标签段被忽略。
+// （半开区间 [start,end) 判交）。交集时长低于容差（亚秒嵌套碎片是 diarization 噪声，
+// 不代表候选段音频真的混入了他人语音；容差与判定见 voiceprint.SignificantOverlap，
+// 手动录入共用同口径）的其他标签段被忽略。
 // 空 label 的段也算「其他」——单人录音通常全空标签，此时组内即全体段、天然无交集判定对象。
 func overlapsOtherLabel(seg repo.TranscriptSegment, all []repo.TranscriptSegment, label string) bool {
-	dur := seg.EndMS - seg.StartMS
 	for _, o := range all {
 		if o.SpeakerLabel == label {
 			continue
 		}
-		ov := overlapMS(seg, o)
-		if ov <= 0 {
-			continue
+		if _, _, sig := voiceprint.SignificantOverlap(seg, o); sig {
+			return true
 		}
-		// 容差 = min(绝对 1s, 候选段时长×15%)：低于它的交集不构成「混入他人语音」的
-		// 实质证据，忽略该其他标签段。
-		if ov < min(cleanOverlapTolMS, int64(float64(dur)*cleanOverlapTolFrac)) {
-			continue
-		}
-		return true
 	}
 	return false
-}
-
-// overlapMS 两段的实际时间交集时长（半开区间 [start,end)，无交集返回 0）。
-func overlapMS(a, b repo.TranscriptSegment) int64 {
-	lo := max(a.StartMS, b.StartMS)
-	hi := min(a.EndMS, b.EndMS)
-	if hi <= lo {
-		return 0
-	}
-	return hi - lo
 }
 
 // stageSpeaker 是 pool 用的 Handler 包装。
