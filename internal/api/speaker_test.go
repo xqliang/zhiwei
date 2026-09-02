@@ -100,6 +100,54 @@ func TestSpeakerRenameAndDelete(t *testing.T) {
 	}
 }
 
+// TestSpeakerDeleteCascadesSpeakerState 验证删除说话人级联清空在场情绪行 speaker_id（A/写侧）：
+// 删声纹后 speaker_session_state 里指向它的行 speaker_id 须置 NULL，与已有的「段 speaker_id
+// 置 NULL」同批——该列无 FK 级联，否则悬空致详情页回退 label、emotionprofile 丢该人测点。
+func TestSpeakerDeleteCascadesSpeakerState(t *testing.T) {
+	r, speakers, transcripts, _ := setupSpeakerAPI(t)
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: speakers.DB}
+	states := &repo.SpeakerSessionStateRepo{DB: speakers.DB}
+
+	sp := &repo.Speaker{Name: "说话人待删", Source: "auto"}
+	if err := speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{ID: sid, Source: "test", Filename: "t.wav", StoragePath: "t.wav", Status: "completed"}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	if err := states.InsertBatch(ctx, []repo.SpeakerSessionState{
+		{UserID: 1, TranscriptID: tr.ID, SessionID: sid, SpeakerLabel: "speaker_0", SpeakerID: &sp.ID, Emotion: "烦躁", Confidence: 0.8},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 删除说话人
+	req := httptest.NewRequest(http.MethodDelete, "/api/speakers/"+sp.ID.String(), nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != 204 {
+		t.Fatalf("delete code %d body %s", rec.Code, rec.Body.String())
+	}
+
+	// 关键断言：情绪行 speaker_id 被置空，不再悬空
+	after, err := states.ListBySession(ctx, 1, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("情绪行应 1 行, got %d", len(after))
+	}
+	if after[0].SpeakerID != nil {
+		t.Fatalf("情绪行 speaker_id 未置空: got %v", *after[0].SpeakerID)
+	}
+}
+
 func TestSpeakerEnroll(t *testing.T) {
 	requireFFmpegAPI(t)
 	r, speakers, _, _ := setupSpeakerAPI(t)

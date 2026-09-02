@@ -395,6 +395,101 @@ func TestGetSessionSpeakerStateName(t *testing.T) {
 	}
 }
 
+// TestGetSessionSpeakerStateSelfHealDangling 验证「在场情绪」读侧自愈（B）：情绪行 speaker_id
+// 悬空（指向已删/已合并、不在本 transcript 名册的说话人）时，按「该 label 当前发言时长最大的
+// 在场说话人」重新归属——如 speaker_0 被拆成 杰辉(9.7s)/金腾(0.9s) 后，药丸应显示主导者 杰辉，
+// 而非回退原始「说话人 speaker_0」。
+func TestGetSessionSpeakerStateSelfHealDangling(t *testing.T) {
+	_ = ids.InitForTest()
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+	speakerStates := &repo.SpeakerSessionStateRepo{DB: db}
+
+	jiehui := &repo.Speaker{Name: "杰辉", Source: "enrolled"}
+	jinteng := &repo.Speaker{Name: "金腾", Source: "enrolled"}
+	for _, s := range []*repo.Speaker{jiehui, jinteng} {
+		if err := speakers.Create(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = speakers.Delete(context.Background(), jiehui.ID)
+		_ = speakers.Delete(context.Background(), jinteng.ID)
+	})
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &repo.AudioSession{
+		ID: sid, Source: "web_upload", Filename: "emo.wav", StoragePath: "/tmp/emo.wav", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &repo.Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	// 同一 label speaker_0 拆到两人：段1(9.7s)→杰辉(主导)、段2(0.9s)→金腾
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "speaker_0", Text: "那自己去反馈", StartMS: 0, EndMS: 9700},
+		{TranscriptID: tr.ID, SequenceNo: 2, SpeakerLabel: "speaker_0", Text: "英文中间", StartMS: 9700, EndMS: 10600},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	if err := transcripts.SetSegmentSpeakerByID(ctx, tr.ID, segs[0].ID, jiehui.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.SetSegmentSpeakerByID(ctx, tr.ID, segs[1].ID, jinteng.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 情绪行：label speaker_0，speaker_id 悬空（指向从未登记的说话人）
+	dangling := ids.New()
+	if err := speakerStates.InsertBatch(ctx, []repo.SpeakerSessionState{
+		{UserID: 1, TranscriptID: tr.ID, SessionID: sid, SpeakerLabel: "speaker_0", SpeakerID: &dangling, Emotion: "烦躁", Confidence: 0.85},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newAuthedRouter()
+	RegisterQuery(r, &QueryHandler{
+		Sessions: sessions, Transcripts: transcripts, Speakers: speakers,
+		SpeakerStates: speakerStates,
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		SpeakerStates []struct {
+			SpeakerLabel string `json:"speaker_label"`
+			SpeakerName  string `json:"speaker_name"`
+			SpeakerID    string `json:"speaker_id"`
+			Emotion      string `json:"emotion"`
+		} `json:"speaker_states"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(detail.SpeakerStates) != 1 {
+		t.Fatalf("speaker_states 应 1 行, got %d: %+v", len(detail.SpeakerStates), detail.SpeakerStates)
+	}
+	// 关键断言：悬空 speaker_id 自愈到 label 主导者 杰辉，而非回退「说话人 speaker_0」
+	if detail.SpeakerStates[0].SpeakerName != "杰辉" {
+		t.Errorf("speaker_name=%q, want 杰辉（悬空 id 应按 label 主导说话人自愈）", detail.SpeakerStates[0].SpeakerName)
+	}
+	// 自愈后同步 view 的 speaker_id 为主导者 id（前端 chip 关联/着色对齐）
+	if detail.SpeakerStates[0].SpeakerID != jiehui.ID.String() {
+		t.Errorf("speaker_id=%q, want %s（自愈后同步为主导者 id）", detail.SpeakerStates[0].SpeakerID, jiehui.ID.String())
+	}
+}
+
 // TestGetSessionNameCandidates 验证详情接口 speakers[] 富化名字候选：
 // 随机名说话人带倒序候选（张总 0.82 在首、evidence 透传），真名说话人为空数组。
 // speakers[] 由 ListSpeakersForTranscript 按本 transcript 段归属聚合，天然作用域到本会话，

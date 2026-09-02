@@ -153,3 +153,58 @@ func TestSpeakerMergeInto(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeIntoCascadesSpeakerState 验证合并级联同步在场情绪行的 speaker_id（A/写侧）：
+// MergeInto 删除源说话人后，speaker_session_state 里指向源的行必须同事务改指目标，否则
+// 情绪行 speaker_id 悬空——详情页药丸回退原始 label、emotionprofile 汇总丢该人测点
+// （speaker_session_state.speaker_id 无 FK 级联，须代码显式改指）。
+func TestMergeIntoCascadesSpeakerState(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	speakers := &SpeakerRepo{DB: db}
+	sessions := &SessionRepo{DB: db}
+	transcripts := &TranscriptRepo{DB: db}
+	states := &SpeakerSessionStateRepo{DB: db}
+
+	sid := ids.New()
+	if err := sessions.Create(ctx, &AudioSession{ID: sid, Source: "test", Filename: "t.wav", StoragePath: "t.wav", Status: "processing"}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &Transcript{SessionID: sid, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	target := &Speaker{Name: "目标"}
+	src := &Speaker{Name: "源"}
+	for _, s := range []*Speaker{target, src} {
+		if err := speakers.Create(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 情绪行指向源说话人
+	if err := states.InsertBatch(ctx, []SpeakerSessionState{
+		{UserID: 1, TranscriptID: tr.ID, SessionID: sid, SpeakerLabel: "speaker_0", SpeakerID: &src.ID, Emotion: "烦躁", Confidence: 0.8},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 合并 源 → 目标（会删除源）
+	if _, err := speakers.MergeInto(ctx, target.ID, []ids.ID{src.ID}); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	// 关键断言：情绪行的 speaker_id 随合并改指目标，不再悬空
+	after, err := states.ListBySession(ctx, 1, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("情绪行应 1 行, got %d", len(after))
+	}
+	if after[0].SpeakerID == nil || *after[0].SpeakerID != target.ID {
+		t.Fatalf("情绪行 speaker_id 未改指目标: got %v want %v", after[0].SpeakerID, target.ID)
+	}
+}

@@ -376,6 +376,36 @@ type speakerStateView struct {
 	SpeakerName string `json:"speaker_name"`
 }
 
+// dominantSpeakerByLabel 本 transcript 内每个 ASR 标签「发言总时长最大」的已识别说话人 id。
+// 供「在场情绪」读侧自愈（B）：情绪行 speaker_id 悬空（指向已删/已合并、不在本 transcript
+// 名册的说话人）时，按该 label 当前主导说话人重新归属——与 repo.DedupStatesBySpeaker
+// 「主导标签代表整体情绪」同精神。只计入已解析（speaker_id 非空）的段；无已识别段的 label
+// 不入表。时长并列取 id 较小者（确定性，避免 map 迭代序抖动）。
+func dominantSpeakerByLabel(segs []repo.TranscriptSegment) map[string]ids.ID {
+	durs := map[string]map[ids.ID]int64{}
+	for _, sg := range segs {
+		if sg.SpeakerID == nil {
+			continue
+		}
+		if durs[sg.SpeakerLabel] == nil {
+			durs[sg.SpeakerLabel] = map[ids.ID]int64{}
+		}
+		durs[sg.SpeakerLabel][*sg.SpeakerID] += sg.EndMS - sg.StartMS
+	}
+	out := make(map[string]ids.ID, len(durs))
+	for label, m := range durs {
+		var bestID ids.ID
+		var bestDur int64 = -1
+		for id, d := range m {
+			if d > bestDur || (d == bestDur && id < bestID) {
+				bestDur, bestID = d, id
+			}
+		}
+		out[label] = bestID
+	}
+	return out
+}
+
 type segmentView struct {
 	ID           string `json:"id"`
 	Speaker      string `json:"speaker"`                 // 显示名：解析到用登记名，否则 "说话人 N"
@@ -533,12 +563,29 @@ func (h *QueryHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 			// speaker_id 已回填，但情绪行只存原始 label（speaker_0…），前端「在场情绪」须显示
 			// 正式名（如「Allen: 困惑」）才能对上下方说话人面板。speaker_id 为空回退「说话人 N」。
 			views := make([]speakerStateView, len(states))
+			// 「该 label 当前主导（发言时长最大）在场说话人」——供悬空 speaker_id 自愈（B）
+			labelDominant := dominantSpeakerByLabel(segs)
 			for i := range states {
 				views[i] = speakerStateView{SpeakerSessionState: states[i]}
 				name := speakerLabelName(states[i].SpeakerLabel) // 未解析：回退「说话人 <label>」
-				if states[i].SpeakerID != nil {
-					if n, ok := spMap[*states[i].SpeakerID]; ok {
-						name = n // 已解析到登记名
+				// 解析优先级：① 情绪行存的 speaker_id 若在本 transcript 名册 → 直接用；
+				// ② 否则（speaker_id 为空 / 悬空——指向已删或已合并、不在名册的说话人）按 label
+				//    当前主导说话人自愈：合并/删除/改判后 speaker_session_state 从不同步（该列无
+				//    FK 级联），存量与「一标签拆多人」遗留的悬空 id 靠读侧兜回正确的人。
+				resolved := states[i].SpeakerID
+				inRoster := false
+				if resolved != nil {
+					_, inRoster = spMap[*resolved]
+				}
+				if !inRoster {
+					if sid, ok := labelDominant[states[i].SpeakerLabel]; ok {
+						resolved = &sid
+					}
+				}
+				if resolved != nil {
+					if n, ok := spMap[*resolved]; ok {
+						name = n                      // 解析到登记名（名册直接命中或自愈命中）
+						views[i].SpeakerID = resolved // 自愈后同步 view id，前端 chip 关联/着色对齐
 					}
 				}
 				views[i].SpeakerName = name

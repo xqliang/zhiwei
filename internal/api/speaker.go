@@ -543,6 +543,10 @@ func (h *SpeakerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = h.Speakers.DB.ExecContext(r.Context(),
 		`UPDATE transcript_segment SET speaker_id = NULL WHERE speaker_id = ?`, id.Int64())
+	// 在场情绪行同步置空（speaker_session_state.speaker_id 无 FK 级联；否则悬空致详情页
+	// 药丸回退原始 label、emotionprofile 情绪汇总丢该人测点）。与上方段置空同批 best-effort。
+	_, _ = h.Speakers.DB.ExecContext(r.Context(),
+		`UPDATE speaker_session_state SET speaker_id = NULL WHERE speaker_id = ?`, id.Int64())
 	// 解绑关联到该声纹的人物（person 是独立实体、不随声纹删除，仅清 speaker_id 外键）——
 	// 否则人物详情仍显示「已关联声纹 / 换绑」，指向一个已不存在的声纹（用户反馈）。
 	// best-effort：Persons 未装配（旧装配/测试）则跳过。

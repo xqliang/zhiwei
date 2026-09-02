@@ -122,6 +122,13 @@ func (r *SpeakerRepo) MergeInto(ctx context.Context, targetID ids.ID, sourceIDs 
 		if n, err := res.RowsAffected(); err == nil {
 			merged += int(n)
 		}
+		// 在场情绪行同事务改指目标：speaker_session_state 按 speaker_id 归人（详情页药丸 +
+		// emotionprofile 情绪汇总），该列无 FK 级联，删源后不改指即成悬空 id。
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE speaker_session_state SET speaker_id = ? WHERE speaker_id = ?`,
+			targetID.Int64(), src.Int64()); err != nil {
+			return merged, err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM speaker WHERE id = ?`, src.Int64()); err != nil {
 			return merged, err
 		}
