@@ -375,7 +375,9 @@ const segReattributeMinSim = 0.6
 // 幽灵纠正：ASR 过度切分出的幽灵组常命中历史库某真人；若该组名下的段被同录音另一在场说话人
 // 匹配得更好（max 相似度口径，与详情页 topVoiceMatchesVec 同口径），判为幽灵、整组改判
 // 给那个人，段写 corrected_from。仅**历史命中组**（matched[i]）参与——新登记组的声纹是
-// 从自己段建出来的、天生在自己段上最高，不可能被判幽灵。
+// 从自己段建出来的、天生在自己段上最高，不可能被判幽灵。幽灵分支带**基准守门**（2026-09-02）：
+// 挑战者还须在该组 1:N 命中的检索基准向量上赢过历史人——整组改判的证据不能与该组归属
+// 所依据的证据自相矛盾（单段注入防误伤，见 correctPhantomHistoricalMatches 内注释）。
 //
 // 碎片在场改判：durMS < fragmentMS 的**命中**碎片组，其库内命中本身不可信（紧声纹 cohort 里
 // 碎片向量常命中嗓音最像的库内他人而非真身，如「铉晔组实为杰辉」case：vs 铉晔 0.7354、
@@ -406,6 +408,19 @@ func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.
 				self = s
 			}
 		}
+		// 基准向量（幽灵改判守门用）：该组 1:N 命中时的检索向量（clean 优先，否则 rep）。
+		// 整组改判的证据不能与该组归属所依据的证据自相矛盾——若挑战者连这个基准都
+		// 赢不了历史人，靠的只是组里某一段的孤证，就不该掀翻整组（2026-09-02 实测
+		// session 2095125465944559616：清亮插话组宽松命中清亮，组里混进一段 1.6s
+		// 围观同学的声音〔ASR 错标〕，单段 max 0.714 以 0.004 之差越过 self+margin
+		// 把整组改判给围观同学的新声纹；而组基准段上挑战者 0.258 落后 0.39）。真
+		// 幽灵不受影响——整组皆锚点声音，基准也是；被守门挡下的段级差异仍可由
+		// pass4 逐段改判兜底（mismatch，≥0.6 且领先 >GapMin 才动单段）。
+		basis := g.rep
+		if g.clean != nil {
+			basis = g.clean
+		}
+		basisSelf := segMaxScore(basis, samples[i])
 		isFragment := g.durMS < fragmentMS
 		// 找在场其他说话人里，在本组段上得分最高者（碎片候选的锚点额外要求 durMS 更大）
 		bestScore, bestJ := -1.0, -1
@@ -430,11 +445,15 @@ func correctPhantomHistoricalMatches(ctx context.Context, d StageDeps, tr *repo.
 		if bestJ >= 0 {
 			if isFragment {
 				// 碎片：锚点不比归属差（容差同 correctScoreEps，平局=无显著区别→在场优先）
-				// 且达到在场归并最低相似度，即改判。
+				// 且达到在场归并最低相似度，即改判。（碎片分支不加基准守门：碎片的
+				// 库内命中本就被视为不可信，基准无权威性可言。）
 				fire = bestScore >= inSessionMin && bestScore >= self-correctScoreEps
 			} else {
-				// 幽灵：须明显更好（> self + margin），规则不变。
-				fire = bestScore > self+margin+correctScoreEps
+				// 幽灵：须明显更好（> self + margin），且基准守门——挑战者在组基准向量上
+				// 也须赢过历史人（见上注释）。
+				basisOther := segMaxScore(basis, samples[bestJ])
+				fire = bestScore > self+margin+correctScoreEps &&
+					basisOther > basisSelf+correctScoreEps
 			}
 		}
 		if fire {

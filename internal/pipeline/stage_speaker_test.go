@@ -647,6 +647,89 @@ func TestStageSpeakerCleanSegTrimsSignificantOverlap(t *testing.T) {
 	}
 }
 
+// TestStageSpeakerPhantomFlipBasisGuard 复刻 2026-09-02 session 2095125465944559616 的
+// 幽灵改判误伤：清亮插话组（宽松命中清亮，基准段 vs 清亮 0.65）里混进一段 1.6s 围观
+// 同学的声音（ASR 错标），该段对同场新登记的围观声纹打 0.72——旧逻辑单段 max 以
+// 0.72 > 0.65+0.06 之差把**整组**改判给围观声纹；而组基准段上挑战者得分 0、落后 0.65。
+// 基准守门后：整组保持清亮，注入段由 pass4 逐段改判（mismatch）归围观声纹——段级
+// 精准、组级不掀翻。
+func TestStageSpeakerPhantomFlipBasisGuard(t *testing.T) {
+	ctx := context.Background()
+	// label"1" = 清亮插话组：seq1 8.4s 基准段（≈清亮 0.65）+ seq2 1.6s 注入段（≈围观 0.72）
+	// label"2" = 围观同学：seq3 3.2s（登记新声纹）。组1 总时长 10s = fragmentMS，走幽灵分支。
+	sid, tr, dataDir, transcripts, speakers := seedSpeakerStageSegs(t, []repo.TranscriptSegment{
+		{SequenceNo: 1, SpeakerLabel: "1", Text: "清亮的插话基准段", StartMS: 0, EndMS: 8400},
+		{SequenceNo: 2, SpeakerLabel: "1", Text: "围观同学混入", StartMS: 8500, EndMS: 10100},
+		{SequenceNo: 3, SpeakerLabel: "2", Text: "围观同学独占段", StartMS: 11000, EndMS: 14200},
+	})
+	// 向量：清亮=e0、围观=e1、他人=e3 方向的干扰项 vO（保证宽松命中的 top2>0）；
+	// vA(基准) 与清亮 0.65、围观 0、他人 0.195 → 宽松命中清亮（0.4~0.72 且 gap≥0.1）；
+	// vB(注入) 与围观 0.72、清亮 0 → 单段 max 恰好越过 self+margin。
+	e0, e1, e3 := make([]float32, 256), make([]float32, 256), make([]float32, 256)
+	e0[0], e1[1], e3[3] = 1, 1, 1
+	vO := make([]float32, 256)
+	vO[0], vO[3] = 0.30, 0.954 // normalize(0.30·e0+0.954·e3)
+	vA := make([]float32, 256)
+	vA[0], vA[2] = 0.65, 0.76 // normalize(0.65·e0+0.76·e2)
+	vB := make([]float32, 256)
+	vB[1], vB[2] = 0.72, 0.694 // normalize(0.72·e1+0.694·e2)
+	ql := &repo.Speaker{Name: "清亮", Source: "auto", Embedding: float32Blob(e0)}
+	if err := speakers.Create(ctx, ql); err != nil {
+		t.Fatal(err)
+	}
+	ot := &repo.Speaker{Name: "他人", Source: "auto", Embedding: float32Blob(vO)}
+	if err := speakers.Create(ctx, ot); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = speakers.Delete(context.Background(), ql.ID)
+		_ = speakers.Delete(context.Background(), ot.ID)
+	})
+	fv := &libVoiceprint{
+		vecBySeq: map[int][]float32{1: vA, 2: vB, 3: e1},
+		entries:  []libEntry{{id: ql.ID, vec: e0}, {id: ot.ID, vec: vO}},
+	}
+	t.Cleanup(func() {
+		for _, id := range fv.added {
+			_ = speakers.Delete(context.Background(), id)
+		}
+	})
+	d := StageDeps{Transcripts: transcripts, Speakers: speakers, Voiceprint: fv, DataDir: dataDir}
+	if err := runSpeakerStage(ctx, d, sid, tr); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(fv.added) != 1 {
+		t.Fatalf("应只登记围观同学的 1 个新声纹，实际 %d", len(fv.added))
+	}
+	anchor := fv.added[0]
+	bySeq := map[int]repo.TranscriptSegment{}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	for _, s := range segs {
+		if s.SpeakerID == nil {
+			t.Fatalf("段 %d 未回填 speaker_id", s.SequenceNo)
+		}
+		bySeq[s.SequenceNo] = s
+	}
+	// 基准守门：整组不掀翻——基准段保持清亮、无改判标记（旧逻辑此处被 phantom 改判）
+	if *bySeq[1].SpeakerID != ql.ID {
+		t.Fatalf("基准段（清亮插话）应保持清亮，实际 %v", *bySeq[1].SpeakerID)
+	}
+	if bySeq[1].CorrectedReason != nil {
+		t.Fatalf("基准段不应有改判标记，实际 %+v", bySeq[1].CorrectedReason)
+	}
+	// 注入段：pass4 逐段改判归围观声纹（mismatch）——段级精准
+	if *bySeq[2].SpeakerID != anchor {
+		t.Fatalf("注入段（围观同学声音）应经 pass4 改判归新声纹，实际 %v", *bySeq[2].SpeakerID)
+	}
+	if r := bySeq[2].CorrectedReason; r == nil || *r != "mismatch" {
+		t.Fatalf("注入段应 corrected_reason=mismatch，实际 %+v", bySeq[2].CorrectedReason)
+	}
+	// 围观独占段：登记归属
+	if *bySeq[3].SpeakerID != anchor {
+		t.Fatalf("围观独占段应归属新登记声纹，实际 %v", *bySeq[3].SpeakerID)
+	}
+}
+
 // libEntry 有状态 fake 库里的一条声纹（说话人 id → 向量）。
 type libEntry struct {
 	id  ids.ID
