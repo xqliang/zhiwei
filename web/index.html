@@ -700,7 +700,7 @@
                   </span>
                 </template>
                 <span v-if="sg.corrected_reason || sg.corrected_from" class="corrected-badge"
-                      :title="(sg.entity_edits||[]).length ? '实体纠错：专有名词已按实体库自动纠正（对照见下方删除线）' : (sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_reason === 'merge' ? '声纹与在场说话人相近，整组并入（未另建声纹，声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'))))">已修改</span>
+                      :title="(sg.entity_edits||[]).length ? '实体纠错：专有名词已按实体库自动纠正（对照见下方删除线）' : (sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_reason === 'merge' ? '声纹与在场说话人相近，整组并入（未另建声纹，声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）')))">已修改</span>
                 <!-- 实体纠错对照：原文(删除线) → 纠正后（corrected_reason='entity' 才有 entity_edits） -->
                 <template v-if="(sg.entity_edits||[]).length">
                   <span v-for="(ed, ei) in sg.entity_edits" :key="ei"
