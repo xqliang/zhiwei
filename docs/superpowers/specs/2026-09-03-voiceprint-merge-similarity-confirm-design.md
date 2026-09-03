@@ -49,7 +49,7 @@ POST /api/speakers/similarities        body  {"ids":["...","..."]}
   2. `h.Speakers.List(ctx)` 建 `id→name` 映射（**一次查询取全部 active 说话人**，不做逐 id N+1；注意它不过滤 user，与既有 `Merge`/`Delete` 同语义）。
   3. `h.SpeakerEmbeddings.ListBySpeakers(ctx, ids)` 取分组样本（nil repo → 400 降级，与现有「未装配条目功能降级」一致）。
   4. 逐个 id `decodeEmbedding` 解出样本向量组，两两喂 `voiceprint.MaxCosine`，组装 `pairs`。
-- **名字缺失不剔除**：id 不在 `List` 结果里（已被 dismiss/删除）时，该 id **仍参与矩阵**（`a_name` 留空、其全部相似度为 `null`）。这样「响应对数恒为 C(N_unique,2)」无条件成立，前端无需处理行数变化；「不存在」与「0 样本」渲染一致（都不可比），无需额外区分。
+- **名字缺失不剔除**：id 不在 `List` 结果里（已被 dismiss/删除）时，该 id **仍参与矩阵**（`a_name` 留空）。这样「响应对数恒为 C(N_unique,2)」无条件成立，前端无需处理行数变化。注意相似度按**样本有无**判定（有样本照算、无样本才 null），不因不在名册而置 null——已 dismiss 但留有样本的说话人，相似度照常算出，这比一刀切置 null 更有用。
 - **相似度纯函数**：新增 `internal/voiceprint/pair.go`。
 
 ```go
