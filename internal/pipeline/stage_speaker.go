@@ -228,7 +228,10 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 		if anchorID, anchorSim := bestInSessionAnchor(ctx, d, reps, resolvedID, i); anchorID != 0 && anchorSim >= inSessionMin {
 			log.Printf("[speaker] 未命中碎片并入在场说话人 label=%s speaker=%s sim=%.4f（不登记新声纹）", g.label, anchorID, anchorSim)
 			resolvedID[i] = anchorID
-			if err := d.Transcripts.SetSegmentSpeaker(ctx, tr.ID, g.label, anchorID); err != nil {
+			// 带 'merge' 标记落库（2026-09-03 留痕）：这是对 ASR「独立说话人」判断的推翻，
+			// 与 phantom/short 同属需向用户解释的改判——此前 SetSegmentSpeaker 静默并入，
+			// 原始 ASR 视图对比时「归属变了却无任何标注」。
+			if err := d.Transcripts.MergeAnchorGroup(ctx, tr.ID, g.label, anchorID); err != nil {
 				return fmt.Errorf("回填 speaker_id: %w", err)
 			}
 			continue

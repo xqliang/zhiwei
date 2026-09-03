@@ -281,6 +281,19 @@ func (r *TranscriptRepo) MergeShortGroup(ctx context.Context, transcriptID ids.I
 	return err
 }
 
+// MergeAnchorGroup 碎片在场并入（2026-09-03 留痕）：把本 transcript 内某 speaker_label
+// 下**尚未回填**（speaker_id IS NULL）的段整组并入在场锚点说话人 toID，标记
+// corrected_reason='merge'（无原判定说话人——ASR 把同一人切成独立标签，声纹判定
+// 并回；此前走 SetSegmentSpeaker 静默并入，用户视角「归属变了却无任何标注」）。
+// 与 MergeShortGroup 同构（short=过短噪声并入，merge=声纹相近并入），换 reason 值。
+func (r *TranscriptRepo) MergeAnchorGroup(ctx context.Context, transcriptID ids.ID, speakerLabel string, toID ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET speaker_id = ?, corrected_reason = 'merge', corrected_from_speaker_id = NULL
+		 WHERE transcript_id = ? AND speaker_label = ? AND speaker_id IS NULL`,
+		toID.Int64(), transcriptID.Int64(), speakerLabel)
+	return err
+}
+
 // DeleteTranscriptBySession 删除某 session 的整条 transcript 及其下游（转写段 + 该 transcript
 // 的在场情绪药丸行），供「重新转写」从 asr stage 重跑用。Transcripts.Create 是 insert-only
 // （非幂等）——asr stage 每次都 INSERT 一条新 transcript，直接重跑会留下**重复 transcript + 孤儿

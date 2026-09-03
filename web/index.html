@@ -689,7 +689,7 @@
                    可用段首下拉换人或说话人 chip 的 ⇄ 批量切换。存量会话无逐段向量则不显示；
                    「已修改」徽章贴在本行末尾（声纹自动纠正标记：幽灵历史声纹改判 或 过短噪声段并入），无相似度数据时单独成行。 -->
               <div v-if="(sg.voice_matches||[]).length || sg.corrected_reason || sg.corrected_from" class="muted" style="font-size:var(--fs-xs); margin-top:2px; display:flex; gap:5px; flex-wrap:wrap; align-items:center"
-                   :title="(sg.voice_matches||[]).length ? '该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错' : ((sg.entity_edits||[]).length ? '实体纠错：专有名词已按实体库自动纠正（对照见下方删除线）' : (sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）')))">
+                   :title="(sg.voice_matches||[]).length ? '该段音频与声纹库的相似度 top-3。若 top-1 不是本段归属的说话人，说明这句可能被切错/归错' : ((sg.entity_edits||[]).length ? '实体纠错：专有名词已按实体库自动纠正（对照见下方删除线）' : (sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_reason === 'merge' ? '声纹与在场说话人相近，整组并入（未另建声纹，声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'))))">
                 <template v-if="(sg.voice_matches||[]).length">
                   <span>时长 {{ (segDurMs(sg)/1000).toFixed(2) }} s ·</span>
                   <span>声纹 ≈</span>
@@ -700,7 +700,7 @@
                   </span>
                 </template>
                 <span v-if="sg.corrected_reason || sg.corrected_from" class="corrected-badge"
-                      :title="(sg.entity_edits||[]).length ? '实体纠错：专有名词已按实体库自动纠正（对照见下方删除线）' : (sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'))">已修改</span>
+                      :title="(sg.entity_edits||[]).length ? '实体纠错：专有名词已按实体库自动纠正（对照见下方删除线）' : (sg.corrected_reason === 'short' ? '过短段自动并入最近说话人（声纹自动纠正）' : (sg.corrected_reason === 'merge' ? '声纹与在场说话人相近，整组并入（未另建声纹，声纹自动纠正）' : (sg.corrected_from_name ? ('原判定：' + sg.corrected_from_name + '（声纹自动纠正）') : '声纹自动纠正（原说话人已不可用）'))))">已修改</span>
                 <!-- 实体纠错对照：原文(删除线) → 纠正后（corrected_reason='entity' 才有 entity_edits） -->
                 <template v-if="(sg.entity_edits||[]).length">
                   <span v-for="(ed, ei) in sg.entity_edits" :key="ei"

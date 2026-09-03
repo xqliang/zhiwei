@@ -1120,6 +1120,16 @@ func TestStageSpeakerUnmatchedFragmentMergesIntoAnchor(t *testing.T) {
 		if s.SpeakerID == nil || *s.SpeakerID != simin.ID {
 			t.Fatalf("段 %d 应并入思敏 %v，实际 %+v", s.SequenceNo, simin.ID, s.SpeakerID)
 		}
+		// 碎片组（label "2"）须带 'merge' 留痕：这是对 ASR 独立说话人判断的推翻，
+		// 用户在原始 ASR 视图对比时能看到「为何这段归给了别人」；主组（label "1"，
+		// 1:N 强命中思敏）是初始归属，不带标记。
+		if s.SpeakerLabel == "2" {
+			if r := s.CorrectedReason; r == nil || *r != "merge" {
+				t.Fatalf("碎片组段 %d 应 corrected_reason=merge（留痕），实际 %+v", s.SequenceNo, s.CorrectedReason)
+			}
+		} else if s.CorrectedReason != nil {
+			t.Fatalf("主组段 %d 是初始归属不应带标记，实际 %+v", s.SequenceNo, s.CorrectedReason)
+		}
 	}
 }
 
