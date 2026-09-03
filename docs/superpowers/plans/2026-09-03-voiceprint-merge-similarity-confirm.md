@@ -695,16 +695,18 @@ EOF
 `web/app.js` 中 `const spMergeTarget = ref(null);`（`:2320`）之后加两个 ref：
 
 ```javascript
-    const spMergeSim = ref(null);        // 相似度预检结果：{pairs:[{a_id,b_id,a_name,b_name,similarity}]}（similarity=null 不可比）
-    const spMergeSimLoaded = ref(false); // 本次勾选集合是否已拉到过相似度
+    const spMergeSim = ref(null);          // 相似度预检结果：{pairs:[{a_id,b_id,a_name,b_name,similarity}]}（similarity=null 不可比）；拉取失败保持 null
+    const spMergeSimChecked = ref(false);  // 本次勾选集合是否**已尝试过**预检（成功或失败都算 true）
 ```
+
+> ⚠ **`Checked` 而非 `Loaded`——这是故意的。** 预检失败时若用「Loaded」语义，`Checked` 永远停在 false，用户每次点「确认合并」都重试预检、**永远到不了真正合并那一步**，与 spec §4「预检失败放行、不得成为门禁」直接冲突。用「已尝试过」语义：失败也置 true，下次点击直接进合并。
 
 紧接其下的注释块（`:2321` 那个「选中说话人按创建时间升序」注释上方）补一条不变量说明：
 
 ```javascript
     // 不变量：相似度矩阵只依赖「勾选集合」，与谁是 target 无关——用户在表格展开后改目标下拉
     // 时矩阵不重算，仅重标哪行是「源→目标」方向。故 startSpConfirm/cancelSpMerge/toggleSpSelect
-    // 三处改集合时才重置 spMergeSim/spMergeSimLoaded；spMergeTarget 变化不重置。
+    // 三处改集合时才重置 spMergeSim/spMergeSimChecked；spMergeTarget 变化不重置。
 ```
 
 改 `startSpMerge` / `cancelSpMerge` / `toggleSpSelect` 三个函数，让它们在**改变勾选集合**时重置预检状态（`startSpMerge` 与 `cancelSpMerge` 已重置全部 ref，只需补两个；`toggleSpSelect` 增删勾选时也要重置）：
@@ -719,25 +721,24 @@ EOF
       resetSpMergeSim(); // 勾选集合变了 → 预检结果作废，下次确认时重拉
     }
     // 重置相似度预检（只在勾选集合变化时调；改 target 不调——矩阵与 target 无关）
-    function resetSpMergeSim() { spMergeSim.value = null; spMergeSimLoaded.value = false; }
+    function resetSpMergeSim() { spMergeSim.value = null; spMergeSimChecked.value = false; }
 ```
 
 在 `startSpConfirm` 之后、`applySpMerge` 之前插入预检函数：
 
 ```javascript
-    // 拉取勾选集合的两两相似度（合并前的预检）。失败不阻断——返回 false 让调用方放行，
+    // 拉取勾选集合的两两相似度（合并前的预检）。**失败不阻断**——返回 false 让调用方放行，
     // 由用户自行确认（预检是辅助不是门禁，网络抖动不得卡住正常纠错流程）。
+    // 注意：无论成功失败都置 spMergeSimChecked=true，否则失败时用户会永远卡在这一步。
     async function loadSpMergeSim() {
-      if (spMergeSimLoaded.value) return true;
+      if (spMergeSimChecked.value) return true;
       try {
-        const d = await api('POST', '/api/speakers/similarities', { ids: spMergeSelected.value });
-        spMergeSim.value = d;
-        spMergeSimLoaded.value = true;
-        return true;
+        spMergeSim.value = await api('POST', '/api/speakers/similarities', { ids: spMergeSelected.value });
       } catch (e) {
         notify('相似度预检失败，请自行确认后再合并', 3000);
-        return false;
       }
+      spMergeSimChecked.value = true;
+      return true;
     }
     // 分档徽标：复用库里既有阈值（0.8 强命中 / 0.72 弱命中下限），不引入新常量。
     function simTier(s) {
@@ -753,7 +754,7 @@ EOF
 `web/app.js:3440` 那行 return 里，`spMergeTarget` 之后插入新 ref 和 `simTier`：
 
 ```javascript
-      spMergeMode, spMergeSelected, spMergeSelectedSorted, spMergeConfirming, spMergeTarget, spMergeSim, spMergeSimLoaded, simTier, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
+      spMergeMode, spMergeSelected, spMergeSelectedSorted, spMergeConfirming, spMergeTarget, spMergeSim, spMergeSimChecked, simTier, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
 ```
 
 > **漏了这步模板会静默失效**——Vue 3 全局构建版只暴露 setup() 返回的键，`simTier`/`spMergeSim` 不进返回值，模板里就是 `undefined`，相似度表整块不渲染且无报错。
@@ -765,15 +766,16 @@ EOF
 ```javascript
     // 三态合并：①勾选→开始合并→选目标 → ②第一次点「确认合并」拉相似度并展开表格
     // → ③第二次点「⚠ 仍然合并」才真正发请求。
+    // 预检失败也放行到 ③（spMergeSimChecked 在失败时也已置 true），预检不得成为门禁。
     async function applySpMerge() {
       if (spMergeSelected.value.length < 2) { notify('至少选 2 个说话人'); return; }
       if (!spMergeTarget.value) { notify('请选择保留的目标说话人'); return; }
       const sources = spMergeSelected.value.filter(id => id !== spMergeTarget.value);
       if (!sources.length) { notify('目标之外还需至少 1 个源'); return; }
-      // 阶段②：还没看过相似度 → 先拉预检并展开表格，本次不真合并
-      if (!spMergeSimLoaded.value) {
+      // 阶段②：还没尝试过预检 → 拉一次并展开表格（成功）或 toast 后放行（失败），本次都不真合并
+      if (!spMergeSimChecked.value) {
         await loadSpMergeSim();
-        return; // 无论预检成功与否都停在这里：成功则展开表格待二次确认，失败则 toast 后放行重试
+        return;
       }
       try {
         await api('POST', '/api/speakers/merge', { source_ids: sources, target_id: spMergeTarget.value });
@@ -791,7 +793,7 @@ EOF
 
 ```html
             <!-- 相似度预检表：第一次点「确认合并」后展开；改目标不重拉（矩阵只依赖勾选集合） -->
-            <div v-if="spMergeSimLoaded && spMergeSim && (spMergeSim.pairs||[]).length" style="margin-top:10px; border-top:1px solid var(--line); padding-top:8px">
+            <div v-if="spMergeSim && (spMergeSim.pairs||[]).length" style="margin-top:10px; border-top:1px solid var(--line); padding-top:8px">
               <div class="muted" style="font-size:var(--fs-xs); margin-bottom:6px">
                 两两相似度（{{ spMergeSim.pairs.length }} 对）：
                 <span :style="{color:'var(--danger)'}">标红表示两人相似度偏低，请确认是否同一人</span>
@@ -816,7 +818,7 @@ EOF
 
 ```html
             <button class="btn primary" style="padding:7px 14px" @click="applySpMerge">
-              {{ spMergeSimLoaded ? '⚠ 仍然合并' : '确认合并' }}
+              {{ spMergeSimChecked ? '⚠ 仍然合并' : '确认合并' }}
             </button>
 ```
 
@@ -836,7 +838,8 @@ Run: `make dev-restart`（或按项目惯用方式重启 dev server，端口 808
 4. 再点「⚠ 仍然合并」→ 才真正合并，toast「已合并 N 个说话人到目标」，列表刷新
 5. 取消/重新勾选 → 表格消失，下次确认重新拉取
 6. 勾选含 0 样本的说话人 → 该对显示「—」+「无法比较（无样本）」
-7. **接口失败放行**：用 devtools 把 `/api/speakers/similarities` 断网/强制 500 → toast「相似度预检失败，请自行确认后再合并」，按钮可继续点完成合并
+7. **接口失败必须放行**（关键回归项）：用 devtools 把 `/api/speakers/similarities` 断网/强制 500 → toast「相似度预检失败，请自行确认后再合并」→ **再点一次按钮必须能完成合并**。若第二次点击仍卡在预检、合并不了，就是 `spMergeSimChecked` 语义写回成 `Loaded` 了，见 Step 1 的警示。
+8. **低分标红但不拦截**：造一对相似度明显偏低的声纹（或临时改阈值观察），标红行 + 「⚠ 不像，请确认」徽标，但仍可继续合并
 
 - [ ] **Step 7: 提交**
 
