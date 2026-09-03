@@ -175,7 +175,7 @@ func MaxCosine(a, b [][]float32) float64 {
 - [ ] **Step 4: 跑测试确认通过 + benchmark**
 
 Run: `go test ./internal/voiceprint/ -v`
-Expected: PASS（含 `TestCallerPkgDBName` 等既有用例）
+Expected: PASS（本包既有用例 `TestMatched` / `TestLongestTrimmedChunk` / `TestSignificantOverlap` 等一并通过）
 
 Run: `go test ./internal/voiceprint/ -bench=BenchmarkMaxCosine -benchmem -run=^$`
 Expected: 打印 `BenchmarkMaxCosine-...  xxx ns/op`，记录该数值——spec §3 要求性能有数据，提交信息里带上。
