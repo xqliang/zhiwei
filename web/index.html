@@ -1657,9 +1657,32 @@
             <select class="mini" v-model="spMergeTarget">
               <option v-for="id in spMergeSelectedSorted" :key="id" :value="id">{{ (allSpeakers.find(s => s.id === id) || {}).name || id }}</option>
             </select>
-            <button class="btn primary" style="padding:7px 14px" @click="applySpMerge">确认合并</button>
+            <button class="btn primary" style="padding:7px 14px" @click="applySpMerge">
+              {{ spMergeSimChecked ? '⚠ 仍然合并' : '确认合并' }}
+            </button>
           </template>
           <button class="btn mini" @click="cancelSpMerge">取消</button>
+        </div>
+      </div>
+      <!-- 相似度预检表：第一次点「确认合并」后展开；改目标不重拉（矩阵只依赖勾选集合）。
+           注：放在 .kv（flex 横向行）之外、.card 之内，作为整行的全宽区块，避免挤进按钮行。 -->
+      <div v-if="spMergeSim && (spMergeSim.pairs||[]).length" style="margin-top:10px; border-top:1px solid var(--line); padding-top:8px">
+        <div class="muted" style="font-size:var(--fs-xs); margin-bottom:6px">
+          两两相似度（{{ spMergeSim.pairs.length }} 对）：
+          <span :style="{color:'var(--danger)'}">标红表示两人相似度偏低，请确认是否同一人</span>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:3px; max-height:180px; overflow:auto">
+          <div v-for="(p, pi) in spMergeSim.pairs" :key="pi"
+               style="display:flex; align-items:center; gap:8px; font-size:var(--fs-xs); flex-wrap:wrap">
+            <span :style="{color: p.similarity !== null && p.similarity !== undefined && p.similarity < 0.72 ? 'var(--danger)' : 'inherit', fontWeight: p.similarity !== null && p.similarity !== undefined && p.similarity < 0.72 ? 600 : 400}">
+              {{ p.a_name || p.a_id }} × {{ p.b_name || p.b_id }}
+            </span>
+            <span style="font-variant-numeric:tabular-nums; color:var(--muted); width:44px; text-align:right">
+              {{ p.similarity === null || p.similarity === undefined ? '—' : p.similarity.toFixed(3) }}
+            </span>
+            <span class="badge" :class="simTier(p.similarity).cls">{{ simTier(p.similarity).text }}</span>
+            <span v-if="p.a_id === spMergeTarget || p.b_id === spMergeTarget" class="muted">← 含保留目标</span>
+          </div>
         </div>
       </div>
     </div>
@@ -2763,6 +2786,6 @@
   </template>
 </div>
 
-<script src="/app/app.836b9e62.js"></script>
+<script src="/app/app.8391d47f.js"></script>
 </body>
 </html>

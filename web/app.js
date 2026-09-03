@@ -2318,6 +2318,11 @@ const app = createApp({
     const spMergeSelected = ref([]);    // 勾选的 speaker id
     const spMergeConfirming = ref(false); // 已点开始合并→选目标阶段
     const spMergeTarget = ref(null);     // 选作目标(保留)的 speaker id
+    const spMergeSim = ref(null);          // 相似度预检结果：{pairs:[{a_id,b_id,a_name,b_name,similarity}]}（similarity=null 不可比）；拉取失败保持 null
+    const spMergeSimChecked = ref(false);  // 本次勾选集合是否**已尝试过**预检（成功或失败都算 true）
+    // 不变量：相似度矩阵只依赖「勾选集合」，与谁是 target 无关——用户在表格展开后改目标下拉
+    // 时矩阵不重算，仅重标哪行是「源→目标」方向。故 startSpConfirm/cancelSpMerge/toggleSpSelect
+    // 三处改集合时才重置 spMergeSim/spMergeSimChecked；spMergeTarget 变化不重置。
     // 选中说话人按创建时间升序（早→晚）：默认保留目标取最早的那个，下拉选项也顺此序展示。
     const spMergeSelectedSorted = computed(() => {
       const byId = new Map(allSpeakers.value.map(s => [s.id, s]));
@@ -2327,29 +2332,59 @@ const app = createApp({
         return ta - tb;
       });
     });
-    function startSpMerge() { spMergeMode.value = true; spMergeSelected.value = []; spMergeConfirming.value = false; spMergeTarget.value = null; }
-    function cancelSpMerge() { spMergeMode.value = false; spMergeSelected.value = []; spMergeConfirming.value = false; spMergeTarget.value = null; }
+    function startSpMerge() { spMergeMode.value = true; spMergeSelected.value = []; spMergeConfirming.value = false; spMergeTarget.value = null; resetSpMergeSim(); }
+    function cancelSpMerge() { spMergeMode.value = false; spMergeSelected.value = []; spMergeConfirming.value = false; spMergeTarget.value = null; resetSpMergeSim(); }
     function toggleSpSelect(sp) {
       const i = spMergeSelected.value.indexOf(sp.id);
       if (i >= 0) { spMergeSelected.value.splice(i, 1); if (spMergeTarget.value === sp.id) spMergeTarget.value = null; }
       else spMergeSelected.value.push(sp.id);
+      resetSpMergeSim(); // 勾选集合变了 → 预检结果作废，下次确认时重拉
     }
+    // 重置相似度预检（只在勾选集合变化时调；改 target 不调——矩阵与 target 无关）
+    function resetSpMergeSim() { spMergeSim.value = null; spMergeSimChecked.value = false; }
     // 开始合并：进入选目标阶段，默认目标=选中者里**创建最早**的那个（更可能是最初登记的真身，
     // 后来拆出的自动声纹并进来；用户仍可在下拉里改选）。
     function startSpConfirm() {
       spMergeConfirming.value = true;
       spMergeTarget.value = spMergeSelectedSorted.value[0] || spMergeSelected.value[0] || null;
     }
+    // 拉取勾选集合的两两相似度（合并前的预检）。**失败不阻断**——返回 false 让调用方放行，
+    // 由用户自行确认（预检是辅助不是门禁，网络抖动不得卡住正常纠错流程）。
+    // 注意：无论成功失败都置 spMergeSimChecked=true，否则失败时用户会永远卡在这一步。
+    async function loadSpMergeSim() {
+      if (spMergeSimChecked.value) return true;
+      try {
+        spMergeSim.value = await api('POST', '/api/speakers/similarities', { ids: spMergeSelected.value });
+      } catch (e) {
+        notify('相似度预检失败，请自行确认后再合并', 3000);
+      }
+      spMergeSimChecked.value = true;
+      return true;
+    }
+    // 分档徽标：复用库里既有阈值（0.8 强命中 / 0.72 弱命中下限），不引入新常量。
+    function simTier(s) {
+      if (s === null || s === undefined) return { cls: '', text: '无法比较（无样本）' };
+      if (s >= 0.8) return { cls: 'done', text: '强像' };
+      if (s >= 0.72) return { cls: 'active', text: '弱像' };
+      return { cls: 'failed', text: '⚠ 不像，请确认' };
+    }
+    // 三态合并：①勾选→开始合并→选目标 → ②第一次点「确认合并」拉相似度并展开表格
+    // → ③第二次点「⚠ 仍然合并」才真正发请求。
+    // 预检失败也放行到 ③（spMergeSimChecked 在失败时也已置 true），预检不得成为门禁。
     async function applySpMerge() {
       if (spMergeSelected.value.length < 2) { notify('至少选 2 个说话人'); return; }
       if (!spMergeTarget.value) { notify('请选择保留的目标说话人'); return; }
       const sources = spMergeSelected.value.filter(id => id !== spMergeTarget.value);
       if (!sources.length) { notify('目标之外还需至少 1 个源'); return; }
+      // 阶段②：还没尝试过预检 → 拉一次并展开表格（成功）或 toast 后放行（失败），本次都不真合并
+      if (!spMergeSimChecked.value) {
+        await loadSpMergeSim();
+        return;
+      }
       try {
         await api('POST', '/api/speakers/merge', { source_ids: sources, target_id: spMergeTarget.value });
         cancelSpMerge();
         await loadAllSpeakers();
-        // 合并影响当前展开会话的说话人/段 → 重拉同步（声纹 tab 无展开会话则 detail 为空，跳过）
         if (detail.value && detail.value.session) await reloadSession(detail.value.session.id);
         notify('已合并 ' + sources.length + ' 个说话人到目标', 2000);
       } catch (e) { showError(e); }
@@ -3437,7 +3472,7 @@ const app = createApp({
       switchingSpeaker, switchTarget, switchSegCount, startSwitchSpeaker, cancelSwitchSpeaker, commitSwitchSpeaker,
       hasNameCandidates, acceptNameCandidate, dismissNameCandidate,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
-      spMergeMode, spMergeSelected, spMergeSelectedSorted, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
+      spMergeMode, spMergeSelected, spMergeSelectedSorted, spMergeConfirming, spMergeTarget, spMergeSim, spMergeSimChecked, simTier, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
       reextractingIds, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
       reidentifyingIds, reidentifyConfirmId, askReidentify, cancelReidentify, confirmReidentify,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
