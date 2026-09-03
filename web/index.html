@@ -144,6 +144,15 @@
   .btn.primary:disabled { background: #c8c3b4; cursor: not-allowed; }
   .btn.mini { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); padding: 6px 12px; }
   .btn.mini:hover { background: var(--surface-sunken); border-color: var(--border-strong); }
+  /* 「重新处理 ▾」下拉菜单：绝对定位于触发按钮下方，列出可重跑的 stage 起点。 */
+  .reprocess-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 30; min-width: 168px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 9px; box-shadow: 0 6px 20px rgba(0,0,0,.18);
+    padding: 4px; display: flex; flex-direction: column; gap: 2px; }
+  .reprocess-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+    background: none; border: none; border-radius: 6px; padding: 7px 10px; cursor: pointer;
+    font-size: var(--fs-sm); color: var(--text); text-align: left; }
+  .reprocess-item:hover { background: var(--surface-2); }
+  .reprocess-risk { font-size: var(--fs-xs); color: var(--text-2); white-space: nowrap; }
   /* mini 主操作按钮（保存/确认合并/确认切换…）：尺寸与 .btn.mini 完全一致、
      仅背景用主色区分。必须显式声明——.btn.primary 的 9px/20px 大内边距与
      15px 大字号会被 mini 覆盖一半（背景/内边距被覆盖、字号/字重残留），
@@ -507,16 +516,24 @@
             <div style="display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap" @click.stop>
               <!-- job_stage_label：后端 pipeline.StageLabel 给的中文阶段名（单一事实源）；
                    旧后端无该字段时退回原始 key，statusText 兜底。 -->
-              <span v-if="!reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage_label || s.job_stage) }}</span>
-              <span v-else-if="reextractingIds.has(s.id)" class="badge running"><span class="spinner"></span> 重新提取中</span>
-              <span v-else class="badge running"><span class="spinner"></span> 重新识别中</span>
-              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && !reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="btn mini" @click="askReidentify(s)" title="清空说话人归属，按最新声纹库重新匹配（会覆盖手动换人）">重新识别</button>
-              <button v-if="reidentifyConfirmId === s.id" class="btn warn" @click="confirmReidentify(s)">确认重识别?</button>
-              <button v-if="reidentifyConfirmId === s.id" class="btn ghost" @click="cancelReidentify()">取消</button>
-              <button v-if="reidentifyConfirmId !== s.id && reextractConfirmId !== s.id && deletingSessionId !== s.id && !reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="btn mini" @click="askReextract(s)">重新提取</button>
-              <button v-if="reextractConfirmId === s.id" class="btn warn" @click="confirmReextract(s)">确认重提取?</button>
-              <button v-if="reextractConfirmId === s.id" class="btn ghost" @click="cancelReextract()">取消</button>
-              <button v-if="reidentifyConfirmId !== s.id && deletingSessionId !== s.id && reextractConfirmId !== s.id && !reextractingIds.has(s.id) && !reidentifyingIds.has(s.id)" class="btn mini" @click="askDeleteSession(s)">删除</button>
+              <span v-if="!reprocessingIds.has(s.id)" class="badge" :class="s.job_status || s.status">{{ statusText(s.job_status, s.job_stage_label || s.job_stage) }}</span>
+              <span v-else class="badge running"><span class="spinner"></span> 重新处理中</span>
+              <!-- 重新处理 ▾：合并原「重新识别/重新提取」，下拉选重跑起点 stage（后端 /reprocess）。
+                   speaker 覆盖手动换人、asr 重新转写，故二次确认；其余直接跑。 -->
+              <span v-if="!reprocessingIds.has(s.id) && deletingSessionId !== s.id" style="position:relative; display:inline-block">
+                <button v-if="!reprocessConfirm || reprocessConfirm.id !== s.id" class="btn mini" @click="toggleReprocessMenu(s)" title="从某个阶段重新跑后续流水线">重新处理 ▾</button>
+                <span v-if="reprocessMenuId === s.id" class="reprocess-menu">
+                  <button v-for="st in reprocessStages" :key="st.key" class="reprocess-item" @click="askReprocess(s, st)">
+                    <span>{{ st.label }}</span>
+                    <span v-if="st.risk" class="reprocess-risk">{{ st.risk }}</span>
+                  </button>
+                </span>
+                <template v-if="reprocessConfirm && reprocessConfirm.id === s.id">
+                  <button class="btn warn" @click="confirmReprocess(s)">确认重处理?</button>
+                  <button class="btn ghost" @click="cancelReprocess()">取消</button>
+                </template>
+              </span>
+              <button v-if="deletingSessionId !== s.id && !reprocessingIds.has(s.id) && reprocessMenuId !== s.id && (!reprocessConfirm || reprocessConfirm.id !== s.id)" class="btn mini" @click="askDeleteSession(s)">删除</button>
               <button v-if="deletingSessionId === s.id" class="btn danger" @click="confirmDeleteSession(s)">确认删除?</button>
               <button v-if="deletingSessionId === s.id" class="btn ghost" @click="cancelDeleteSession()">取消</button>
             </div>
@@ -2799,6 +2816,6 @@
   </template>
 </div>
 
-<script src="/app/app.69b25d4e.js"></script>
+<script src="/app/app.cf35e967.js"></script>
 </body>
 </html>

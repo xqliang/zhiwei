@@ -2375,31 +2375,53 @@ const app = createApp({
       } catch (e) { showError(e); }
     }
 
-    // ---------- 重新提取（基于最新 ASR 重跑 segment→extract） ----------
-    // 点卡片「重新提取」→ 2 步确认 → 若有未保存转写先存盘 → POST reextract 建任务
-    // → 轮询 job 状态 → 完成后刷新列表+详情。2 步确认提示会覆盖旧记忆/待办。
-    const reextractingIds = reactive(new Set()); // 正在重新提取的 session id 集合（支持多卡片并行）
-    const reextractConfirmId = ref(null);        // 待确认重新提取的 session id
-    const reextractTimers = new Map();           // sessionId → 轮询 timer（并行时各自独立，互不覆盖）
-    // jobInProgress 判断会话是否有任务在跑/排队（列表富化的 job_status；处理中禁再
-    // 触发重新提取/重新识别——后端也会 409 拒，这里提前提示避免白点一趟确认按钮）。
+    // ---------- 重新处理（从指定 stage 起重跑后续流水线，下拉选择起点） ----------
+    // 后端 POST /api/sessions/{id}/reprocess {stage}：在该 stage 建 job，Flow.Next 自动串后续。
+    // 取代早先硬编码的「重新识别」(speaker) /「重新提取」(segment) 两按钮——统一为一个下拉。
+    // reprocessStages 顺序=流水线执行顺序，中文名与后端 stageLabels 单一事实源对齐；
+    // risk 标注副作用重的项（speaker 覆盖手动换人 / asr 重新转写耗时计费）。
+    const reprocessStages = [
+      { key: 'asr',            label: '语音转写', risk: '重新转写（耗时/计费）' },
+      { key: 'correct',        label: '实体纠错' },
+      { key: 'segment',        label: '全文汇总' },
+      { key: 'speaker',        label: '声纹识别', risk: '会覆盖手动换人' },
+      { key: 'speakername',    label: '名字推断' },
+      { key: 'audioscene',     label: '场景情绪' },
+      { key: 'emotionprofile', label: '情绪汇总' },
+      { key: 'extract',        label: '记忆抽取' },
+    ];
+    const reprocessingIds = reactive(new Set());   // 正在重新处理的 session id（支持多卡片并行）
+    const reprocessConfirm = ref(null);            // 待确认：{id, stage, label} | null
+    const reprocessMenuId = ref(null);             // 下拉展开的 session id | null
+    const reprocessTimers = new Map();             // sessionId → 轮询 timer（并行时各自独立）
+    // jobInProgress 判断会话是否有任务在跑/排队（列表富化的 job_status；处理中禁再触发——后端也会 409）。
     function jobInProgress(s) { return s.job_status === 'running' || s.job_status === 'pending'; }
-    function askReextract(s) {
-      if (jobInProgress(s)) { notify('该录音正在处理中，等当前任务完成后再重新提取（避免重复排队）'); return; }
-      deletingSessionId.value = null; reextractConfirmId.value = s.id;
+    function toggleReprocessMenu(s) {
+      reprocessMenuId.value = reprocessMenuId.value === s.id ? null : s.id;
+      reprocessConfirm.value = null; deletingSessionId.value = null;
     }
-    function cancelReextract() { reextractConfirmId.value = null; }
-    async function confirmReextract(s) { reextractConfirmId.value = null; await reextractSession(s); }
-    async function reextractSession(s) {
-      if (reextractingIds.has(s.id)) return; // 只防**同一** session 重复提交；不同 session 允许并行（后端 pool 并发=2，多的排队）
-      // 当前展开且有未保存转写修改 → 先存盘，确保用最新 ASR 提取
+    function cancelReprocess() { reprocessConfirm.value = null; }
+    // 选某 stage → 若在处理中先提示；否则进二次确认（副作用重的项文案已含 risk）。
+    function askReprocess(s, st) {
+      reprocessMenuId.value = null;
+      if (jobInProgress(s)) { notify('该录音正在处理中，等当前任务完成后再重新处理（避免重复排队）'); return; }
+      reprocessConfirm.value = { id: s.id, stage: st.key, label: st.label };
+    }
+    async function confirmReprocess(s) {
+      const c = reprocessConfirm.value; reprocessConfirm.value = null;
+      if (!c) return;
+      await reprocessSession(s, c.stage, c.label);
+    }
+    async function reprocessSession(s, stage, label) {
+      if (reprocessingIds.has(s.id)) return; // 只防**同一** session 重复提交；不同 session 允许并行（后端 pool 并发=2，多的排队）
+      // 当前展开且有未保存转写修改 → 先存盘，确保 correct/segment/extract 等读最新 ASR。
       if (expandedId.value === s.id && segDirty.value) {
         await saveTranscript(s);
       }
-      reextractingIds.add(s.id);
+      reprocessingIds.add(s.id);
       try {
-        await api('POST', '/api/sessions/' + s.id + '/reextract', {});
-        notify('正在重新提取…');
+        await api('POST', '/api/sessions/' + s.id + '/reprocess', { stage });
+        notify('正在重新处理：' + (label || stage) + '…');
         const poll = async () => {
           let st = '', err = '';
           try {
@@ -2408,67 +2430,22 @@ const app = createApp({
             err = r.job ? (r.job.last_error || '') : '';
           } catch (e) { /* 轮询失败静默重试 */ }
           if (st === 'done' || st === 'completed') {
-            reextractingIds.delete(s.id);
-            reextractTimers.delete(s.id);
-            notify('重新提取完成', 2500);
+            reprocessingIds.delete(s.id);
+            reprocessTimers.delete(s.id);
+            notify('重新处理完成', 2500);
             await loadSessions();
             if (expandedId.value === s.id) await reloadSession(s.id);
           } else if (st === 'failed') {
-            reextractingIds.delete(s.id);
-            reextractTimers.delete(s.id);
-            notify('重新提取失败' + (err ? '：' + err : ''),4000);
+            reprocessingIds.delete(s.id);
+            reprocessTimers.delete(s.id);
+            notify('重新处理失败' + (err ? '：' + err : ''), 4000);
           } else {
-            reextractTimers.set(s.id, setTimeout(poll, 2000));
+            reprocessTimers.set(s.id, setTimeout(poll, 2000));
           }
         };
         poll();
       } catch (e) {
-        reextractingIds.delete(s.id);
-        showError(e);
-      }
-    }
-
-    // ---------- 重新识别说话人（清空说话人归属 + 重跑 speaker stage 用最新声纹库 1:N） ----------
-    // 区别于重新提取（speaker 幂等跳过、不改已有归属）；重新识别会覆盖手动换人，故二次确认。
-    const reidentifyingIds = reactive(new Set()); // 正在重新识别的 session id 集合（支持多卡片并行）
-    const reidentifyConfirmId = ref(null);        // 待确认重新识别的 session id
-    const reidentifyTimers = new Map();           // sessionId → 轮询 timer（并行时各自独立）
-    function askReidentify(s) {
-      if (jobInProgress(s)) { notify('该录音正在处理中，等当前任务完成后再重新识别（避免重复排队）'); return; }
-      deletingSessionId.value = null; reextractConfirmId.value = null; reidentifyConfirmId.value = s.id;
-    }
-    function cancelReidentify() { reidentifyConfirmId.value = null; }
-    async function confirmReidentify(s) { reidentifyConfirmId.value = null; await reidentifySession(s); }
-    async function reidentifySession(s) {
-      if (reidentifyingIds.has(s.id)) return; // 只防**同一** session 重复提交；不同 session 允许并行（后端 pool 并发=2，多的排队）
-      reidentifyingIds.add(s.id);
-      try {
-        await api('POST', '/api/sessions/' + s.id + '/reidentify', {});
-        notify('正在重新识别说话人…');
-        const poll = async () => {
-          let st = '', err = '';
-          try {
-            const r = await api('GET', '/api/sessions/' + s.id);
-            st = r.job ? r.job.status : (r.session && r.session.status) || '';
-            err = r.job ? (r.job.last_error || '') : '';
-          } catch (e) { /* 轮询失败静默重试 */ }
-          if (st === 'done' || st === 'completed') {
-            reidentifyingIds.delete(s.id);
-            reidentifyTimers.delete(s.id);
-            notify('重新识别完成', 2500);
-            await loadSessions();
-            if (expandedId.value === s.id) await reloadSession(s.id);
-          } else if (st === 'failed') {
-            reidentifyingIds.delete(s.id);
-            reidentifyTimers.delete(s.id);
-            notify('重新识别失败' + (err ? '：' + err : ''),4000);
-          } else {
-            reidentifyTimers.set(s.id, setTimeout(poll, 2000));
-          }
-        };
-        poll();
-      } catch (e) {
-        reidentifyingIds.delete(s.id);
+        reprocessingIds.delete(s.id);
         showError(e);
       }
     }
@@ -3438,7 +3415,7 @@ const app = createApp({
       try { localStorage.setItem(LS_TAB, name); } catch (e) {} // 记住所在 tab，刷新后回到现场
       // 离开问知微：断开 WS（含抑制重连），避免后台常驻连接
       if (prev === 'agent' && name !== 'agent') closeAgentWS();
-      if (name === 'timeline') { deletingSessionId.value = null; reextractConfirmId.value = null; segDraft.value = {}; loadSessions(); loadAllSpeakers(); }
+      if (name === 'timeline') { deletingSessionId.value = null; reprocessConfirm.value = null; reprocessMenuId.value = null; segDraft.value = {}; loadSessions(); loadAllSpeakers(); }
       if (name === 'memories') { memSearch.value = ''; loadMemories(); }
       if (name === 'topics') { topicDetail.value = null; renaming.value = null; deletingTopicId.value = null; dismissingTopicId.value = null; topicSearch.value = ''; cancelManualMerge(); loadDismissedTopics(); loadTopics(); }
       if (name === 'todos') { editingTodo.value = null; deletingTodoId.value = null; dismissingTodoId.value = null; todoSel.clear(); todoBatchAsk.value = null; todoMultiMode.value = false; todoSearch.value = ''; loadTopics(); loadTodos(); loadDismissedTodos(); }
@@ -3457,7 +3434,7 @@ const app = createApp({
     // 401 → api() 已置 authed=false，显示登录页。未登录时不再盲发 sessions/topics/speakers 等请求。
     checkAuth();
 
-    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); if (timelinePollTimer) clearInterval(timelinePollTimer); clearTimeout(reextractPollTimer); if (agentTimer) clearInterval(agentTimer); closeAgentWS(); });
+    onUnmounted(() => { clearInterval(recTimer); clearInterval(pollTimer); if (timelinePollTimer) clearInterval(timelinePollTimer); reprocessTimers.forEach(t => clearTimeout(t)); reprocessTimers.clear(); if (agentTimer) clearInterval(agentTimer); closeAgentWS(); });
 
     return {
       tab, toast, switchTab,
@@ -3481,8 +3458,7 @@ const app = createApp({
       hasNameCandidates, acceptNameCandidate, dismissNameCandidate,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
       spMergeMode, spMergeSelected, spMergeSelectedSorted, spMergeConfirming, spMergeTarget, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
-      reextractingIds, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
-      reidentifyingIds, reidentifyConfirmId, askReidentify, cancelReidentify, confirmReidentify,
+      reprocessStages, reprocessingIds, reprocessConfirm, reprocessMenuId, toggleReprocessMenu, askReprocess, cancelReprocess, confirmReprocess, jobInProgress,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,
       lastAudioFile, matchInfo, voiceprintMatching, tryMatchVoiceprint,
       topics, topicDetail, showNewTopic, newTopic, creating, toggleNewTopic, cancelNewTopic, renaming,

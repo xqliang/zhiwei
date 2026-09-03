@@ -281,6 +281,47 @@ func (r *TranscriptRepo) MergeShortGroup(ctx context.Context, transcriptID ids.I
 	return err
 }
 
+// DeleteTranscriptBySession 删除某 session 的整条 transcript 及其下游（转写段 + 该 transcript
+// 的在场情绪药丸行），供「重新转写」从 asr stage 重跑用。Transcripts.Create 是 insert-only
+// （非幂等）——asr stage 每次都 INSERT 一条新 transcript，直接重跑会留下**重复 transcript + 孤儿
+// 段/孤儿情绪行**，故重转写前必须先删干净再入队。单事务：先情绪行（按 transcript_id）→ 段 →
+// transcript，全删或全不删。**只删本 session 的 transcript 及其下游**：person_* 画像平面、
+// memory/todo 由各自 stage 的幂等/残留清理自愈（profile 有 stale_cleanup、extract 删后重插），
+// speaker/speaker_embedding 是跨 session 全局声纹库，绝不在此动。
+func (r *TranscriptRepo) DeleteTranscriptBySession(ctx context.Context, sessionID ids.ID) error {
+	tx, err := r.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback }()
+	// 子查询限定 transcript_id ∈ 本 session 的 transcript，避免误删其它 session 共享 label 的行。
+	steps := []string{
+		`DELETE FROM speaker_session_state WHERE transcript_id IN (SELECT id FROM transcript WHERE session_id = ?)`,
+		`DELETE FROM transcript_segment WHERE transcript_id IN (SELECT id FROM transcript WHERE session_id = ?)`,
+		`DELETE FROM transcript WHERE session_id = ?`,
+	}
+	for _, q := range steps {
+		if _, err := tx.ExecContext(ctx, q, sessionID.Int64()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ClearEntityCorrections 清掉某 transcript 所有段的实体纠错痕迹（corrected_reason='entity' 归 NULL、
+// entity_edits 置空），供「实体纠错」stage 单独重跑用。correct stage 幂等跳过已纠正段
+// （corrected_reason=='entity' 或 entity_edits 非空即跳过），不清则重跑会全部跳过、等于 no-op。
+// 只碰 entity 痕迹，不动 speaker_id / corrected_from / phantom|short|mismatch 标记——那些属
+// 声纹纠正，与实体纠错正交（corrected_reason 是共享列，声纹改判也会覆写它，故这里按
+// 「entity_edits 非空 OR reason=='entity'」定位实体痕迹，避免误清声纹标记）。单条 UPDATE 原子写。
+func (r *TranscriptRepo) ClearEntityCorrections(ctx context.Context, transcriptID ids.ID) error {
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE transcript_segment SET corrected_reason = NULL, entity_edits = NULL
+		 WHERE transcript_id = ? AND (corrected_reason = 'entity' OR entity_edits IS NOT NULL)`,
+		transcriptID.Int64())
+	return err
+}
+
 // SaveSegmentEmbeddings 批量落库逐段声纹向量 BLOB（speaker stage 提取后调用）。
 // 带 transcript_id 作用域防跨会话误写；逐行 UPDATE 原子写（段数=会话内句数，量小）。
 // 用于详情页按段展示与声纹库的相似度 top-N（一句话可能混多人，段级才能审计切分）。

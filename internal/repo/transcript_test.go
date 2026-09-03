@@ -825,3 +825,123 @@ func TestApplyEntityCorrections(t *testing.T) {
 		t.Fatalf("full_text 应含纠正后文本: %v %v", err, full.FullText)
 	}
 }
+
+// TestDeleteTranscriptBySessionAndClearEntity 覆盖「重新处理」两个前置清理原语：
+//   - DeleteTranscriptBySession：删 transcript + 其段 + 该 transcript 的在场情绪药丸行；其它 session
+//     的 transcript/情绪行不波及；删后 GetBySession 查不到（asr 重转写据此不会造重复 transcript）。
+//   - ClearEntityCorrections：只清实体纠错痕迹（corrected_reason='entity' + entity_edits），
+//     声纹纠正的 corrected_from / phantom 标记不动（correct 重跑据此不再全跳过）。
+func TestDeleteTranscriptBySessionAndClearEntity(t *testing.T) {
+	db, err := NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tr := &TranscriptRepo{DB: db}
+	sessions := &SessionRepo{DB: db}
+	speakers := &SpeakerRepo{DB: db}
+	states := &SpeakerSessionStateRepo{DB: db}
+
+	sp := &Speaker{Name: "说话人x", Source: "auto"}
+	if err := speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), sp.ID) })
+
+	// 本 session（待重转写）+ 另一个 session（不受影响）
+	sidA, sidB := ids.New(), ids.New()
+	for _, sid := range []ids.ID{sidA, sidB} {
+		if err := sessions.Create(ctx, &AudioSession{
+			ID: sid, Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tcA := &Transcript{SessionID: sidA, Language: "zh-CN"}
+	tcB := &Transcript{SessionID: sidB, Language: "zh-CN"}
+	if err := tr.Create(ctx, tcA); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Create(ctx, tcB); err != nil {
+		t.Fatal(err)
+	}
+	segsA := []TranscriptSegment{
+		{TranscriptID: tcA.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "甲段", StartMS: 0, EndMS: 1000},
+		{TranscriptID: tcA.ID, SequenceNo: 2, SpeakerLabel: "1", Text: "乙段", StartMS: 1000, EndMS: 2000},
+	}
+	if err := tr.InsertSegments(ctx, segsA); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.InsertSegments(ctx, []TranscriptSegment{
+		{TranscriptID: tcB.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "他会话段", StartMS: 0, EndMS: 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A 的段归到 sp，并各打一条纠正痕迹：甲=实体纠错，乙=幽灵声纹改判。
+	segs, _ := tr.ListSegments(ctx, tcA.ID)
+	if err := tr.SetSegmentSpeaker(ctx, tcA.ID, "1", sp.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 甲段打实体纠错痕迹（reason='entity' + entity_edits 非空）。
+	entityEdits := []byte(`[{"orig":"张梦","corrected":"张梦瑜"}]`)
+	if err := tr.ApplyEntityCorrections(ctx, tcA.ID, segs[0].ID, "张梦瑜段", entityEdits); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.CorrectSegmentSpeaker(ctx, tcA.ID, "1", sp.ID, sp.ID); err != nil {
+		t.Fatal(err) // from==to 仅用于打 phantom 痕迹，验证 ClearEntityCorrections 不清它
+	}
+	// 两条 session 各插一条在场情绪药丸行。
+	if err := states.InsertBatch(ctx, []SpeakerSessionState{
+		{UserID: 1, TranscriptID: tcA.ID, SessionID: sidA, SpeakerLabel: "1", Emotion: "平静", Confidence: 0.8},
+		{UserID: 1, TranscriptID: tcB.ID, SessionID: sidB, SpeakerLabel: "1", Emotion: "焦虑", Confidence: 0.6},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) ClearEntityCorrections：甲段实体痕迹清掉，乙段 phantom 的 corrected_from 保留。
+	if err := tr.ClearEntityCorrections(ctx, tcA.ID); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := tr.ListSegments(ctx, tcA.ID)
+	for _, s := range after {
+		if s.CorrectedReason != nil && *s.CorrectedReason == "entity" {
+			t.Fatalf("实体 corrected_reason 应清 NULL: %+v", s)
+		}
+		if len(s.EntityEdits) != 0 {
+			t.Fatalf("entity_edits 应清空: %s", s.EntityEdits)
+		}
+	}
+	var phantomKept bool
+	for _, s := range after {
+		if s.CorrectedFromSpeakerID != nil {
+			phantomKept = true
+		}
+	}
+	if !phantomKept {
+		t.Fatal("ClearEntityCorrections 不应清声纹纠正的 corrected_from")
+	}
+
+	// 2) DeleteTranscriptBySession：A 的 transcript/段/情绪行全删，B 不受影响。
+	if err := tr.DeleteTranscriptBySession(ctx, sidA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.GetBySession(ctx, sidA); err == nil {
+		t.Fatal("删后 A 的 transcript 应查不到")
+	}
+	if segsA, _ := tr.ListSegments(ctx, tcA.ID); len(segsA) != 0 {
+		t.Fatalf("A 的段应全删, got %d", len(segsA))
+	}
+	if st, _ := states.ListBySession(ctx, 1, sidA); len(st) != 0 {
+		t.Fatalf("A 的情绪药丸行应全删, got %d", len(st))
+	}
+	// B 完好：transcript、段、情绪行都在。
+	if _, err := tr.GetBySession(ctx, sidB); err != nil {
+		t.Fatalf("B 的 transcript 不应被删: %v", err)
+	}
+	if segsB, _ := tr.ListSegments(ctx, tcB.ID); len(segsB) != 1 {
+		t.Fatalf("B 的段应保留, got %d", len(segsB))
+	}
+	if st, _ := states.ListBySession(ctx, 1, sidB); len(st) != 1 {
+		t.Fatalf("B 的情绪行应保留, got %d", len(st))
+	}
+}

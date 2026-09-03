@@ -1650,3 +1650,181 @@ func TestGetSessionSpeakerStateDedupSameSpeaker(t *testing.T) {
 		t.Fatalf("应保留主标签(5s)的「Allen: 平静」，实际 %+v", resp.SpeakerStates[0])
 	}
 }
+
+// TestReprocessFromStage 覆盖「重新处理 ▾」后端 Reprocess：按 stage 建 job + 前置清理 + 闸门。
+//   - speaker：清说话人归属（ClearSegmentSpeakers）+ job.stage=speaker；
+//   - correct：清实体痕迹（reason/entity_edits 归 NULL）+ job.stage=correct；
+//   - extract：不清理（段/sp 痕迹保留）+ job.stage=extract；
+//   - asr：删 transcript + job.stage=asr（重转写，删旧防重复 transcript）；
+//   - 非法 stage → 400；在途 job → 409；非 asr 且无 transcript → 409。
+func TestReprocessFromStage(t *testing.T) {
+	_ = ids.InitForTest()
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sessions := &repo.SessionRepo{DB: db}
+	jobs := &repo.JobRepo{DB: db}
+	transcripts := &repo.TranscriptRepo{DB: db}
+	speakers := &repo.SpeakerRepo{DB: db}
+
+	sp := &repo.Speaker{Name: "说话人x", Source: "auto"}
+	if err := speakers.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = speakers.Delete(context.Background(), sp.ID) })
+
+	newSession := func() ids.ID {
+		sid := ids.New()
+		if err := sessions.Create(ctx, &repo.AudioSession{
+			ID: sid, Source: "web_upload", Filename: "a.wav", StoragePath: "/tmp/a.wav", Status: "completed",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return sid
+	}
+	// 建一个带 transcript + 段（已归属 sp、已打实体痕迹）的 session。
+	sidWithTr := newSession()
+	tr := &repo.Transcript{SessionID: sidWithTr, Language: "zh-CN"}
+	if err := transcripts.Create(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.InsertSegments(ctx, []repo.TranscriptSegment{
+		{TranscriptID: tr.ID, SequenceNo: 1, SpeakerLabel: "1", Text: "张梦你好", StartMS: 0, EndMS: 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := transcripts.ListSegments(ctx, tr.ID)
+	_ = transcripts.SetSegmentSpeaker(ctx, tr.ID, "1", sp.ID)
+	edits := []byte(`[{"orig":"张梦","corrected":"张梦瑜"}]`)
+	if err := transcripts.ApplyEntityCorrections(ctx, tr.ID, segs[0].ID, "张梦瑜你好", edits); err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(sid ids.ID, stage string) *httptest.ResponseRecorder {
+		body := `{"stage":"` + stage + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sid.String()+"/reprocess", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r := newAuthedRouter()
+		RegisterQuery(r, &QueryHandler{
+			Sessions: sessions, Jobs: jobs, Transcripts: transcripts,
+		})
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// markDone 把 session 当前 job 置 done（模拟 pool 跑完），否则下一次 Reprocess 会因
+	// jobInProgress 闸看到在途 pending job 而 409——真实场景也是「一个处理完再点下一个」。
+	markDone := func(sid ids.ID) {
+		jid := mustJobID(t, sessions, sid)
+		if j, _ := jobs.Get(ctx, jid); j != nil {
+			j.Status = "done"
+			_ = jobs.Save(ctx, j)
+		}
+	}
+
+	// speaker：清 speaker_id + job=speaker。
+	{
+		rec := post(sidWithTr, "speaker")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("speaker: %d %s", rec.Code, rec.Body.String())
+		}
+		after, _ := transcripts.ListSegments(ctx, tr.ID)
+		for _, s := range after {
+			if s.SpeakerID != nil {
+				t.Fatalf("speaker 重跑应清 speaker_id, got %+v", s.SpeakerID)
+			}
+		}
+		last, _ := jobs.Get(ctx, mustJobID(t, sessions, sidWithTr))
+		if last.Stage != "speaker" {
+			t.Fatalf("job.stage 应 speaker, got %s", last.Stage)
+		}
+		markDone(sidWithTr)
+	}
+
+	// correct：清实体痕迹（reason/entity_edits），但 speaker_id 已被上面清了（此处重打）。
+	_ = transcripts.SetSegmentSpeaker(ctx, tr.ID, "1", sp.ID)
+	_ = transcripts.ApplyEntityCorrections(ctx, tr.ID, segs[0].ID, "张梦瑜你好", edits)
+	{
+		rec := post(sidWithTr, "correct")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("correct: %d %s", rec.Code, rec.Body.String())
+		}
+		after, _ := transcripts.ListSegments(ctx, tr.ID)
+		for _, s := range after {
+			if s.CorrectedReason != nil && *s.CorrectedReason == "entity" {
+				t.Fatalf("correct 重跑应清 entity reason, got %+v", s.CorrectedReason)
+			}
+			if len(s.EntityEdits) != 0 {
+				t.Fatalf("correct 重跑应清 entity_edits, got %s", s.EntityEdits)
+			}
+		}
+		last, _ := jobs.Get(ctx, mustJobID(t, sessions, sidWithTr))
+		if last.Stage != "correct" {
+			t.Fatalf("job.stage 应 correct, got %s", last.Stage)
+		}
+		markDone(sidWithTr)
+	}
+
+	// extract：不清理（段仍在）。
+	{
+		rec := post(sidWithTr, "extract")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("extract: %d %s", rec.Code, rec.Body.String())
+		}
+		if after, _ := transcripts.ListSegments(ctx, tr.ID); len(after) == 0 {
+			t.Fatal("extract 重跑不应删段")
+		}
+		markDone(sidWithTr)
+	}
+
+	// asr：删 transcript（重转写），job=asr。
+	{
+		rec := post(sidWithTr, "asr")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("asr: %d %s", rec.Code, rec.Body.String())
+		}
+		if _, err := transcripts.GetBySession(ctx, sidWithTr); err == nil {
+			t.Fatal("asr 重跑应删旧 transcript")
+		}
+		last, _ := jobs.Get(ctx, mustJobID(t, sessions, sidWithTr))
+		if last.Stage != "asr" {
+			t.Fatalf("job.stage 应 asr, got %s", last.Stage)
+		}
+	}
+
+	// 非法 stage → 400。
+	sidFresh := newSession()
+	{
+		rec := post(sidFresh, "bogus")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("非法 stage 应 400, got %d", rec.Code)
+		}
+	}
+
+	// 非 asr 且无 transcript → 409。
+	{
+		rec := post(sidFresh, "speaker")
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("无 transcript 的 speaker 应 409, got %d", rec.Code)
+		}
+	}
+
+	// 在途 job → 409（另起 session，建 pending job）。
+	sidBusy := newSession()
+	tr2 := &repo.Transcript{SessionID: sidBusy, Language: "zh-CN"}
+	_ = transcripts.Create(ctx, tr2)
+	busyJob := &repo.Job{SessionID: sidBusy, Stage: "extract", Status: "pending"}
+	if err := jobs.Create(ctx, busyJob); err != nil {
+		t.Fatal(err)
+	}
+	_ = sessions.SetJobID(ctx, sidBusy, busyJob.ID)
+	{
+		rec := post(sidBusy, "extract")
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("在途 job 应 409, got %d %s", rec.Code, rec.Body.String())
+		}
+	}
+}

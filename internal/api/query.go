@@ -59,6 +59,7 @@ func RegisterQuery(r chi.Router, h *QueryHandler) {
 	r.Patch("/api/sessions/{id}/transcript", h.PatchTranscript)
 	r.Post("/api/sessions/{id}/reextract", h.Reextract)
 	r.Post("/api/sessions/{id}/reidentify", h.Reidentify) // timeline「重新识别」：清空说话人归属+重跑 speaker stage
+	r.Post("/api/sessions/{id}/reprocess", h.Reprocess)   // timeline「重新处理 ▾」：从指定 stage 起重跑后续流水线
 	r.Delete("/api/sessions/{id}", h.DeleteSession)
 	r.Get("/api/sessions/{id}/audio", h.ServeAudio)
 	r.Post("/api/sessions/{id}/denoise-audio", h.DenoiseAudio) // timeline 播放降噪预览：按需生成降噪版（幂等）
@@ -788,6 +789,101 @@ func (h *QueryHandler) Reidentify(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.Sessions.SetJobID(r.Context(), sid, j.ID)
 	writeJSON(w, map[string]any{"job_id": j.ID})
+}
+
+// reprocessStages 是「重新处理」下拉可选的重跑起点（= 流水线 stagesList 去掉 asr 之外的
+// 可重入 stage；asr 也含，见 Reprocess 注释）。**顺序即执行顺序**，前端下拉按此顺序展示。
+// 与 pipeline.BuildStages / stageLabels 同一批 key；新增 stage 时这里要同步（无守护测试，
+// 靠 code review + Reprocess 的 400 校验兜底——传非法 stage 直接拒）。
+var reprocessStages = []string{"asr", "correct", "segment", "speaker", "speakername", "audioscene", "emotionprofile", "extract"}
+
+// Reprocess 从指定 stage 起重跑该录音的后续流水线（前端「重新处理 ▾」下拉入口）。
+// 取代早先散落的「重新识别」(reidentify, 从 speaker)/「重新提取」(reextract, 从 segment) 两个
+// 硬编码端点——那两个端点保留为它们的薄封装（语义不变），新交互统一走这里。
+//
+// 入参 { "stage": "<key>" }，stage 须在 reprocessStages 内（否则 400）。语义：
+//   - 在 stage 建一个 pending job，pool 领取后由 Flow.Next 自动串后续 stage 直到 done
+//     （与首次处理同一套线性链 asr→…→extract）。
+//   - **按 stage 做前置清理**（重跑前清掉会让该 stage 幂等跳过的残留）：
+//     asr       → DeleteTranscriptBySession（删旧 transcript+段+情绪药丸；Create 非幂等，不删会重复 transcript+孤儿数据）
+//     correct   → ClearEntityCorrections（清实体痕迹；否则幂等跳过=no-op）
+//     speaker   → ClearSegmentSpeakers（清说话人归属；否则 allAssigned 跳过=no-op，即原 reidentify 语义）
+//     其余 stage → 不清理（各自幂等：segment 覆盖/speakername upsert/audioscene 删后重插/emotionprofile 幂等跳过/extract 删后重插）。
+//   - person_* 画像平面、memory/todo 由各自 stage 的幂等/残留清理自愈，不在此前置删。
+//
+// 安全：保留 jobInProgress 409 防重入（asr 删 transcript 与在途 speaker stage 竞写尤其危险）。
+// 需已有 transcript（asr 除外——asr 靠原始音频重转写，见 DeleteTranscriptBySession）。
+func (h *QueryHandler) Reprocess(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	sid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Stage string `json:"stage"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	valid := false
+	for _, s := range reprocessStages {
+		if body.Stage == s {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		http.Error(w, "非法 stage: "+body.Stage, http.StatusBadRequest)
+		return
+	}
+	s, err := h.Sessions.Get(r.Context(), uid.Int64(), sid)
+	if err != nil {
+		http.Error(w, "session 不存在", http.StatusNotFound)
+		return
+	}
+	if h.jobInProgress(r.Context(), s) {
+		http.Error(w, "该录音正在处理中，请等当前任务完成后再操作", http.StatusConflict)
+		return
+	}
+	// 除 asr 外的 stage 都依赖既有 transcript（correct/speaker 读段、extract 读全文…）。
+	// asr 靠原始音频重转写，无 transcript 也可入队（首次处理即如此）。
+	tr, terr := h.Transcripts.GetBySession(r.Context(), sid)
+	hasTranscript := terr == nil
+	if body.Stage != "asr" && !hasTranscript {
+		http.Error(w, "该会话暂无转写，无法从此阶段重跑", http.StatusConflict)
+		return
+	}
+	// 前置清理：按 stage 清掉会让它幂等跳过的残留。
+	switch body.Stage {
+	case "asr":
+		if err := h.Transcripts.DeleteTranscriptBySession(r.Context(), sid); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case "correct":
+		if err := h.Transcripts.ClearEntityCorrections(r.Context(), tr.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case "speaker":
+		if err := h.Transcripts.ClearSegmentSpeakers(r.Context(), tr.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	j := &repo.Job{SessionID: sid, Stage: body.Stage, Status: "pending"}
+	if err := h.Jobs.Create(r.Context(), j); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = h.Sessions.SetJobID(r.Context(), sid, j.ID)
+	writeJSON(w, map[string]any{"job_id": j.ID, "stage": body.Stage})
 }
 
 func (h *QueryHandler) RetryJob(w http.ResponseWriter, r *http.Request) {
