@@ -53,6 +53,14 @@ func TestCosineTruncatesToShorterDim(t *testing.T) {
 	if got := Cosine([]float32{0, 1, 0}, []float32{1, 0, 0, 0}); math.Abs(got-0) > 1e-9 {
 		t.Fatalf("正交 want 0, got %v", got)
 	}
+	// 反向：a 比 b 长，走 pair.go 里 `if len(b) < n { n = len(b) }` 这条截断分支
+	// （上两组 a 恒短，n 始终取 len(a)，该分支从不执行；补此组才真正覆盖守卫的另一侧）。
+	if got := Cosine([]float32{1, 0, 0, 0}, []float32{1, 0, 0}); math.Abs(got-1) > 1e-9 {
+		t.Fatalf("同向(a 长) want 1, got %v", got)
+	}
+	if got := Cosine([]float32{0, 0, 1, 0}, []float32{1, 0, 0}); math.Abs(got-0) > 1e-9 {
+		t.Fatalf("正交(a 长) want 0, got %v", got)
+	}
 }
 
 // BenchmarkMaxCosine 佐证成本可忽略（CLAUDE.md：性能须有数据）。
