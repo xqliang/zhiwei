@@ -580,10 +580,12 @@ func (h *SpeakerHandler) Similarities(w http.ResponseWriter, r *http.Request) {
 
 - [ ] **Step 6: 跑测试确认通过**
 
-Run: `go test ./internal/api/ -run 'TestSimilarities|TestSpeaker' -v`
+> ⚠ **必须带 `TEST_MYSQL_DSN`。** `repotest.DSN`（`internal/repotest/testdb.go:51-54`）在未设置该变量时直接 `t.Skip("TEST_MYSQL_DSN 未设置，跳过集成测试")`——不设会**全部静默跳过却报 ok**，是假通过。看到输出里有 `--- SKIP` 或测试数为 0 就是没带上。
+
+Run: `TEST_MYSQL_DSN="zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei_test?parseTime=true&charset=utf8mb4&multiStatements=true" go test ./internal/api/ -run 'TestSimilarities|TestSpeaker' -v`
 Expected: PASS（6 个新测试 + 既有 `TestSpeaker*` 全绿，证明 cosine 收敛未破坏 MatchPreview）
 
-Run: `go test ./internal/api/ ./internal/pipeline/ ./internal/voiceprint/ -p 2 -count=1`
+Run: `TEST_MYSQL_DSN="zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei_test?parseTime=true&charset=utf8mb4&multiStatements=true" go test -p 2 -count=1 ./internal/api/ ./internal/pipeline/ ./internal/voiceprint/`
 Expected: 全 ok
 
 - [ ] **Step 7: 补 benchmark 并记录数值**
@@ -632,7 +634,7 @@ func BenchmarkSimilaritiesHandler(b *testing.B) {
 
 注意 `simBlob` / `vec3` 的 `*testing.T` 形参要放宽为接口，否则 benchmark 传不进 `*testing.B`。改法：把两个辅助函数首参类型从 `*testing.T` 改为 `testing.TB`（`simBlob(t *testing.T, ...)` → `simBlob(tb testing.TB, ...)`），并把 Step 1 里所有 `simBlob(t, ...)` 调用保持不变（`*testing.T` 满足 `testing.TB`）。同时在 `internal/api/speaker_test.go` 的 import 块补 `"encoding/binary"` 与 `"math"`。
 
-Run: `go test ./internal/api/ -bench=BenchmarkSimilaritiesHandler -benchmem -run=^$`
+Run: `TEST_MYSQL_DSN="zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei_test?parseTime=true&charset=utf8mb4&multiStatements=true" go test ./internal/api/ -bench=BenchmarkSimilaritiesHandler -benchmem -run=^$`
 Expected: 打印 `BenchmarkSimilaritiesHandler-...  xxx ns/op`，记录数值。
 
 同时确认 `internal/api/speaker_test.go` 的 import 块含 `"encoding/binary"` 与 `"math"`（Step 1 的辅助函数要用）；缺则补上。
@@ -858,8 +860,10 @@ Expected: 无输出（成功）
 
 - [ ] **Step 2: 全量测试**
 
+> 同样必须带 `TEST_MYSQL_DSN`，理由同 Task 2 Step 6。
+
 Run: `TEST_MYSQL_DSN="zhiwei:zhiwei@tcp(127.0.0.1:3307)/zhiwei_test?parseTime=true&charset=utf8mb4&multiStatements=true" go test -p 2 -count=1 ./...`
-Expected: 全 ok
+Expected: 全 ok（无 `--- SKIP` 泛滥；个别 skip 须有明确原因，如缺 ffmpeg）
 
 > 若报 `no migration found for version 30` 之类——是并行分支把 `zhiwei_test_<pkg>` 库建到了更高的迁移版本。确认无并发 `go test` 进程后跑 `make init-testdb` 清库重来。
 
