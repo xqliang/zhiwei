@@ -14,6 +14,18 @@
 
 **跑测试的前置：** MySQL 需在跑（`zhiwei-mvp-mysql`，3307）。库被并行分支搞脏时先 `make init-testdb`。
 
+> **执行修正记录（2026-09-03）**——本计划初版有 5 处缺陷，均在 TDD 红阶段被测试抓出并修正。**以已提交代码为准，本文件的旧代码片段勿再照抄**：
+>
+> | # | 缺陷 | 实际修法 |
+> |---|---|--|
+> | a | 测试结构体 `AID, BID string` 一个 tag 只作用于末字段，`BID`/`BName` 取不到值 | 拆成独立 `a_id`/`b_id`/`a_name`/`b_name` |
+> | b | benchmark 传 `*testing.B` 给形参 `*testing.T` 编不过 | `repotest.DSN`/`ensureTestDB` 放宽为 `testing.TB`（该文件随之入提交） |
+> | c | handler 的 `len(v)==256` 硬门把 3 维测试向量全滤光 → 相似度全 null | 去掉硬门只留 `decodeEmbedding` 的 `ok` |
+> | d | `TestSimilaritiesReturnsAllPairs` 数据自相矛盾：断言 0.8/0.6，`vec3(0.6,0.8,0)` 只能算出 0.6/0 | 乙改为 `vec3(0.8,0,0.6)`（断言带意图注释，判为向量写错） |
+> | e | 未装配 `SpeakerEmbeddings` 的降级码：spec 与计划 prose 写 400，实际代码库既有 5 处站点全用 501 | 取 **501** 与既有约定一致；已回改 spec |
+>
+> 另：跑测试命令**必须带 `TEST_MYSQL_DSN`**，否则 `repotest.DSN` 静默 `t.Skip` 却报 ok（假通过）。
+
 ---
 
 ## 文件结构

@@ -61,6 +61,7 @@ func MaxCosine(a, b [][]float32) float64
 
   与 `match.go` 同域（相似度语义单一事实源）、只吃向量不碰 DB、可独立单测；`internal/api` 已 import `internal/voiceprint`（`h.Voiceprint voiceprint.Client`），无环。
 - **归属校验**：**不做 user 维度过滤**。speaker 域现有 `SpeakerRepo.List`（`speaker.go:56`）即「返回全部 active 说话人」，`Merge`/`Delete` 亦不按 user 过滤——凭空加一层会与全域不一致。与既有端点保持同样语义。
+- **未装配降级**：`SpeakerEmbeddings` 为 nil 时返回 **501 `StatusNotImplemented`**（非 400）——与本文件既有 5 处 nil 站点（`:177`/`:1081`/`:1116`/`:1199`/`:1234`）完全一致。⚠ 本 spec 初版此处误写 400，实现时按代码库既有约定取 501 并保留，特此更正。
 - **响应顺序**：按入参 `ids` 的字典序对生成（先固定 `ids` 升序，再 `for i<j`），保证同一份输入响应稳定（前端可缓存比对）。
 - **无数据库迁移。**
 
@@ -98,7 +99,7 @@ N=10、每人 10 样本 → C(10,2)=45 对 × 100 次 256 维点积 = 4500 次�
 | 某说话人 0 样本 | 该对 `similarity: null`，表格照常列出「无法比较（无样本）」 |
 | 相似度接口失败 | toast 提示 + **放行**，允许直接合并 |
 | `ids` <2 个 / 非法 id | 400，前端视为预检失败 → 放行（不阻断合并，与上同） |
-| `SpeakerEmbeddings` 未装配（nil） | 400，同上放行 |
+| `SpeakerEmbeddings` 未装配（nil） | **501** `StatusNotImplemented`（与既有 5 处 nil 站点一致） |
 | 勾选集合变化 | 重置 `spMergeSim`/`spMergeSimLoaded`，下次确认时重拉 |
 | 仅改 target（集合不变） | **不重拉**，复用已有矩阵 |
 
