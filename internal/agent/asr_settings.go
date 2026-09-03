@@ -34,8 +34,9 @@ func (h *AgentHandler) getASRSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"denoise_enabled":   st.DenoiseEnabled,
-		"denoise_atten_lim": st.DenoiseAttenLim,
+		"denoise_enabled":    st.DenoiseEnabled,
+		"denoise_atten_lim":  st.DenoiseAttenLim,
+		"denoise_voiceprint": st.DenoiseVoiceprint,
 	})
 }
 
@@ -53,8 +54,9 @@ func (h *AgentHandler) putASRSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		DenoiseEnabled  *bool    `json:"denoise_enabled"`
-		DenoiseAttenLim *float64 `json:"denoise_atten_lim"`
+		DenoiseEnabled    *bool    `json:"denoise_enabled"`
+		DenoiseAttenLim   *float64 `json:"denoise_atten_lim"`
+		DenoiseVoiceprint *bool    `json:"denoise_voiceprint"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
@@ -65,9 +67,12 @@ func (h *AgentHandler) putASRSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	enabled, atten := cur.DenoiseEnabled, cur.DenoiseAttenLim
+	enabled, atten, vp := cur.DenoiseEnabled, cur.DenoiseAttenLim, cur.DenoiseVoiceprint
 	if body.DenoiseEnabled != nil {
 		enabled = *body.DenoiseEnabled
+	}
+	if body.DenoiseVoiceprint != nil {
+		vp = *body.DenoiseVoiceprint
 	}
 	if body.DenoiseAttenLim != nil {
 		if *body.DenoiseAttenLim < repo.AsrDenoiseAttenRange[0] || *body.DenoiseAttenLim > repo.AsrDenoiseAttenRange[1] {
@@ -76,11 +81,11 @@ func (h *AgentHandler) putASRSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		atten = *body.DenoiseAttenLim
 	}
-	if err := h.AsrSettings.Upsert(r.Context(), uid, enabled, atten); err != nil {
+	if err := h.AsrSettings.Upsert(r.Context(), uid, enabled, atten, vp); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"denoise_enabled": enabled, "denoise_atten_lim": atten,
+		"denoise_enabled": enabled, "denoise_atten_lim": atten, "denoise_voiceprint": vp,
 	})
 }

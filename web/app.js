@@ -280,6 +280,26 @@ const app = createApp({
     }
     // 原始音频流式地址（ ServeAudio 端点）
     function audioUrl(id) { return '/api/sessions/' + id + '/audio'; }
+    // ---------- timeline 播放降噪预览（A/B 对照） ----------
+    // 勾选「降噪」→ POST /api/sessions/{id}/denoise-audio（按需生成降噪版，幂等：已存在秒回）
+    // → <audio> src 追加 ?denoised=1 播降噪版。降噪版与原始版时长一致（DFN 保时长），
+    // 逐段播放的 seek/到点暂停逻辑无需感知换源。
+    const denoisePreview = ref({});  // sid -> true：播降噪版
+    const denoiseBusy = ref({});     // sid -> true：降噪版生成中（首次勾选）
+    function audioSrcFor(s) { return audioUrl(s.id) + (denoisePreview.value[s.id] ? '?denoised=1' : ''); }
+    async function toggleDenoisePreview(s) {
+      if (denoiseBusy.value[s.id]) return;
+      if (!denoisePreview.value[s.id]) {
+        denoiseBusy.value[s.id] = true;
+        try {
+          await api('POST', '/api/sessions/' + s.id + '/denoise-audio');
+          denoisePreview.value[s.id] = true;
+        } catch (e) { showError(e); }
+        finally { denoiseBusy.value[s.id] = false; }
+      } else {
+        denoisePreview.value[s.id] = false; // 取消勾选 → 回原始音频（产物保留，再勾秒切）
+      }
+    }
     // ---------- 记忆忽略（2 步确认，时间线/主题内页/记忆 tab 共用） ----------
     // dismissingMemId = 待确认忽略的记忆 id。确认后 PATCH status=dismissed，再按当前视图 reload。
     const dismissingMemId = ref(null);
@@ -3109,7 +3129,7 @@ const app = createApp({
     // ---------- 设置：音频降噪（ASR 前 DeepFilterNet3 降噪；/api/agent/asr-settings） ----------
     // 后端契约：GET → {denoise_enabled, denoise_atten_lim}；PUT 指针合并，atten ∈[0,100] dB。
     // 降噪只作用于送 ASR 的音频（声纹仍用原始音频，保证与既有声纹库可比）；对新录音生效。
-    const asrCfg = ref({ denoise_enabled: false, denoise_atten_lim: 21 });
+    const asrCfg = ref({ denoise_enabled: false, denoise_atten_lim: 21, denoise_voiceprint: false });
     const asrSaving = ref(false);
     async function loadASRSettings() {
       try { asrCfg.value = Object.assign(asrCfg.value, await api('GET', '/api/agent/asr-settings')); }
@@ -3122,6 +3142,7 @@ const app = createApp({
         await api('PUT', '/api/agent/asr-settings', {
           denoise_enabled: asrCfg.value.denoise_enabled,
           denoise_atten_lim: asrCfg.value.denoise_atten_lim,
+          denoise_voiceprint: asrCfg.value.denoise_voiceprint,
         });
         notify('降噪设置已保存，新录音生效', 2000);
       } catch (e) { showError(e); }
@@ -3484,6 +3505,7 @@ const app = createApp({
       agentSearchEngine, agentSearchKey, agentSearchSaving, agentSearchSaved, agentSearchErr, saveAgentSearch,
       entCfg, entSaving, entList, entNewCanonical, entNewNote, entKindLabels, loadEntities, saveEntitySettings, addEntity, toggleEntity, removeEntity,
       asrCfg, asrSaving, loadASRSettings, saveASRSettings,
+      denoisePreview, denoiseBusy, audioSrcFor, toggleDenoisePreview,
       mcpServers, mcpForm, mcpErr, loadMCP, addMCP, toggleMCP, deleteMCP,
       agentSkills, skillSearchQ, skillResults, skillSearching, skillManual, skillErr, skillView, loadSkills, searchSkills, installSkill, toggleSkill, deleteSkill,
       confirmProposal, dismissProposal,

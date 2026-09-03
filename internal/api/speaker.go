@@ -21,6 +21,7 @@ import (
 
 	"zhiwei/internal/agent"
 	"zhiwei/internal/auth"
+	"zhiwei/internal/pipeline"
 	"zhiwei/internal/ids"
 	"zhiwei/internal/profile"
 	"zhiwei/internal/repo"
@@ -37,6 +38,10 @@ type SpeakerHandler struct {
 	VoiceprintThreshold float64 // 1:N 余弦匹配阈值（match 预览判定+展示用，0→兜底 0.8）
 
 	SpeakerEmbeddings *repo.SpeakerEmbeddingRepo // 多条声纹样本（nil = 未装配，条目功能降级，兼容旧装配/测试）
+
+	// ---- 声纹域降噪（asr_settings.denoise_voiceprint；nil = 未装配 → 全部用原始音频）----
+	AsrSettings *repo.AsrSettingsRepo // 用户降噪开关+强度
+	Denoise     pipeline.Denoiser    // 降噪实现（子进程 DeepFilterNet3）
 
 	SpeakerNameCandidates *repo.SpeakerNameCandidateRepo // 名字候选 repo（nil = 不富化/不清理，兼容旧装配）
 
@@ -344,7 +349,9 @@ func (h *SpeakerHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "转码失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	vec, err := h.Voiceprint.Embed(r.Context(), wav16)
+	embedSrc, cleanupDN := h.dnWAVForUpload(r.Context(), wav16) // 声纹域降噪（开关开才生效）
+	defer cleanupDN()
+	vec, err := h.Voiceprint.Embed(r.Context(), embedSrc)
 	if err != nil || len(vec) != 256 {
 		msg := "声纹提取失败"
 		if err != nil {
@@ -378,6 +385,31 @@ func (h *SpeakerHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, sp)
+}
+
+// dnWAVForUpload 上传类声纹入口（Enroll/AddEmbedding/MatchPreview）的声纹域降噪：
+// 用户开启 denoise_voiceprint → 对转码产物 wav16 先降噪（临时文件 wav16+".dn.wav"），
+// 返回 (实际提向路径, 清理函数)；未装配/未开启/失败一律降级原始 wav（尽力而为），
+// 清理函数为 noop。强度沿用 asr_settings.denoise_atten_lim。
+func (h *SpeakerHandler) dnWAVForUpload(ctx context.Context, wav16 string) (string, func()) {
+	noop := func() {}
+	if h.AsrSettings == nil || h.Denoise == nil {
+		return wav16, noop
+	}
+	uid, ok := auth.UserID(ctx)
+	if !ok {
+		return wav16, noop
+	}
+	st, err := h.AsrSettings.Get(ctx, uid.Int64())
+	if err != nil || !st.DenoiseVoiceprint {
+		return wav16, noop
+	}
+	dn := wav16 + ".dn.wav"
+	if _, err := pipeline.EnsureDenoisedWAV(ctx, h.Denoise, wav16, dn, st.DenoiseAttenLim); err != nil {
+		log.Printf("[speaker] 声纹域降噪失败（降级原始音频）: %v", err)
+		return wav16, noop
+	}
+	return dn, func() { _ = os.Remove(dn) }
 }
 
 func transcodeEnroll(src, dst string) error {
@@ -819,6 +851,21 @@ func (h *SpeakerHandler) EnrollFromSegment(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "转码音频未找到（需先完成 ASR）", http.StatusNotFound)
 		return
 	}
+	// 声纹域降噪（asr_settings.denoise_voiceprint）：开启后切片源换降噪版——与 speaker
+	// stage 自动登记同一产物文件（pipeline.DenoisedWAVPath），无则现场生成（幂等复用），
+	// 失败降级原始音频。与库内向量的域一致性由同一开关统一决定。
+	if h.AsrSettings != nil && h.Denoise != nil {
+		if uid, ok := auth.UserID(r.Context()); ok {
+			if st, err := h.AsrSettings.Get(r.Context(), uid.Int64()); err == nil && st.DenoiseVoiceprint {
+				dn := pipeline.DenoisedWAVPath(h.DataDir, sid)
+				if _, err := pipeline.EnsureDenoisedWAV(r.Context(), h.Denoise, wavPath, dn, st.DenoiseAttenLim); err != nil {
+					log.Printf("[speaker] 段录入声纹域降噪失败（降级原始音频）: %v", err)
+				} else {
+					wavPath = dn
+				}
+			}
+		}
+	}
 	tmpDir := filepath.Join(h.DataDir, "enroll")
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		http.Error(w, "存储目录创建失败", http.StatusInternalServerError)
@@ -1084,7 +1131,9 @@ func (h *SpeakerHandler) embedUploaded(ctx context.Context, file io.Reader) ([]f
 	if err := transcodeEnroll(src, wav16); err != nil {
 		return nil, fmt.Errorf("转码失败: %w", err)
 	}
-	vec, err := h.Voiceprint.Embed(ctx, wav16)
+	embedSrc, cleanupDN := h.dnWAVForUpload(ctx, wav16) // 声纹域降噪（开关开才生效）
+	defer cleanupDN()
+	vec, err := h.Voiceprint.Embed(ctx, embedSrc)
 	if err != nil || len(vec) != 256 {
 		msg := "声纹提取失败"
 		if err != nil {
@@ -1196,7 +1245,9 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "转码失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	vec, err := h.Voiceprint.Embed(r.Context(), wav16)
+	embedSrc, cleanupDN := h.dnWAVForUpload(r.Context(), wav16) // 声纹域降噪（开关开才生效）
+	defer cleanupDN()
+	vec, err := h.Voiceprint.Embed(r.Context(), embedSrc)
 	if err != nil || len(vec) != 256 {
 		msg := "声纹提取失败"
 		if err != nil {

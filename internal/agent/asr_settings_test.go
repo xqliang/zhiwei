@@ -47,26 +47,27 @@ func TestASRSettingsAPI(t *testing.T) {
 		t.Fatalf("GET code=%d body=%s", rec.Code, rec.Body.String())
 	}
 	var got struct {
-		DenoiseEnabled  bool    `json:"denoise_enabled"`
-		DenoiseAttenLim float64 `json:"denoise_atten_lim"`
+		DenoiseEnabled    bool    `json:"denoise_enabled"`
+		DenoiseAttenLim   float64 `json:"denoise_atten_lim"`
+		DenoiseVoiceprint bool    `json:"denoise_voiceprint"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.DenoiseEnabled || got.DenoiseAttenLim != 21 {
-		t.Fatalf("默认应为 关+21dB: %s", rec.Body.String())
+	if got.DenoiseEnabled || got.DenoiseAttenLim != 21 || got.DenoiseVoiceprint {
+		t.Fatalf("默认应为 关+21dB+声纹关: %s", rec.Body.String())
 	}
 
 	// 2) PUT 全量保存 → 读回。
 	rec = doASR(h, uid, "PUT", "/api/agent/asr-settings",
-		`{"denoise_enabled":true,"denoise_atten_lim":35}`)
+		`{"denoise_enabled":true,"denoise_atten_lim":35,"denoise_voiceprint":true}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT code=%d body=%s", rec.Code, rec.Body.String())
 	}
 	rec = doASR(h, uid, "GET", "/api/agent/asr-settings", "")
 	json.Unmarshal(rec.Body.Bytes(), &got)
-	if !got.DenoiseEnabled || got.DenoiseAttenLim != 35 {
-		t.Fatalf("保存后应为 开+35dB: %s", rec.Body.String())
+	if !got.DenoiseEnabled || got.DenoiseAttenLim != 35 || !got.DenoiseVoiceprint {
+		t.Fatalf("保存后应为 开+35dB+声纹开: %s", rec.Body.String())
 	}
 
 	// 3) PUT 指针合并：只传 enabled，强度保持 35。
@@ -76,8 +77,8 @@ func TestASRSettingsAPI(t *testing.T) {
 	}
 	rec = doASR(h, uid, "GET", "/api/agent/asr-settings", "")
 	json.Unmarshal(rec.Body.Bytes(), &got)
-	if got.DenoiseEnabled || got.DenoiseAttenLim != 35 {
-		t.Fatalf("合并后应为 关+35dB: %s", rec.Body.String())
+	if got.DenoiseEnabled || got.DenoiseAttenLim != 35 || !got.DenoiseVoiceprint {
+		t.Fatalf("合并后应为 关+35dB+声纹开（未传字段保持现值）: %s", rec.Body.String())
 	}
 
 	// 4) 强度越界 → 400（不落库）。
@@ -87,7 +88,7 @@ func TestASRSettingsAPI(t *testing.T) {
 	}
 	rec = doASR(h, uid, "GET", "/api/agent/asr-settings", "")
 	json.Unmarshal(rec.Body.Bytes(), &got)
-	if got.DenoiseAttenLim != 35 {
+	if got.DenoiseAttenLim != 35 || !got.DenoiseVoiceprint {
 		t.Fatalf("越界请求不应改值: %s", rec.Body.String())
 	}
 

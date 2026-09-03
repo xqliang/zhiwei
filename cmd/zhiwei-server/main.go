@@ -345,10 +345,14 @@ func main() {
 		SpeakerNameCandidates: nameCandidates,
 		VoiceprintThreshold:   cfg.VoiceprintThreshold, // timeline 列表「整段声纹」两级判定用
 		SpeakerEmbeddings:     speakerEmbeddings,       // 多向量匹配（每人任意样本命中即命中）
+		DataDir:               cfg.DataDir,             // 降噪播放预览（?denoised=1 + 按需生成）
+		AsrSettings:           asrSettings,             // 预览生成用用户降噪强度
+		Denoise:               denoiser,                // DeepFilterNet3（与流水线同一实例）
 	})
 	api.RegisterSpeaker(r, &api.SpeakerHandler{
 		Speakers: speakers, Transcripts: transcripts,
 		Voiceprint: voiceprintCli, DataDir: cfg.DataDir,
+		AsrSettings: asrSettings, Denoise: denoiser, // 声纹域降噪（录入/添加/对比按用户开关）
 		SpeakerEmbeddings:     speakerEmbeddings,
 		EnrollMinDurationMS:   cfg.EnrollMinDurationMS,
 		VoiceprintThreshold:   cfg.VoiceprintThreshold,

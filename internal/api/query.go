@@ -7,8 +7,10 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -24,10 +26,10 @@ type QueryHandler struct {
 	Sessions    *repo.SessionRepo
 	Jobs        *repo.JobRepo
 	Transcripts *repo.TranscriptRepo
-	Memories    *repo.MemoryRepo  // Sprint 2：详情附带 memory 卡片
-	Todos       *repo.TodoRepo    // Sprint 2：详情附带 todo 卡片
+	Memories    *repo.MemoryRepo          // Sprint 2：详情附带 memory 卡片
+	Todos       *repo.TodoRepo            // Sprint 2：详情附带 todo 卡片
 	ChangeLogs  *repo.PersonChangeLogRepo // 详情附带该录音触发的 profile 平面变更（entity_kind 覆盖 8 平面）
-	Speakers    *repo.SpeakerRepo // speaker stage：详情附带段说话人 + speakers 列表
+	Speakers    *repo.SpeakerRepo         // speaker stage：详情附带段说话人 + speakers 列表
 
 	SpeakerStates *repo.SpeakerSessionStateRepo // 说话人情绪状态（audioscene stage 落库；nil=不返回该字段）
 
@@ -43,6 +45,11 @@ type QueryHandler struct {
 	// SpeakerEmbeddings 多条声纹样本 repo（多向量匹配：每人任意一条样本命中即命中；
 	// nil = 未装配，回退聚合代表单向量，兼容旧装配/测试）
 	SpeakerEmbeddings *repo.SpeakerEmbeddingRepo
+
+	// ---- 降噪音频预览（timeline 播放 A/B；nil = 未装配 → ?denoised 恒 404）----
+	DataDir     string                // 转码/降噪产物根目录（transcoded/{sid}*.wav）
+	AsrSettings *repo.AsrSettingsRepo // 用户降噪强度（按需生成用）
+	Denoise     pipeline.Denoiser     // 降噪实现（子进程 DeepFilterNet3）
 }
 
 // RegisterQuery 挂载查询路由。
@@ -54,6 +61,7 @@ func RegisterQuery(r chi.Router, h *QueryHandler) {
 	r.Post("/api/sessions/{id}/reidentify", h.Reidentify) // timeline「重新识别」：清空说话人归属+重跑 speaker stage
 	r.Delete("/api/sessions/{id}", h.DeleteSession)
 	r.Get("/api/sessions/{id}/audio", h.ServeAudio)
+	r.Post("/api/sessions/{id}/denoise-audio", h.DenoiseAudio) // timeline 播放降噪预览：按需生成降噪版（幂等）
 	r.Post("/api/jobs/{id}/retry", h.RetryJob)
 }
 
@@ -63,6 +71,7 @@ func RegisterQuery(r chi.Router, h *QueryHandler) {
 //   - 整段只有 1 个 ASR 说话人标签 → 用全部段向量均值（≈整段代表声纹）与全库比对；
 //   - 多人 → 用时长最长的一段（有向量的）比对——该段最能代表主要说话人；
 //   - 判定与 speaker stage 同一套两级规则（voiceprint.Matched：≥阈值 或 ≥0.72 且领先 0.06）。
+//
 // 只读展示、不改实际归属；段向量缺失（存量会话）或声纹库为空时无此字段。
 // asr_full 不外泄（json:"-"），仅截断后以 asr_preview 输出。
 func (h *QueryHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
@@ -76,14 +85,14 @@ func (h *QueryHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 	limit := intQuery(r, "limit", 50)
 	type row struct {
 		repo.AudioSession
-		JobStatus     string `json:"job_status,omitempty"`
-		JobStage      string `json:"job_stage,omitempty"`
-		JobStageLabel string `json:"job_stage_label,omitempty"` // stage 中文名（pipeline.StageLabel，前端 badge 直接展示）
-		MemoryCount int    `db:"memory_count" json:"memory_count"`
-		TodoCount   int    `db:"todo_count" json:"todo_count"`
-		AsrFull     string `db:"asr_full" json:"-"` // GROUP_CONCAT 全文，截断后给 AsrPreview
-		AsrPreview  string `db:"-" json:"asr_preview"`
-		VoiceTop    *voiceTopView `db:"-" json:"voice_top,omitempty"`
+		JobStatus     string        `json:"job_status,omitempty"`
+		JobStage      string        `json:"job_stage,omitempty"`
+		JobStageLabel string        `json:"job_stage_label,omitempty"` // stage 中文名（pipeline.StageLabel，前端 badge 直接展示）
+		MemoryCount   int           `db:"memory_count" json:"memory_count"`
+		TodoCount     int           `db:"todo_count" json:"todo_count"`
+		AsrFull       string        `db:"asr_full" json:"-"` // GROUP_CONCAT 全文，截断后给 AsrPreview
+		AsrPreview    string        `db:"-" json:"asr_preview"`
+		VoiceTop      *voiceTopView `db:"-" json:"voice_top,omitempty"`
 	}
 	var rows []row
 	err := h.Sessions.DB.SelectContext(r.Context(), &rows, `
@@ -130,7 +139,7 @@ FROM audio_session s WHERE s.user_id = ? ORDER BY s.id DESC LIMIT ?`, uid.Int64(
 
 // voiceTopView timeline 卡片的「整段声纹」信息。
 type voiceTopView struct {
-	Basis string       `json:"basis"`           // whole=整段（单人）/ longest=最长段（多人）
+	Basis string `json:"basis"` // whole=整段（单人）/ longest=最长段（多人）
 	// Matches 与全库声纹的 top-3 余弦相似（降序；声纹库不足 3 人则更少）
 	Matches []voiceMatch `json:"matches"`
 	// Matched 三级规则（voiceprint.Matched）是否判定命中；Rule 给出命中依据
@@ -184,8 +193,8 @@ func (h *QueryHandler) enrichVoiceTops(ctx context.Context, sids []ids.ID) map[i
 
 	// 第一遍：逐会话定基准（whole/longest），收集需要取向量的段 id
 	type plan struct {
-		basis   string   // whole=整段（单人）/ longest=最长段（多人）
-		segIDs  []ids.ID // 需要向量的段（whole=全部有向量的段；longest=选出的那一段）
+		basis  string   // whole=整段（单人）/ longest=最长段（多人）
+		segIDs []ids.ID // 需要向量的段（whole=全部有向量的段；longest=选出的那一段）
 	}
 	plans := map[ids.ID]*plan{}
 	var wantIDs []ids.ID
@@ -835,10 +844,67 @@ func (h *QueryHandler) ServeAudio(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session 不存在", http.StatusNotFound)
 		return
 	}
+	// ?denoised=1：播降噪版（timeline「降噪」勾选）。产物由 POST denoise-audio 按需生成
+	//（或流水线在降噪开启时顺带产出）；无产物 404——前端勾选时先 POST 再换 src，正常
+	// 流程不会走到这里，走到说明产物被删（提示重新勾选/重开预览即可恢复）。
+	if r.URL.Query().Get("denoised") == "1" {
+		dn := pipeline.DenoisedWAVPath(h.DataDir, sid)
+		if _, err := os.Stat(dn); err != nil {
+			http.Error(w, "降噪版未生成（请先勾选降噪预览触发生成）", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "audio/wav")
+		http.ServeFile(w, r, dn)
+		return
+	}
 	if s.Mime != "" {
 		w.Header().Set("Content-Type", s.Mime)
 	}
 	http.ServeFile(w, r, s.StoragePath)
+}
+
+// DenoiseAudio 按需生成该 session 的降噪版音频（幂等：已存在秒回）。
+// timeline 播放「降噪」勾选首次触发；强度用用户当前 asr_settings.denoise_atten_lim。
+// 同步生成（DeepFilterNet3 RTF≈0.036，几分钟录音约数秒）；产物持久保留供播放复用。
+func (h *QueryHandler) DenoiseAudio(w http.ResponseWriter, r *http.Request) {
+	uid, ok := auth.UserID(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	sid, err := ids.ParseID(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.Sessions.Get(r.Context(), uid.Int64(), sid); err != nil {
+		http.Error(w, "session 不存在", http.StatusNotFound)
+		return
+	}
+	if h.Denoise == nil || h.AsrSettings == nil || h.DataDir == "" {
+		http.Error(w, "降噪未装配", http.StatusServiceUnavailable)
+		return
+	}
+	wavPath := filepath.Join(h.DataDir, "transcoded", sid.String()+".wav")
+	if _, err := os.Stat(wavPath); err != nil {
+		http.Error(w, "转码音频未找到（需先完成 ASR）", http.StatusNotFound)
+		return
+	}
+	st, err := h.AsrSettings.Get(r.Context(), uid.Int64())
+	if err != nil {
+		http.Error(w, "读降噪设置失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	begin := time.Now()
+	gen, err := pipeline.EnsureDenoisedWAV(r.Context(), h.Denoise, wavPath, pipeline.DenoisedWAVPath(h.DataDir, sid), st.DenoiseAttenLim)
+	if err != nil {
+		http.Error(w, "降噪生成失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if gen {
+		log.Printf("[api] session=%s 播放降噪预览生成耗时=%s", sid, time.Since(begin).Round(time.Millisecond))
+	}
+	writeJSON(w, map[string]any{"ok": true, "generated": gen})
 }
 
 // speakerLabelName "1" -> "说话人 1"；空标签 -> "未知说话人"。

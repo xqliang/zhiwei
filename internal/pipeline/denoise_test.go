@@ -72,7 +72,7 @@ func seedASRDenoiseSession(t *testing.T, enabled bool, atten float64) (ids.ID, *
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := asrSettings.Upsert(ctx, 1, enabled, atten); err != nil {
+	if err := asrSettings.Upsert(ctx, 1, enabled, atten, false); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -176,5 +176,67 @@ func TestStageASRDenoiseFailureFallsBack(t *testing.T) {
 	segs, _ := transcripts.ListSegments(context.Background(), tr.ID)
 	if len(segs) == 0 {
 		t.Fatal("降级路径下转写段应正常落库")
+	}
+}
+
+// TestVoiceprintWAVForStage 声纹域开关：denoise_voiceprint 开 → 返回降噪产物路径
+//（无则生成、幂等）；关 → 原始 wav 不动；降噪失败 → 降级原始 wav。
+func TestVoiceprintWAVForStage(t *testing.T) {
+	sid, transcripts, asrSettings, dataDir := seedASRDenoiseSession(t, false, 25)
+	ctx := context.Background()
+	db := transcripts.DB
+	// 造 transcoded wav（生成源）
+	tDir := filepath.Join(dataDir, "transcoded")
+	if err := os.MkdirAll(tDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := filepath.Join(tDir, sid.String()+".wav")
+	if err := os.WriteFile(orig, []byte("orig"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dn := newFakeDenoiser(false)
+	failDN := newFakeDenoiser(true)
+	baseD := StageDeps{
+		Sessions: &repo.SessionRepo{DB: db}, DataDir: dataDir,
+		AsrSettings: asrSettings,
+	}
+
+	// 1) 开关关（seed 默认 false）→ 原始路径、不调降噪
+	got := voiceprintWAVForStage(ctx, baseD, sid, orig)
+	if got != orig || len(dn.calls) != 0 {
+		t.Fatalf("开关关应返回原始 wav 且不降噪，got=%v calls=%d", got, len(dn.calls))
+	}
+	// 2) 开关开 → 生成降噪产物并返回其路径（强度用用户设置 25）
+	if err := asrSettings.Upsert(ctx, 1, false, 25, true); err != nil {
+		t.Fatal(err)
+	}
+	d := baseD
+	d.Denoise = dn
+	got = voiceprintWAVForStage(ctx, d, sid, orig)
+	want := filepath.Join(tDir, sid.String()+".denoised.wav")
+	if got != want {
+		t.Fatalf("开关开应返回降噪产物 %s，实际 %s", want, got)
+	}
+	if len(dn.calls) != 1 || dn.calls[0].atten != 25 || dn.calls[0].src != orig {
+		t.Fatalf("降噪调用不符（强度应 25）: %+v", dn.calls)
+	}
+	// 3) 幂等：再调一次不重复生成
+	got = voiceprintWAVForStage(ctx, d, sid, orig)
+	if got != want || len(dn.calls) != 1 {
+		t.Fatalf("幂等应复用产物，got=%v calls=%d", got, len(dn.calls))
+	}
+	// 4) 降噪失败 → 降级原始 wav
+	d2 := baseD
+	d2.Denoise = failDN
+	os.Remove(want)
+	got = voiceprintWAVForStage(ctx, d2, sid, orig)
+	if got != orig {
+		t.Fatalf("失败应降级原始 wav，实际 %s", got)
+	}
+	// 5) 依赖未装配（Denoise nil）→ 原始 wav（兼容旧装配/测试）
+	d3 := baseD
+	got = voiceprintWAVForStage(ctx, d3, sid, orig)
+	if got != orig {
+		t.Fatalf("未装配应原始 wav，实际 %s", got)
 	}
 }

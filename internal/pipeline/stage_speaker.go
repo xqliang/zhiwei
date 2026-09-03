@@ -57,6 +57,9 @@ func runSpeakerStage(ctx context.Context, d StageDeps, sessionID ids.ID, tr *rep
 	defer os.RemoveAll(sliceDir) // 清理切片（best-effort）
 
 	wavPath := filepath.Join(d.DataDir, "transcoded", sessionID.String()+".wav")
+	// 声纹域降噪（asr_settings.denoise_voiceprint）：开启后本 stage 的切片提向/检索
+	// 基准/自动登记全部改用降噪版音频（无则现场生成）。见 voiceprintWAVForStage。
+	wavPath = voiceprintWAVForStage(ctx, d, sessionID, wavPath)
 	threshold := d.VoiceprintThreshold
 	if threshold == 0 {
 		threshold = 0.8 // 同一人判定阈值：cosine ≥ 0.8 视为同人，否则登记新声纹

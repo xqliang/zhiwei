@@ -525,7 +525,14 @@
 
         <!-- 就地展开的转写详情 -->
         <div v-if="expandedId===s.id" class="card detail" style="margin-top:-2px">
-          <audio ref="sessionAudioEl" :src="audioUrl(s.id)" controls preload="none" style="width:100%; margin:6px 0 10px" @timeupdate="onTimelineAudioTimeUpdate"></audio>
+          <div style="display:flex; align-items:center; gap:10px; margin:6px 0 10px">
+            <audio ref="sessionAudioEl" :src="audioSrcFor(s)" controls preload="none" style="flex:1; min-width:0" @timeupdate="onTimelineAudioTimeUpdate"></audio>
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-size:var(--fs-sm); white-space:nowrap"
+                   :title="'勾选后播放降噪版（DeepFilterNet3，与送 ASR 的降噪同源）——首次勾选按需生成约数秒，之后秒切。' + (denoiseBusy[s.id] ? '正在生成…' : '对照原始/降噪效果' )">
+              <input type="checkbox" :checked="!!denoisePreview[s.id]" :disabled="!!denoiseBusy[s.id]" @change="toggleDenoisePreview(s)">
+              {{ denoiseBusy[s.id] ? '生成中…' : '降噪' }}
+            </label>
+          </div>
           <!-- 声学环境徽章（audioscene stage 产出；有值才显）：场景/背景音/天气/整体氛围 -->
           <div v-if="detail && (detail.acoustic_scene || (envSounds(detail.background_sounds).length) || detail.overall_mood)" class="agent-env-bar" style="margin-bottom:8px">
             <span v-if="detail.acoustic_scene" class="chip chip-ro">📍 {{ detail.acoustic_scene }}</span>
@@ -1116,10 +1123,15 @@
           强度
           <input class="txt" type="number" v-model.number="asrCfg.denoise_atten_lim" min="0" max="100" step="1" style="width:64px"> dB
         </label>
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:var(--fs-sm); font-weight:600"
+               title="开启后声纹的自动录入（录音识别）、手动添加（段录音纹/上传录音）、对比检索全部先用降噪音频提取。嘈杂环境下声纹更准；对干净录音几乎无影响。切换后建议对重要人物重新录一次声纹以统一声纹域。">
+          <input type="checkbox" v-model="asrCfg.denoise_voiceprint"> 声纹降噪
+        </label>
         <button class="btn primary" @click="saveASRSettings" :disabled="asrSaving">{{ asrSaving ? '保存中…' : '保存设置' }}</button>
       </div>
       <div class="muted" style="font-size:var(--fs-xs); margin-top:8px">
         强度即 DeepFilterNet 的衰减上限（dB）：越大降噪越强。轻噪 12 · 常规 21 · 强噪 40。过度降噪可能损伤语音细节，建议从 21 起按效果微调。
+        「声纹降噪」开启后，声纹录入/添加/对比也先用降噪音频（对干净录音几乎无影响；切换后重要人物建议重录声纹）。
       </div>
     </div>
 
@@ -2787,6 +2799,6 @@
   </template>
 </div>
 
-<script src="/app/app.5f2929b8.js"></script>
+<script src="/app/app.69b25d4e.js"></script>
 </body>
 </html>

@@ -28,28 +28,28 @@ func TestAsrSettingsRepo(t *testing.T) {
 	}
 
 	// 2) Upsert 后读回。
-	if err := r.Upsert(ctx, uid, true, 35.5); err != nil {
+	if err := r.Upsert(ctx, uid, true, 35.5, true); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	s, _ = r.Get(ctx, uid)
-	if !s.DenoiseEnabled || s.DenoiseAttenLim != 35.5 {
+	if !s.DenoiseEnabled || s.DenoiseAttenLim != 35.5 || !s.DenoiseVoiceprint {
 		t.Fatalf("读回不符: %+v", s)
 	}
 	// 3) 再 Upsert 覆盖（单行更新而非新行）。
-	if err := r.Upsert(ctx, uid, false, 12); err != nil {
+	if err := r.Upsert(ctx, uid, false, 12, false); err != nil {
 		t.Fatalf("Upsert 覆盖: %v", err)
 	}
 	var n int
 	_ = db.Get(&n, "SELECT COUNT(*) FROM asr_settings WHERE user_id = ?", uid)
 	s, _ = r.Get(ctx, uid)
-	if n != 1 || s.DenoiseEnabled || s.DenoiseAttenLim != 12 {
-		t.Fatalf("覆盖后应单行且值为 关+12: n=%d %+v", n, s)
+	if n != 1 || s.DenoiseEnabled || s.DenoiseAttenLim != 12 || s.DenoiseVoiceprint {
+		t.Fatalf("覆盖后应单行且值为 关+12+声纹关: n=%d %+v", n, s)
 	}
 	// 4) 强度越界被拒绝。
-	if err := r.Upsert(ctx, uid, true, -1); err == nil {
+	if err := r.Upsert(ctx, uid, true, -1, false); err == nil {
 		t.Fatal("强度 -1 应被拒绝")
 	}
-	if err := r.Upsert(ctx, uid, true, 101); err == nil {
+	if err := r.Upsert(ctx, uid, true, 101, false); err == nil {
 		t.Fatal("强度 101 应被拒绝")
 	}
 }
