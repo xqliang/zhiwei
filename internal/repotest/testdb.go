@@ -48,7 +48,9 @@ import (
 // 建库权限：init-testdb 给 zhiwei 用户授予 `zhiwei_test_%`.* 通配符权限——MySQL
 // 通配符 GRANT 对「尚不存在」的库也生效，故此处懒建 zhiwei_test_<pkg> 时 zhiwei
 // 用户已有 CREATE/全权限，无需 root。
-func DSN(t *testing.T) string {
+// 形参用 testing.TB（而非 *testing.T）：benchmark（*testing.B）也要用隔离测试库，
+// 二者都满足 TB；本函数只用到 Helper/Skip/Fatalf，均在 TB 接口上，widening 无副作用。
+func DSN(t testing.TB) string {
 	t.Helper()
 	raw := os.Getenv("TEST_MYSQL_DSN")
 	if raw == "" {
@@ -88,7 +90,7 @@ var dbReady sync.Map // map[string]*sync.Once
 
 // ensureTestDB 对 cfg.DBName 指向的隔离库执行「建库(幂等) + 迁移(幂等)」，仅一次。
 // 失败经 t.Fatalf 终止调用方测试（不返回 error——调用点都是测试内，直接失败最清晰）。
-func ensureTestDB(t *testing.T, cfg *mysql.Config) {
+func ensureTestDB(t testing.TB, cfg *mysql.Config) {
 	t.Helper()
 	onceAny, _ := dbReady.LoadOrStore(cfg.DBName, &sync.Once{})
 	var setupErr error

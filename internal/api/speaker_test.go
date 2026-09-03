@@ -3,9 +3,11 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -1061,5 +1063,273 @@ func TestDeleteSpeakerCascade(t *testing.T) {
 	}
 	if got, _ := persons.Get(ctx, 1, p2.ID); got == nil || got.Status == "dismissed" {
 		t.Fatalf("有确认提示时人物不应被 dismiss，实际 %+v", got)
+	}
+}
+
+// --- 声纹合并相似度预检（POST /api/speakers/similarities） ---
+
+// simBlob 把 float32 切片编码成 DB 存的 LONGBLOB（小端），与 decodeEmbedding 互逆。
+// 形参用 testing.TB 而非 *testing.T：Step 7 的 benchmark 也要复用它（*testing.B 满足 TB）。
+func simBlob(tb testing.TB, v []float32) []byte {
+	tb.Helper()
+	b := make([]byte, len(v)*4)
+	for i, f := range v {
+		binary.LittleEndian.PutUint32(b[i*4:], math.Float32bits(f))
+	}
+	return b
+}
+
+// vec3 造 3 维 L2 归一化向量（点积即余弦），避开 256 维手写。
+// a1={1,0,0} a2={0,1,0}；b1={0.6,0.8,0} b2={0,0,1} b3={0.8,0.6,0}。
+// MaxCosine(a,b)=0.8（a1·b3 与 a2·b1 同为 0.8，b2 正交不得当选）。
+func vec3(x, y, z float32) []float32 {
+	n := float32(math.Sqrt(float64(x*x + y*y + z*z)))
+	return []float32{x / n, y / n, z / n}
+}
+
+func setupSimilaritiesAPI(t *testing.T) (http.Handler, *repo.SpeakerRepo, *repo.SpeakerEmbeddingRepo) {
+	t.Helper()
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ids.InitForTest(); err != nil {
+		t.Fatal(err)
+	}
+	speakers := &repo.SpeakerRepo{DB: db}
+	embeddings := &repo.SpeakerEmbeddingRepo{DB: db}
+	r := chi.NewRouter()
+	RegisterSpeaker(r, &SpeakerHandler{Speakers: speakers, Voiceprint: fakeVoiceprintAPI{}, DataDir: t.TempDir(), SpeakerEmbeddings: embeddings})
+	return r, speakers, embeddings
+}
+
+// newSimSpeaker 建说话人并写一条样本，返回 id。
+func newSimSpeaker(t *testing.T, ctx context.Context, r *repo.SpeakerRepo, emb *repo.SpeakerEmbeddingRepo, name string, v []float32) ids.ID {
+	t.Helper()
+	sp := &repo.Speaker{Name: name, Source: "auto"}
+	if err := r.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	if err := emb.Create(ctx, &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: simBlob(t, v), SampleCount: 1, Source: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	return sp.ID
+}
+
+func postSimilarities(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/speakers/similarities", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestSimilaritiesReturnsAllPairs(t *testing.T) {
+	h, speakers, emb := setupSimilaritiesAPI(t)
+	ctx := context.Background()
+	a := newSimSpeaker(t, ctx, speakers, emb, "甲", vec3(1, 0, 0))
+	b := newSimSpeaker(t, ctx, speakers, emb, "乙", vec3(0.8, 0, 0.6))
+	c := newSimSpeaker(t, ctx, speakers, emb, "丙", vec3(0, 0, 1))
+
+	rec := postSimilarities(t, h, fmt.Sprintf(`{"ids":["%s","%s","%s"]}`, a, b, c))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Pairs []struct {
+			AID        string   `json:"a_id"`
+			BID        string   `json:"b_id"`
+			AName      string   `json:"a_name"`
+			BName      string   `json:"b_name"`
+			Similarity *float64 `json:"similarity"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	// 3 个说话人 → C(3,2)=3 对，行数恒定不依赖谁是 target
+	if len(resp.Pairs) != 3 {
+		t.Fatalf("pairs=%d want 3: %s", len(resp.Pairs), rec.Body.String())
+	}
+	// 按 id 升序生成，响应确定
+	if resp.Pairs[0].AID != a.String() || resp.Pairs[0].BID != b.String() {
+		t.Fatalf("首对应为 甲×乙，实为 %s×%s", resp.Pairs[0].AID, resp.Pairs[0].BID)
+	}
+	if resp.Pairs[0].AName != "甲" || resp.Pairs[0].BName != "乙" {
+		t.Fatalf("名字未带出: %+v", resp.Pairs[0])
+	}
+	// 甲×乙 = 0.8（多样本取 max 口径）
+	if resp.Pairs[0].Similarity == nil || math.Abs(*resp.Pairs[0].Similarity-0.8) > 1e-6 {
+		t.Fatalf("甲×乙 similarity=%v want 0.8", resp.Pairs[0].Similarity)
+	}
+	// 甲×丙 正交 = 0；乙×丙 = 0.6
+	if resp.Pairs[1].Similarity == nil || math.Abs(*resp.Pairs[1].Similarity) > 1e-6 {
+		t.Fatalf("甲×丙 similarity=%v want 0", resp.Pairs[1].Similarity)
+	}
+	if resp.Pairs[2].Similarity == nil || math.Abs(*resp.Pairs[2].Similarity-0.6) > 1e-6 {
+		t.Fatalf("乙×丙 similarity=%v want 0.6", resp.Pairs[2].Similarity)
+	}
+}
+
+func TestSimilaritiesDedupesIDs(t *testing.T) {
+	h, speakers, emb := setupSimilaritiesAPI(t)
+	ctx := context.Background()
+	a := newSimSpeaker(t, ctx, speakers, emb, "甲", vec3(1, 0, 0))
+	b := newSimSpeaker(t, ctx, speakers, emb, "乙", vec3(0, 1, 0))
+
+	// 重复 id 必须去重，否则行数会翻倍
+	rec := postSimilarities(t, h, fmt.Sprintf(`{"ids":["%s","%s","%s","%s"]}`, a, b, a, b))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Pairs []map[string]any `json:"pairs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Pairs) != 1 {
+		t.Fatalf("去重后期望 1 对，实为 %d 对: %s", len(resp.Pairs), rec.Body.String())
+	}
+}
+
+func TestSimilaritiesRejectsTooFewIDs(t *testing.T) {
+	h, speakers, emb := setupSimilaritiesAPI(t)
+	ctx := context.Background()
+	a := newSimSpeaker(t, ctx, speakers, emb, "甲", vec3(1, 0, 0))
+
+	for _, body := range []string{
+		`{"ids":[]}`,
+		fmt.Sprintf(`{"ids":["%s"]}`, a),
+	} {
+		rec := postSimilarities(t, h, body)
+		if rec.Code != 400 {
+			t.Fatalf("body=%s → code=%d want 400 (body=%s)", body, rec.Code, rec.Body.String())
+		}
+	}
+	// 非法 id 字符串同样 400
+	rec := postSimilarities(t, h, fmt.Sprintf(`{"ids":["%s","not-an-id"]}`, a))
+	if rec.Code != 400 {
+		t.Fatalf("非法 id → code=%d want 400", rec.Code)
+	}
+}
+
+// TestSimilaritiesNullForSpeakerWithoutSamples 无样本的说话人：该对 similarity 为 null
+// 而非 0——0 会被读成「完全不相似」，null 才表达「不可比」（spec §7）。
+func TestSimilaritiesNullForSpeakerWithoutSamples(t *testing.T) {
+	h, speakers, emb := setupSimilaritiesAPI(t)
+	ctx := context.Background()
+	a := newSimSpeaker(t, ctx, speakers, emb, "甲", vec3(1, 0, 0))
+	// 乙：建了说话人但不写样本
+	bare := &repo.Speaker{Name: "乙", Source: "auto"}
+	if err := speakers.Create(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := postSimilarities(t, h, fmt.Sprintf(`{"ids":["%s","%s"]}`, a, bare.ID))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Pairs []struct {
+			Similarity *float64 `json:"similarity"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Pairs) != 1 {
+		t.Fatalf("期望 1 对，实为 %d", len(resp.Pairs))
+	}
+	if resp.Pairs[0].Similarity != nil {
+		t.Fatalf("无样本对应为 null，实为 %v", *resp.Pairs[0].Similarity)
+	}
+	// 行数仍是 C(2,2)=1——「不可比」不剔除该说话人
+}
+
+// TestSimilaritiesMultiSampleTakesMax 多样本取 max：对方三条样本里最高的那个算分，
+// 不是与聚合质心的分（变体不得稀释）。
+func TestSimilaritiesMultiSampleTakesMax(t *testing.T) {
+	h, speakers, emb := setupSimilaritiesAPI(t)
+	ctx := context.Background()
+	a := newSimSpeaker(t, ctx, speakers, emb, "甲", vec3(1, 0, 0))
+	b := newSimSpeaker(t, ctx, speakers, emb, "乙", vec3(0, 1, 0))
+	// 给乙补两条样本：一条与甲正交，一条与甲同向 → max 应取到 1.0
+	if err := emb.Create(ctx, &repo.SpeakerEmbedding{SpeakerID: b, Embedding: simBlob(t, vec3(0, 0, 1)), SampleCount: 1, Source: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := emb.Create(ctx, &repo.SpeakerEmbedding{SpeakerID: b, Embedding: simBlob(t, vec3(1, 0, 0)), SampleCount: 1, Source: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := postSimilarities(t, h, fmt.Sprintf(`{"ids":["%s","%s"]}`, a, b))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Pairs []struct {
+			Similarity *float64 `json:"similarity"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Pairs[0].Similarity == nil || math.Abs(*resp.Pairs[0].Similarity-1) > 1e-6 {
+		t.Fatalf("多样本应取 max=1.0，实为 %v", resp.Pairs[0].Similarity)
+	}
+}
+
+func TestSimilaritiesRequiresEmbeddingsRepo(t *testing.T) {
+	db, err := repo.NewDB(repotest.DSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ids.InitForTest(); err != nil {
+		t.Fatal(err)
+	}
+	// 未装配 SpeakerEmbeddings → 降级 501，与既有 ListEmbeddings 同语义
+	r := chi.NewRouter()
+	RegisterSpeaker(r, &SpeakerHandler{Speakers: &repo.SpeakerRepo{DB: db}, Voiceprint: fakeVoiceprintAPI{}, DataDir: t.TempDir()})
+	rec := postSimilarities(t, r, `{"ids":["1","2"]}`)
+	if rec.Code != 501 {
+		t.Fatalf("未装配 → code=%d want 501", rec.Code)
+	}
+}
+
+// BenchmarkSimilaritiesHandler 佐证端点成本可忽略（CLAUDE.md：性能须有数据）。
+// N=20 说话人 → C(20,2)=190 对，每对各 1 条样本；走测试库，含真实 BLOB 读写。
+func BenchmarkSimilaritiesHandler(b *testing.B) {
+	db, err := repo.NewDB(repotest.DSN(b))
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := ids.InitForTest(); err != nil {
+		b.Fatal(err)
+	}
+	ctx := context.Background()
+	speakers := &repo.SpeakerRepo{DB: db}
+	emb := &repo.SpeakerEmbeddingRepo{DB: db}
+	r := chi.NewRouter()
+	RegisterSpeaker(r, &SpeakerHandler{Speakers: speakers, Voiceprint: fakeVoiceprintAPI{}, DataDir: b.TempDir(), SpeakerEmbeddings: emb})
+	raw := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		sp := &repo.Speaker{Name: fmt.Sprintf("s%d", i), Source: "auto"}
+		if err := speakers.Create(ctx, sp); err != nil {
+			b.Fatal(err)
+		}
+		if err := emb.Create(ctx, &repo.SpeakerEmbedding{SpeakerID: sp.ID, Embedding: simBlob(b, vec3(float32(i%3), float32((i+1)%3), float32((i+2)%3))), SampleCount: 1, Source: "manual"}); err != nil {
+			b.Fatal(err)
+		}
+		raw = append(raw, sp.ID.String())
+	}
+	body := `{"ids":["` + strings.Join(raw, `","`) + `"]}`
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/speakers/similarities", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			b.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+		}
 	}
 }
