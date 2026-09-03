@@ -2362,11 +2362,24 @@ const app = createApp({
       return true;
     }
     // 分档徽标：复用库里既有阈值（0.8 强命中 / 0.72 弱命中下限），不引入新常量。
+    // 阈值抽成具名常量：0.72 在模板里还有两处内联引用（行颜色判定），散落复制会各自漂移。
+    // 注：后端强阈值可由 ZW_VOICEPRINT_THRESHOLD 配置覆盖，JS 取不到，此处为展示用途的近似。
+    const SIM_STRONG = 0.8;   // 强像：对齐 voiceprint 强命中阈值默认值
+    const SIM_WEAK = 0.72;    // 弱像下限：对齐 voiceprint.SoftMin
     function simTier(s) {
       if (s === null || s === undefined) return { cls: '', text: '无法比较（无样本）' };
-      if (s >= 0.8) return { cls: 'done', text: '强像' };
-      if (s >= 0.72) return { cls: 'active', text: '弱像' };
+      if (s >= SIM_STRONG) return { cls: 'done', text: '强像' };
+      if (s >= SIM_WEAK) return { cls: 'weak', text: '弱像' };
       return { cls: 'failed', text: '⚠ 不像，请确认' };
+    }
+    // 相似度是否偏低（< 弱像下限）——行颜色判定用，模板与 simLowCount 共用同一阈值。
+    function isSimLow(s) {
+      return s !== null && s !== undefined && s < SIM_WEAK;
+    }
+    // 相似度偏低（< 弱像下限）的对数——表头汇总用，避免多对时红行被滚出视野。
+    function simLowCount() {
+      if (!spMergeSim.value || !spMergeSim.value.pairs) return 0;
+      return spMergeSim.value.pairs.filter(p => isSimLow(p.similarity)).length;
     }
     // 三态合并：①勾选→开始合并→选目标 → ②第一次点「确认合并」拉相似度并展开表格
     // → ③第二次点「⚠ 仍然合并」才真正发请求。
@@ -3472,7 +3485,7 @@ const app = createApp({
       switchingSpeaker, switchTarget, switchSegCount, startSwitchSpeaker, cancelSwitchSpeaker, commitSwitchSpeaker,
       hasNameCandidates, acceptNameCandidate, dismissNameCandidate,
       showEnrollForm, toggleEnrollForm, expandedSpeakerId, speakerSegments, speakerSegLoading, playingSegId, voiceAudioEl, toggleSpeakerSegments, speakerSegmentsBySession, playSpeakerSegment, onVoiceAudioTimeUpdate, fmtSec,
-      spMergeMode, spMergeSelected, spMergeSelectedSorted, spMergeConfirming, spMergeTarget, spMergeSim, spMergeSimChecked, simTier, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
+      spMergeMode, spMergeSelected, spMergeSelectedSorted, spMergeConfirming, spMergeTarget, spMergeSim, spMergeSimChecked, simTier, isSimLow, simLowCount, startSpMerge, cancelSpMerge, toggleSpSelect, startSpConfirm, applySpMerge,
       reextractingIds, reextractConfirmId, askReextract, cancelReextract, confirmReextract,
       reidentifyingIds, reidentifyConfirmId, askReidentify, cancelReidentify, confirmReidentify,
       recording, recSeconds, uploadInfo, startRec, stopRec, onDrop,

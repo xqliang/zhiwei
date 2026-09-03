@@ -115,6 +115,9 @@
   .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 99px; font-size: var(--fs-xs); font-weight: 500; white-space: nowrap; }
   .badge.pending, .badge.running, .badge.suggested { background: var(--warn-soft); color: var(--warn); }
   .badge.completed, .badge.done, .badge.active, .badge.confirmed { background: var(--ok-soft); color: var(--ok); }
+  /* 「弱像」档：与 .done 同族会全绿、视觉上分不出强弱，故单开一类用 accent-2（青）。
+     与转写段级「与他人相似度 ≥ 0.72」的高亮同色（见下方 voice_matches），语义一致。 */
+  .badge.weak { background: #cffafe; color: var(--accent-2); }
   .badge.failed { background: var(--danger-soft); color: var(--danger); }
   /* 转写段「已修改」徽章：声纹自动纠正的标记（琥珀色，悬停显示原因）——含幽灵历史声纹改判(原判定 X)与过短噪声段并入 */
   .corrected-badge{display:inline-block;align-self:center;flex-shrink:0;margin-left:2px;padding:0 6px;font-size:var(--fs-xs);line-height:18px;color:#8a6d00;background:#fff4d6;border:1px solid #f0d98a;border-radius:9px;cursor:help}
@@ -1669,12 +1672,18 @@
       <div v-if="spMergeSim && (spMergeSim.pairs||[]).length" style="margin-top:10px; border-top:1px solid var(--line); padding-top:8px">
         <div class="muted" style="font-size:var(--fs-xs); margin-bottom:6px">
           两两相似度（{{ spMergeSim.pairs.length }} 对）：
+          <!-- 偏低对数汇总：多对时红行可能被 max-height 滚出视野，先在表头报数 -->
+          <span v-if="simLowCount() > 0" :style="{color:'var(--danger)', fontWeight:600}">· 其中 {{ simLowCount() }} 对偏低</span>
           <span :style="{color:'var(--danger)'}">标红表示两人相似度偏低，请确认是否同一人</span>
+        </div>
+        <!-- 预检失败态：toast 3s 即消失，此处留持久提示，避免用户回来后无从判断预检是否真跑过 -->
+        <div v-if="spMergeSimChecked && !spMergeSim" :style="{fontSize:'var(--fs-xs)', color:'var(--warn)', marginBottom:'6px'}">
+          ⚠ 相似度预检未成功（接口失败），上方无相似度数据——请自行确认这几人是否同一人后再合并。
         </div>
         <div style="display:flex; flex-direction:column; gap:3px; max-height:180px; overflow:auto">
           <div v-for="(p, pi) in spMergeSim.pairs" :key="pi"
                style="display:flex; align-items:center; gap:8px; font-size:var(--fs-xs); flex-wrap:wrap">
-            <span :style="{color: p.similarity !== null && p.similarity !== undefined && p.similarity < 0.72 ? 'var(--danger)' : 'inherit', fontWeight: p.similarity !== null && p.similarity !== undefined && p.similarity < 0.72 ? 600 : 400}">
+            <span :style="{color: isSimLow(p.similarity) ? 'var(--danger)' : 'inherit', fontWeight: isSimLow(p.similarity) ? 600 : 400}">
               {{ p.a_name || p.a_id }} × {{ p.b_name || p.b_id }}
             </span>
             <span style="font-variant-numeric:tabular-nums; color:var(--muted); width:44px; text-align:right">
@@ -2786,6 +2795,6 @@
   </template>
 </div>
 
-<script src="/app/app.8391d47f.js"></script>
+<script src="/app/app.09239e5d.js"></script>
 </body>
 </html>

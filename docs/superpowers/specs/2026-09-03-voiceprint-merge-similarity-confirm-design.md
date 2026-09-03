@@ -30,7 +30,7 @@
 - **⚠ 当前合并无任何二次确认**：`applySpMerge()`（`web/app.js:2343-2356`）一点「确认合并」直接发请求，确认条仅「已选 N 个说话人」+ 目标下拉（`web/index.html:1648-1660`）。
 - **没有 speaker↔speaker 相似度 API**。已有 `POST /api/voiceprint/match`（`speaker.go:114`/handler `:1163`）是「上传音频 vs 全库」，需 sidecar 提向。
 - **向量存储**：`speaker_embedding` 表（`migrations/000016`）一行=一条样本，`embedding LONGBLOB` 256×float32=1024B；Go struct `repo.SpeakerEmbedding`（`speaker_embedding.go:17-26`，`Embedding` 标 `json:"-"` 不外泄）。真实索引在 FAISS sidecar，DB BLOB 是备份/重建源。
-- **可复用的相似度设施**：`decodeEmbedding`（`speaker.go:1268`，BLOB→[]float32，长度须 %4==0）、`cosine`（`speaker.go:1281`，L2 归一向量内积，与 sidecar `IndexFlatIP` 等价）。
+- **可复用的相似度设施**：`decodeEmbedding`（`speaker.go:1268`，BLOB→[]float32，长度须 %4 倍数才认）。余弦内积本在 `speaker.go:1281` 有一份本地 `cosine`，本特性已将其删除、两处调用点改调 Task 1 新增的 `voiceprint.Cosine`（相似度语义收敛为单一事实源）。
 - **可复用的批量取数**：`SpeakerEmbeddingRepo.ListBySpeakers(ctx, ids)`（`speaker_embedding.go:54`）——**已存在**，按说话人分组返回 `map[ids.ID][]SpeakerEmbedding`，缺失 id 自然不进 map。无需新 repo 方法。
 - **阈值常量**（`internal/voiceprint/match.go:12-24`）：`SoftMin=0.72`（弱命中下限）、`GapMin=0.06`、`LooseMin=0.4`/`LooseGap=0.1`；强命中阈值 `ZW_VOICEPRINT_THRESHOLD` 默认 0.8（`internal/config/config.go:158`）。
 - **现有相似度 UI 格式**：表格用 `.toFixed(3)` + 进度条（`web/index.html:1497-1499`），chip 用 `.toFixed(2)`（`web/index.html:675`）；≥0.72 高亮 `--accent-2`（`web/index.html:673`）。
@@ -82,12 +82,18 @@ N=10、每人 10 样本 → C(10,2)=45 对 × 100 次 256 维点积 = 4500 次�
 | ② 第一次点「确认合并」 | 调 `POST /api/speakers/similarities` → 展开相似度表 |
 | ③ 第二次点「⚠ 仍然合并」 | 才发 `POST /api/speakers/merge`（现状逻辑原样） |
 
-- **新 ref**：`spMergeSim = ref(null)`，结构 `{loading, error, pairs}`；`spMergeSimLoaded = ref(false)`。
-- **表格**（`web/index.html`，sticky 卡片内新增）：每行一对 `A × B` + 相似度 `.toFixed(3)` + 分档徽标。**分档复用库里既有阈值，不引入新常量**：
-  - `≥0.8` → `--ok`，徽标「强像」
-  - `0.72~0.8` → `--accent-2`，徽标「弱像」（与 `web/index.html:673` 一致）
-  - `<0.72` → `--danger` 标红，徽标「⚠ 不像，请确认」
-  - `null` → 徽标「无法比较（无样本）」
+- **新 ref**：`spMergeSim = ref(null)`（直接存端点返回的 `{pairs:[...]}`，无 loading/error 字段）；
+  `spMergeSimChecked = ref(false)`——**「已尝试过」语义**（成功或失败都置 true）。⚠ 不可用「Loaded」
+  （仅成功置 true）：预检失败时 flag 永假，用户每次点「确认合并」都重试、永远合并不了，
+  违反本节「失败放行」。分档阈值抽成具名常量 `SIM_STRONG=0.8`/`SIM_WEAK=0.72`（与
+  `voiceprint` 的强阈值默认值/`SoftMin` 对齐；JS 取不到后端 env 配置，此处为展示近似）。
+- **表格**（`web/index.html`，sticky 卡片内新增）：每行一对 `A × B` + 相似度 `.toFixed(3)` + 分档徽标。
+  - **分档配色**：`≥0.8` → `--ok` 绿（`.done`）、`0.72~0.8` → **`--accent-2` 青**（`.weak`，单开一类——
+    复用 `.done` 会全绿、视觉上分不出强弱，与段级「≥0.72 弱命中」高亮同色）、`<0.72` → `--danger` 红
+    （`.failed`）、`null` → 「无法比较（无样本）」。
+  - **表头报数**：`simLowCount()` 汇总「其中 N 对偏低」——多对时红行可能被 `max-height` 滚出视野。
+  - **失败态持久提示**：`spMergeSimChecked && !spMergeSim` 时显示「预检未成功…请自行确认」——
+    toast 仅 3s，消失后状态与「已看过分数」无法区分。
 - **不变量（写进注释守住）**：相似度矩阵**只依赖勾选集合，与谁是 target 无关**。用户在表格展开后改目标下拉，矩阵不重算，仅重标哪行是「源→目标」方向。省一次请求，也少一次等待。
 - **降级**：相似度接口失败（网络错误 / 400 / 404）→ `notify` 提示「相似度预检失败，请自行确认后再合并」并**放行**进入第 ③ 阶段。预检不得成为门禁。
 - **成功后**：仍走 `cancelSpMerge()` → `loadAllSpeakers()` → 按需 `reloadSession()` → toast，现状不变。
@@ -100,7 +106,7 @@ N=10、每人 10 样本 → C(10,2)=45 对 × 100 次 256 维点积 = 4500 次�
 | 相似度接口失败 | toast 提示 + **放行**，允许直接合并 |
 | `ids` <2 个 / 非法 id | 400，前端视为预检失败 → 放行（不阻断合并，与上同） |
 | `SpeakerEmbeddings` 未装配（nil） | **501** `StatusNotImplemented`（与既有 5 处 nil 站点一致） |
-| 勾选集合变化 | 重置 `spMergeSim`/`spMergeSimLoaded`，下次确认时重拉 |
+| 勾选集合变化 | 重置 `spMergeSim`/`spMergeSimChecked`，下次确认时重拉 |
 | 仅改 target（集合不变） | **不重拉**，复用已有矩阵 |
 
 ## 6. 测试
