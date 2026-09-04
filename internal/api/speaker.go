@@ -106,6 +106,7 @@ func RegisterSpeaker(r chi.Router, h *SpeakerHandler) {
 	r.Delete("/api/speakers/{id}", h.Delete)
 	r.Delete("/api/speakers/{id}/name-candidates", h.DeleteNameCandidate) // 忽略单个候选名（建议区 ✕）
 	r.Post("/api/speakers/merge", h.Merge)                                // 声纹页「手动合并」：多说话人并入一个目标（声纹样本累加）
+	r.Post("/api/speakers/similarities", h.Similarities)                  // 合并前相似度预检：两两 max 余弦（只读，不走 sidecar）
 	r.Get("/api/speakers/{id}/segments", h.Segments)                      // 该说话人跨 session 出现的片段（声纹 tab 点开看关联录音）
 	r.Get("/api/speakers/{id}/embeddings", h.ListEmbeddings)              // 多条声纹样本列表（备注/创建时间/来源）
 	r.Post("/api/speakers/{id}/embeddings", h.AddEmbedding)               // 追加一条声纹样本（multipart file+note）
@@ -242,6 +243,104 @@ func (h *SpeakerHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"speakers": withCands})
+}
+
+// Similarities 声纹合并前的相似度预检：返回这组说话人两两之间的最大余弦相似度。
+// 只读、不走 sidecar（向量本体在 DB BLOB，纯 Go 算），失败不阻断合并——前端预检
+// 失败时放行，由用户自行确认（预检是辅助不是门禁）。
+//
+// 语义要点（spec §3/§7）：
+//   - 范围仅限入参 ids 两两之间，不看全库第三人；
+//   - 口径为多向量取 max（voiceprint.MaxCosine），与 Matched/MatchPreview 一致；
+//   - 无样本的说话人不剔除，其全部相似度为 null（行数恒为 C(N_unique,2)）；
+//   - 不做 user 维度过滤——既有 List/Merge/Delete 亦不过滤，保持一致。
+func (h *SpeakerHandler) Similarities(w http.ResponseWriter, r *http.Request) {
+	if h.SpeakerEmbeddings == nil {
+		writeJSONError(w, "多条声纹功能未装配", http.StatusNotImplemented)
+		return
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "请求体非法", http.StatusBadRequest)
+		return
+	}
+	uniq := map[ids.ID]struct{}{}
+	for _, s := range req.IDs {
+		id, err := ids.ParseID(s)
+		if err != nil {
+			writeJSONError(w, "invalid id: "+s, http.StatusBadRequest)
+			return
+		}
+		uniq[id] = struct{}{}
+	}
+	if len(uniq) < 2 {
+		writeJSONError(w, "至少 2 个说话人", http.StatusBadRequest)
+		return
+	}
+	idList := make([]ids.ID, 0, len(uniq))
+	for id := range uniq {
+		idList = append(idList, id)
+	}
+	// 按 id 升序固定生成顺序 → 同一份输入响应稳定，前端可缓存比对
+	sort.Slice(idList, func(i, j int) bool { return idList[i].Int64() < idList[j].Int64() })
+
+	// 名字：一次 List 建映射，不做逐 id N+1。id 不在结果里（已 dismiss/删除）仍参与矩阵，
+	// 名字留空、相似度为 null。List 失败不阻断：名字全空，相似度照算。
+	nameByID := map[ids.ID]string{}
+	if list, err := h.Speakers.List(r.Context()); err == nil {
+		for _, sp := range list {
+			nameByID[sp.ID] = sp.Name
+		}
+	}
+	grouped, err := h.SpeakerEmbeddings.ListBySpeakers(r.Context(), idList)
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// 解码样本向量（一次），无有效样本的 id 不进入 vecs → 其全部相似度为 null
+	vecs := make(map[ids.ID][][]float32, len(idList))
+	for _, id := range idList {
+		rows := grouped[id]
+		if len(rows) == 0 {
+			continue
+		}
+		vs := make([][]float32, 0, len(rows))
+		for _, e := range rows {
+			// 只校验能否解出 float32（decodeEmbedding 已挡长度非 4 倍数的脏 BLOB），
+			// 不硬性要求 256 维：真实向量恒 256 维、Cosine/MaxCosine 亦按较短维防御，
+			// 二者一致；硬编码 256 会把低维向量（如单测用 3 维校验余弦数值）全滤掉。
+			if v, ok := decodeEmbedding(e.Embedding); ok {
+				vs = append(vs, v)
+			}
+		}
+		if len(vs) > 0 {
+			vecs[id] = vs
+		}
+	}
+	type simPair struct {
+		AID        string   `json:"a_id"`
+		BID        string   `json:"b_id"`
+		AName      string   `json:"a_name"`
+		BName      string   `json:"b_name"`
+		Similarity *float64 `json:"similarity"` // null = 一方无样本，不可比
+	}
+	pairs := make([]simPair, 0, len(idList)*(len(idList)-1)/2)
+	for i := 0; i < len(idList); i++ {
+		for j := i + 1; j < len(idList); j++ {
+			a, b := idList[i], idList[j]
+			p := simPair{AID: a.String(), BID: b.String(), AName: nameByID[a], BName: nameByID[b]}
+			if va, ok1 := vecs[a]; ok1 {
+				if vb, ok2 := vecs[b]; ok2 {
+					s := voiceprint.MaxCosine(va, vb)
+					p.Similarity = &s
+				}
+			}
+			pairs = append(pairs, p)
+		}
+	}
+	writeJSON(w, map[string]any{"pairs": pairs})
 }
 
 // attachPersons 为说话人列表原地富化「绑定人物」（person_id/person_name，一次查询避免 N+1）。
@@ -1278,7 +1377,7 @@ func (h *SpeakerHandler) MatchPreview(w http.ResponseWriter, r *http.Request) {
 	for _, lv := range lib {
 		best := 0.0
 		for _, v := range lv.vecs {
-			if s := cosine(vec, v); s > best {
+			if s := voiceprint.Cosine(vec, v); s > best {
 				best = s
 			}
 		}
@@ -1325,20 +1424,6 @@ func decodeEmbedding(blob []byte) ([]float32, bool) {
 		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
 	}
 	return v, true
-}
-
-// cosine 两个 L2 归一化向量的余弦相似度（= 内积）。用于 match 预览对全库算匹配度。
-// 与 sidecar FAISS IndexFlatIP(内积) 等价——BLOB 与索引同向量，结果一致。
-func cosine(a, b []float32) float64 {
-	var s float64
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
-	for i := 0; i < n; i++ {
-		s += float64(a[i]) * float64(b[i])
-	}
-	return s
 }
 
 // voiceMatch 单条相似声纹（top-N 之一）。
@@ -1414,7 +1499,7 @@ func topVoiceMatchesVec(lib []libVoice, vec []float32, n int) []voiceMatch {
 	for _, lv := range lib {
 		best := 0.0
 		for _, v := range lv.vecs {
-			if s := cosine(vec, v); s > best {
+			if s := voiceprint.Cosine(vec, v); s > best {
 				best = s
 			}
 		}
