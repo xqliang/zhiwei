@@ -1,5 +1,5 @@
 data/
-testdata/
+testdata
 bin/
 *.log
 .env
