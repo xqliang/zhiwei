@@ -210,8 +210,13 @@ func TestMemoryListWithTopics(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 必须设 EventAt：List 是 ORDER BY m.event_at DESC + LIMIT 50，MySQL DESC 把 NULL 排最后。
+	// 脏库里已有数十条带 event_at 的记忆时，不设 EventAt 的这条会被挤出前 50 而查不到
+	// （曾致本测试在非干净库上稳定失败「未找到刚插入的 memory」）。
+	// 同文件里其它调 List 并断言具体行的用例（佐证Bump/整理List/整理A记忆）都设了 EventAt。
+	now := time.Now()
 	m := &Memory{Type: "fact", Title: "多主题记忆用例", Content: "足够长的内容描述",
-		EpistemicType: "observed", Confidence: 0.9, SessionID: idPtr(ids.New()), Status: "active"}
+		EpistemicType: "observed", Confidence: 0.9, SessionID: idPtr(ids.New()), EventAt: &now, Status: "active"}
 	if err := mr.InsertExt(ctx, db, []*Memory{m}); err != nil {
 		t.Fatal(err)
 	}
